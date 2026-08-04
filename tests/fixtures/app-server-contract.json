@@ -1,0 +1,155 @@
+{
+  "codexVersion": "0.146.0",
+  "errorExemplars": {
+    "activeTurnMismatch": {
+      "code": -32600,
+      "message": "expected active turn id `00000000-0000-7000-8000-000000000001` but found `turn_session_control_held`"
+    },
+    "threadNotFound": {
+      "code": -32600,
+      "message": "thread not loaded: 00000000-0000-7000-8000-000000000000"
+    }
+  },
+  "schemaSha256": "5dd3854b97c78ed6a11af73988e7a1eca45077d60e4af9403a9dfa085e2465d8",
+  "successfulExemplars": {
+    "activeTurn": {
+      "turn": {
+        "completedAt": null,
+        "durationMs": null,
+        "error": null,
+        "id": "turn_session_control_held",
+        "items": [],
+        "itemsView": "notLoaded",
+        "startedAt": null,
+        "status": "inProgress"
+      }
+    },
+    "goalClear": {
+      "cleared": true
+    },
+    "goalGet": {
+      "goal": {
+        "createdAt": 0,
+        "objective": "fixture objective",
+        "status": "paused",
+        "threadId": "thread_session_control_1",
+        "timeUsedSeconds": 0,
+        "tokenBudget": 1000,
+        "tokensUsed": 0,
+        "updatedAt": 0
+      }
+    },
+    "goalSet": {
+      "goal": {
+        "createdAt": 0,
+        "objective": "fixture objective",
+        "status": "paused",
+        "threadId": "thread_session_control_1",
+        "timeUsedSeconds": 0,
+        "tokenBudget": 1000,
+        "tokensUsed": 0,
+        "updatedAt": 0
+      }
+    },
+    "initialize": {
+      "codexHome": "/tmp/codex-session-control-fixture/home/.codex",
+      "platformFamily": "unix",
+      "platformOs": "linux",
+      "userAgent": "Codex Desktop/0.146.0 (Arch Linux Unknown; x86_64) dumb (codex_session_control; 0.2.0)"
+    },
+    "threadList": {
+      "data": [
+        {
+          "createdAt": 0,
+          "cwd": "/tmp/codex-session-control-fixture/workspace",
+          "forkedFromId": null,
+          "id": "thread_session_control_1",
+          "name": null,
+          "status": {
+            "type": "idle"
+          },
+          "updatedAt": 0
+        }
+      ],
+      "nextCursor": null
+    },
+    "threadRead": {
+      "thread": {
+        "createdAt": 0,
+        "cwd": "/tmp/codex-session-control-fixture/workspace",
+        "forkedFromId": null,
+        "id": "thread_session_control_1",
+        "name": null,
+        "preview": "",
+        "status": {
+          "type": "idle"
+        },
+        "updatedAt": 0
+      }
+    },
+    "threadStart": {
+      "thread": {
+        "createdAt": 0,
+        "cwd": "/tmp/codex-session-control-fixture/workspace",
+        "forkedFromId": null,
+        "id": "thread_session_control_1",
+        "name": null,
+        "preview": "",
+        "status": {
+          "type": "idle"
+        },
+        "updatedAt": 0
+      }
+    },
+    "turnInterrupt": {},
+    "turnStart": {
+      "turn": {
+        "completedAt": null,
+        "durationMs": null,
+        "error": null,
+        "id": "turn_session_control_held",
+        "items": [],
+        "itemsView": "notLoaded",
+        "startedAt": null,
+        "status": "inProgress"
+      }
+    },
+    "turnsList": {
+      "backwardsCursor": "{\"turnId\":\"turn_session_control_held\",\"includeAnchor\":true}",
+      "data": [
+        {
+          "completedAt": 0,
+          "durationMs": 0,
+          "error": null,
+          "id": "turn_session_control_held",
+          "items": [],
+          "itemsView": "notLoaded",
+          "startedAt": 0,
+          "status": "interrupted"
+        },
+        {
+          "completedAt": 0,
+          "durationMs": 0,
+          "error": null,
+          "id": "turn_session_control_2",
+          "items": [],
+          "itemsView": "notLoaded",
+          "startedAt": 0,
+          "status": "completed"
+        },
+        {
+          "completedAt": 0,
+          "durationMs": 0,
+          "error": null,
+          "id": "turn_session_control_1",
+          "items": [],
+          "itemsView": "notLoaded",
+          "startedAt": 0,
+          "status": "completed"
+        }
+      ],
+      "nextCursor": null
+    }
+  },
+  "turnsNewestFirst": true
+}

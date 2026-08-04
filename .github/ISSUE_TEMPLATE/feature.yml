@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest an improvement to Codex Session Control.
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Report security vulnerabilities through the [private security advisory form](https://github.com/agentlehub/codex-session-control/security/advisories/new).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what is blocking you or making it difficult?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe what you want to be able to do and how Codex Session Control should behave.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any workarounds or alternative approaches you considered, if applicable.
+    validations:
+      required: false
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: This request does not include credentials or private session data.
+          required: true

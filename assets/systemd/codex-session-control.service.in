@@ -1,0 +1,16 @@
+[Unit]
+Description=Codex app-server for Codex session control
+
+[Service]
+Type=simple
+UMask=0077
+Environment=CODEX_HOME=__CODEX_HOME__
+RuntimeDirectory=codex-session-control
+RuntimeDirectoryMode=0700
+WorkingDirectory=__USER_HOME__
+ExecStart=__CODEX_EXECUTABLE__ app-server --listen unix://__SOCKET_PATH__
+Restart=on-failure
+RestartSec=2s
+
+[Install]
+WantedBy=default.target

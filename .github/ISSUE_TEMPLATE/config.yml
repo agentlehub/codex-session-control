@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/agentlehub/codex-session-control/security/advisories/new
+    about: Use the private GitHub security advisory form for security reports.

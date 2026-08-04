@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract-x86:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install validation prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binutils jq shellcheck
+
+      - name: Install verified actionlint 1.7.12
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/actionlint_1.7.12_linux_amd64.tar.gz"
+          destination="$RUNNER_TEMP/actionlint-1.7.12"
+          mkdir "$destination"
+          curl --fail --location --connect-timeout 10 --max-time 60 \
+            --output "$archive" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          printf '%s  %s\n' \
+            8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 \
+            "$archive" | sha256sum --check
+          tar --extract --gzip --file "$archive" --directory "$destination" actionlint
+          "$destination/actionlint" -version | grep -x '1\.7\.12'
+          printf '%s\n' "$destination" >> "$GITHUB_PATH"
+
+      - name: Run locked contract gate
+        run: |
+          test_tmp="$RUNNER_TEMP/t"
+          mkdir --mode=0700 "$test_tmp"
+          test "$(stat --format=%F "$test_tmp")" = directory
+          test "$(stat --format=%u "$test_tmp")" = "$(id -u)"
+          test "$(stat --format=%a "$test_tmp")" = 700
+          printf 'TMPDIR=%s\n' "$test_tmp" >> "$GITHUB_ENV"
+          export TMPDIR="$test_tmp"
+          ./scripts/check.sh
+          cargo build --bin codex-session-control --locked
+          binary=target/debug/codex-session-control
+          commands="$("$binary" --help |
+            sed -n '/^Commands:/,/^$/s/^  \([a-z-]*\).*$/\1/p')"
+          expected="$(printf '%s\n' setup update status enable disable uninstall mcp-server codex)"
+          test "$commands" = "$expected"
+
+  systemd-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install systemd-user prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes dbus-user-session jq
+          test -x /usr/bin/loginctl
+          test -x /usr/bin/systemctl
+          test -x /usr/lib/systemd/systemd
+          sudo systemctl is-active --quiet systemd-logind.service
+
+      - name: Run the disposable systemd-user contract
+        shell: bash
+        run: bash scripts/ci/disposable-systemd-user-contract.sh
+
+  contract-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install native validation prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binutils jq shellcheck
+
+      - name: Run architecture-independent contracts
+        run: |
+          test_tmp="$RUNNER_TEMP/t"
+          mkdir --mode=0700 "$test_tmp"
+          test "$(stat --format=%F "$test_tmp")" = directory
+          test "$(stat --format=%u "$test_tmp")" = "$(id -u)"
+          test "$(stat --format=%a "$test_tmp")" = 700
+          printf 'TMPDIR=%s\n' "$test_tmp" >> "$GITHUB_ENV"
+          export TMPDIR="$test_tmp"
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test --workspace --all-features --locked
+          cargo test --test mcp_contract --locked
+          cargo test --test cli_contract installer --locked
+          shellcheck install.sh
+          bash -n install.sh
+          jq empty assets/marketplace/.agents/plugins/marketplace.json
+          jq empty assets/marketplace/plugins/codex-session-control/.codex-plugin/plugin.json
+          jq empty assets/marketplace/plugins/codex-session-control/.mcp.json
+
+      - name: Build and inspect the native ARM64 executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked
+          binary=target/release/codex-session-control
+          "$binary" --version | grep -E \
+            '^codex-session-control [0-9]+\.[0-9]+\.[0-9]+ \(aarch64-unknown-linux-gnu\)$'
+          commands="$("$binary" --help |
+            sed -n '/^Commands:/,/^$/s/^  \([a-z-]*\).*$/\1/p')"
+          expected="$(printf '%s\n' setup update status enable disable uninstall mcp-server codex)"
+          test "$commands" = "$expected"
+          file "$binary" | grep -E 'ELF 64-bit.*(ARM aarch64|aarch64)'
+          readelf --file-header "$binary" | grep -E 'Machine:.*AArch64'

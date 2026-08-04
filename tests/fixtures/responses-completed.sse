@@ -1,0 +1,17 @@
+data: {"type":"response.created","sequence_number":0,"response":{"id":"resp_session_control_1","object":"response","created_at":0,"status":"in_progress"}}
+
+data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"msg_session_control_1","type":"message","status":"in_progress","role":"assistant","content":[]}}
+
+data: {"type":"response.content_part.added","sequence_number":2,"item_id":"msg_session_control_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":""}}
+
+data: {"type":"response.output_text.delta","sequence_number":3,"item_id":"msg_session_control_1","output_index":0,"content_index":0,"delta":"fixture-complete"}
+
+data: {"type":"response.output_text.done","sequence_number":4,"item_id":"msg_session_control_1","output_index":0,"content_index":0,"text":"fixture-complete"}
+
+data: {"type":"response.content_part.done","sequence_number":5,"item_id":"msg_session_control_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"fixture-complete"}}
+
+data: {"type":"response.output_item.done","sequence_number":6,"output_index":0,"item":{"id":"msg_session_control_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"fixture-complete"}]}}
+
+data: {"type":"response.completed","sequence_number":7,"response":{"id":"resp_session_control_1","object":"response","created_at":0,"status":"completed","output":[{"id":"msg_session_control_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"fixture-complete"}]}],"usage":{"input_tokens":0,"input_tokens_details":{"cached_tokens":0},"output_tokens":1,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":1}}}
+
+data: [DONE]

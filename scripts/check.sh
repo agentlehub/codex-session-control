@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$script_dir/.."
+
+missing_tools=()
+for tool in bash sh cargo rustc shellcheck jq actionlint; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    missing_tools+=("$tool")
+  fi
+done
+
+if [ "${#missing_tools[@]}" -gt 0 ]; then
+  printf '%s\n' 'Missing required tools:' >&2
+  printf '  %s\n' "${missing_tools[@]}" >&2
+  exit 1
+fi
+
+preflight_failed=0
+printf '%s\n' 'Checking Rust formatter...'
+if ! cargo fmt --version; then
+  printf '%s\n' 'Rust formatter is unavailable: cargo fmt --version failed.' >&2
+  preflight_failed=1
+fi
+printf '%s\n' 'Checking Rust Clippy...'
+if ! cargo clippy --version; then
+  printf '%s\n' 'Rust Clippy is unavailable: cargo clippy --version failed.' >&2
+  preflight_failed=1
+fi
+if [ "$preflight_failed" -ne 0 ]; then
+  exit 1
+fi
+
+printf '%s\n' 'Checking actionlint version...'
+if ! actionlint -version | grep -x '1\.7\.12'; then
+  printf '%s\n' 'actionlint 1.7.12 is required.' >&2
+  exit 1
+fi
+
+printf '%s\n' 'Checking Rust formatting...'
+cargo fmt --all -- --check
+
+printf '%s\n' 'Checking shell scripts...'
+shellcheck install.sh scripts/check.sh scripts/ci/disposable-systemd-user-contract.sh
+
+printf '%s\n' 'Checking POSIX shell syntax...'
+sh -n install.sh
+
+printf '%s\n' 'Checking wrapper Bash syntax...'
+bash -n scripts/check.sh
+printf '%s\n' 'Checking systemd-contract Bash syntax...'
+bash -n scripts/ci/disposable-systemd-user-contract.sh
+
+printf '%s\n' 'Checking workflow syntax...'
+actionlint .github/workflows/ci.yml \
+  .github/workflows/release.yml \
+  .github/workflows/publish.yml
+
+printf '%s\n' 'Checking marketplace manifest JSON...'
+jq empty assets/marketplace/.agents/plugins/marketplace.json
+
+printf '%s\n' 'Checking plugin manifest JSON...'
+jq empty assets/marketplace/plugins/codex-session-control/.codex-plugin/plugin.json
+
+printf '%s\n' 'Checking MCP manifest JSON...'
+jq empty assets/marketplace/plugins/codex-session-control/.mcp.json
+
+printf '%s\n' 'Checking Rust lints...'
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+printf '%s\n' 'Running Rust tests...'
+cargo test --workspace --all-features --locked
+
+printf '%s\n' 'All checks passed.'

@@ -1,0 +1,59 @@
+name: Bug report
+description: Report a reproducible problem in Codex Session Control.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security vulnerabilities here. Use the [private security advisory form](https://github.com/agentlehub/codex-session-control/security/advisories/new).
+  - type: input
+    id: version
+    attributes:
+      label: Codex Session Control version
+      description: Paste the output of `codex-session-control --version`.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include your Linux distribution, CPU architecture, Codex CLI version, and how you use Codex Session Control.
+      placeholder: |
+        Linux distribution:
+        CPU architecture:
+        Codex CLI version:
+        How you use Codex Session Control (MCP, codex-session-control codex, Desktop, or other):
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Status output
+      description: Run `codex-session-control status` and paste the complete output. Remove private paths and session data.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide the shortest sequence of steps that reproduces the problem. Remove secrets and private session data.
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and relevant output
+      description: Redact tokens, credentials, private paths, and session content.
+    validations:
+      required: true

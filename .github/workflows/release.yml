@@ -1,0 +1,204 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Install validation prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binutils jq shellcheck
+
+      - name: Install verified actionlint 1.7.12
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/actionlint_1.7.12_linux_amd64.tar.gz"
+          destination="$RUNNER_TEMP/actionlint-1.7.12"
+          mkdir "$destination"
+          curl --fail --location --connect-timeout 10 --max-time 60 \
+            --output "$archive" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          printf '%s  %s\n' \
+            8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 \
+            "$archive" | sha256sum --check
+          tar --extract --gzip --file "$archive" --directory "$destination" actionlint
+          "$destination/actionlint" -version | grep -x '1\.7\.12'
+          printf '%s\n' "$destination" >> "$GITHUB_PATH"
+
+      - name: Require the tag, manifest, and executable versions to agree
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_version="$(cargo metadata --no-deps --format-version 1 --locked |
+            jq -r '.packages[] | select(.name == "codex-session-control") | .version')"
+          test "$GITHUB_REF_NAME" = "v$cargo_version"
+          binary_version="$(cargo run --quiet --locked -- --version)"
+          test "$(printf '%s\n' "$binary_version" | awk '{print $2}')" = "$cargo_version"
+
+      - name: Run the same-commit locked validation gate
+        run: |
+          ./scripts/check.sh
+
+  build-x86:
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install native inspection prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binutils file
+
+      - name: Build, execute, and inspect x86-64
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked
+          cargo test --test cli_contract installer --locked
+          binary=target/release/codex-session-control
+          "$binary" --version | grep -E \
+            '^codex-session-control [0-9]+\.[0-9]+\.[0-9]+ \(x86_64-unknown-linux-gnu\)$'
+          commands="$("$binary" --help |
+            sed -n '/^Commands:/,/^$/s/^  \([a-z-]*\).*$/\1/p')"
+          expected="$(printf '%s\n' setup update status enable disable uninstall mcp-server codex)"
+          test "$commands" = "$expected"
+          file "$binary" | grep -E 'ELF 64-bit.*x86-64'
+          readelf --file-header "$binary" | grep -E 'Machine:.*Advanced Micro Devices X86-64'
+          mkdir artifact
+          install --mode 0755 "$binary" \
+            artifact/codex-session-control-x86_64-unknown-linux-gnu
+
+      - name: Upload the immutable x86-64 binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: binary-x86-${{ github.sha }}
+          path: artifact/codex-session-control-x86_64-unknown-linux-gnu
+          if-no-files-found: error
+          retention-days: 1
+
+  build-arm64:
+    needs: validate
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install native inspection prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binutils file
+
+      - name: Build, execute, and inspect ARM64
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked
+          cargo test --test cli_contract installer --locked
+          binary=target/release/codex-session-control
+          "$binary" --version | grep -E \
+            '^codex-session-control [0-9]+\.[0-9]+\.[0-9]+ \(aarch64-unknown-linux-gnu\)$'
+          commands="$("$binary" --help |
+            sed -n '/^Commands:/,/^$/s/^  \([a-z-]*\).*$/\1/p')"
+          expected="$(printf '%s\n' setup update status enable disable uninstall mcp-server codex)"
+          test "$commands" = "$expected"
+          file "$binary" | grep -E 'ELF 64-bit.*(ARM aarch64|aarch64)'
+          readelf --file-header "$binary" | grep -E 'Machine:.*AArch64'
+          mkdir artifact
+          install --mode 0755 "$binary" \
+            artifact/codex-session-control-aarch64-unknown-linux-gnu
+
+      - name: Upload the immutable ARM64 binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: binary-arm64-${{ github.sha }}
+          path: artifact/codex-session-control-aarch64-unknown-linux-gnu
+          if-no-files-found: error
+          retention-days: 1
+
+  assemble:
+    needs:
+      - validate
+      - build-x86
+      - build-arm64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download the immutable x86-64 binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: binary-x86-${{ github.sha }}
+          path: downloaded/x86
+
+      - name: Download the immutable ARM64 binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: binary-arm64-${{ github.sha }}
+          path: downloaded/arm64
+
+      - name: Assemble and validate exactly four release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir release
+          install --mode 0755 \
+            downloaded/x86/codex-session-control-x86_64-unknown-linux-gnu \
+            release/codex-session-control-x86_64-unknown-linux-gnu
+          install --mode 0755 \
+            downloaded/arm64/codex-session-control-aarch64-unknown-linux-gnu \
+            release/codex-session-control-aarch64-unknown-linux-gnu
+          install --mode 0644 install.sh release/install.sh
+
+          actual_before="$(find release -mindepth 1 -maxdepth 1 -type f -printf '%f\n' | sort)"
+          expected_before="$(printf '%s\n' \
+            codex-session-control-aarch64-unknown-linux-gnu \
+            codex-session-control-x86_64-unknown-linux-gnu \
+            install.sh)"
+          test "$actual_before" = "$expected_before"
+
+          (
+            cd release
+            sha256sum \
+              codex-session-control-aarch64-unknown-linux-gnu \
+              codex-session-control-x86_64-unknown-linux-gnu > SHA256SUMS
+          )
+
+          cargo test --test cli_contract --locked -- --list |
+            grep -q '^release_assets: test$'
+          CODEX_SESSION_CONTROL_RELEASE_DIR="$PWD/release" \
+            cargo test --test cli_contract release_assets --locked -- --nocapture \
+            2>&1 | tee "$RUNNER_TEMP/release-assets.log"
+          grep -q 'validated release bundle:' "$RUNNER_TEMP/release-assets.log"
+          if grep -q 'skipped release bundle:' "$RUNNER_TEMP/release-assets.log"; then
+            printf '%s\n' "release bundle contract skipped unexpectedly" >&2
+            exit 1
+          fi
+
+      - name: Upload the immutable release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-bundle-${{ github.sha }}
+          path: release
+          if-no-files-found: error
+          retention-days: 7
