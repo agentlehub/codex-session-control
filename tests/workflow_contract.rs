@@ -5,8 +5,14 @@ use std::path::Path;
 const CHECKOUT_SHA: &str = "3d3c42e5aac5ba805825da76410c181273ba90b1";
 const CHECKOUT_REFERENCE: &str =
     "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1";
-const UPLOAD_ARTIFACT_SHA: &str = "ea165f8d65b6e75b540449e92b4886f43607fa02";
-const DOWNLOAD_ARTIFACT_SHA: &str = "d3f86a106a0bac45b974a628896c90dbdf5c8093";
+const UPLOAD_ARTIFACT_SHA: &str = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a";
+const UPLOAD_ARTIFACT_REFERENCE: &str =
+    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1";
+const DOWNLOAD_ARTIFACT_SHA: &str = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c";
+const DOWNLOAD_ARTIFACT_USE: &str =
+    "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c";
+const DOWNLOAD_ARTIFACT_REFERENCE: &str =
+    "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1";
 
 fn workflow(name: &str) -> String {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -318,7 +324,7 @@ fn verify_job_is_read_only_and_binds_the_source() {
     assert_required(
         download,
         &[
-            "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+            DOWNLOAD_ARTIFACT_USE,
             r#"artifact-ids: ${{ steps.bind.outputs.artifact_id }}"#,
             r#"run-id: ${{ inputs.source_run_id }}"#,
             r#"repository: ${{ github.repository }}"#,
@@ -429,7 +435,7 @@ fn publish_job_reverifies_after_approval_and_publishes_once() {
     assert_required(
         download,
         &[
-            "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+            DOWNLOAD_ARTIFACT_USE,
             r#"artifact-ids: ${{ needs.verify.outputs.artifact_id }}"#,
             r#"run-id: ${{ inputs.source_run_id }}"#,
             r#"repository: ${{ github.repository }}"#,
@@ -579,6 +585,8 @@ fn publication_workflows_never_mutate_tags_or_replace_releases() {
 #[test]
 fn all_workflow_actions_are_commit_pinned() {
     let mut checkout_count = 0;
+    let mut upload_artifact_count = 0;
+    let mut download_artifact_count = 0;
     for name in ["ci.yml", "release.yml", "publish.yml"] {
         let workflow = workflow(name);
         for line in workflow.lines() {
@@ -609,8 +617,22 @@ fn all_workflow_actions_are_commit_pinned() {
                     );
                     CHECKOUT_SHA
                 }
-                "actions/upload-artifact" => UPLOAD_ARTIFACT_SHA,
-                "actions/download-artifact" => DOWNLOAD_ARTIFACT_SHA,
+                "actions/upload-artifact" => {
+                    upload_artifact_count += 1;
+                    assert_eq!(
+                        reference, UPLOAD_ARTIFACT_REFERENCE,
+                        "{name} uses an unexpected upload-artifact reference"
+                    );
+                    UPLOAD_ARTIFACT_SHA
+                }
+                "actions/download-artifact" => {
+                    download_artifact_count += 1;
+                    assert_eq!(
+                        reference, DOWNLOAD_ARTIFACT_REFERENCE,
+                        "{name} uses an unexpected download-artifact reference"
+                    );
+                    DOWNLOAD_ARTIFACT_SHA
+                }
                 _ => panic!("{name} uses an unapproved action: {action}"),
             };
             assert_eq!(
@@ -622,6 +644,14 @@ fn all_workflow_actions_are_commit_pinned() {
     assert_eq!(
         checkout_count, 8,
         "CI, release, and publish workflows must contain exactly eight checkout actions"
+    );
+    assert_eq!(
+        upload_artifact_count, 3,
+        "release must contain exactly three upload-artifact actions"
+    );
+    assert_eq!(
+        download_artifact_count, 4,
+        "release and publish must contain exactly four download-artifact actions"
     );
 }
 
