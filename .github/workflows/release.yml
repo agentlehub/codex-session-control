@@ -94,7 +94,7 @@ jobs:
             artifact/codex-session-control-x86_64-unknown-linux-gnu
 
       - name: Upload the immutable x86-64 binary
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binary-x86-${{ github.sha }}
           path: artifact/codex-session-control-x86_64-unknown-linux-gnu
@@ -134,7 +134,7 @@ jobs:
             artifact/codex-session-control-aarch64-unknown-linux-gnu
 
       - name: Upload the immutable ARM64 binary
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binary-arm64-${{ github.sha }}
           path: artifact/codex-session-control-aarch64-unknown-linux-gnu
@@ -203,7 +203,7 @@ jobs:
           fi
 
       - name: Upload the immutable release bundle
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-bundle-${{ github.sha }}
           path: release
