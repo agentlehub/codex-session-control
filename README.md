@@ -2,6 +2,21 @@
 
 Codex Session Control lets MCP clients create, inspect, message, and manage your Codex sessions. It runs locally under your Linux account and uses your Codex installation and configuration. MCP clients, Codex CLI, and compatible Desktop builds can connect to the same local service and work with the same sessions.
 
+## Why this exists
+
+Codex can delegate work to subagents, but its native tools for coordinating independent sessions, especially across Desktop and CLI, are limited. Desktop’s built-in tools cannot manage session goals, regular Desktop and CLI instances do not share live task control, and `codex exec` is better suited to individual non-interactive runs than ongoing coordination.
+
+Codex Session Control provides one MCP interface for managing live Codex sessions. Clients can create workers, inspect progress, wait for updates, send follow-ups, manage goals, and interrupt active responses. Attached CLI sessions, supported Desktop builds, and other MCP clients all work with the same sessions.
+
+This enables two powerful workflows:
+
+- **Orchestrator:** delegate work across multiple sessions, coordinate their progress, and combine their results.
+- **Supervisor:** monitor long-running sessions, periodically check their work, and intervene only when necessary.
+
+Workers can be ordinary Codex sessions rather than native subagents. This keeps them visible and easy to inspect, and supports model combinations that native spawning cannot currently use. For example, a Sol or Terra controller can manage a Luna worker.
+
+All of this is possible through the underlying Codex app-server, but integrating with that protocol directly is cumbersome. Codex Session Control handles those details and exposes a simpler interface designed for agents.
+
 ## Install
 
 Requirements:
