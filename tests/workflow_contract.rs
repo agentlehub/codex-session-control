@@ -58,6 +58,17 @@ fn named_step_block<'a>(job: &'a str, name: &str) -> &'a str {
     block_at_indent(job, &format!("- name: {name}"), 6)
 }
 
+fn run_script_prefix_before<'a>(step: &'a str, command: &str) -> &'a str {
+    let script = step
+        .split_once("        run: |\n")
+        .unwrap_or_else(|| panic!("step has no multiline run script: {step}"))
+        .1;
+    script
+        .split_once(command)
+        .unwrap_or_else(|| panic!("step does not run {command}: {step}"))
+        .0
+}
+
 fn named_steps(job: &str) -> Vec<&str> {
     job.lines()
         .filter_map(|line| {
@@ -688,6 +699,24 @@ fn shared_native_x86_and_release_validation_use_standard_checks() {
             &format!("{name} actionlint gate"),
         );
     }
+}
+
+#[test]
+fn release_validation_reuses_ci_private_temporary_directory_preflight() {
+    let ci = workflow("ci.yml");
+    let release = workflow("release.yml");
+    let ci_validation =
+        named_step_block(job_block(&ci, "contract-x86"), "Run locked contract gate");
+    let release_validation = named_step_block(
+        job_block(&release, "validate"),
+        "Run the same-commit locked validation gate",
+    );
+
+    assert_eq!(
+        run_script_prefix_before(release_validation, "./scripts/check.sh"),
+        run_script_prefix_before(ci_validation, "./scripts/check.sh"),
+        "release validation must reuse CI's private temporary-directory preflight",
+    );
 }
 
 #[test]
