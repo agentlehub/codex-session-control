@@ -50,12 +50,12 @@ fn valid_config(paths: &ResolvedUserPaths, home: &Path) -> String {
 fn valid_manifest(paths: &ResolvedUserPaths, home: &Path) -> serde_json::Value {
     serde_json::json!({
         "schemaVersion": 2,
-        "productVersion": "0.2.0",
+        "productVersion": env!("CARGO_PKG_VERSION"),
         "target": test_target(),
         "binarySha256": "a".repeat(64),
         "serviceUnitSha256": "b".repeat(64),
         "projectionSha256": "c".repeat(64),
-        "pluginVersion": "0.2.0",
+        "pluginVersion": env!("CARGO_PKG_VERSION"),
         "codexExecutable": "/usr/bin/codex",
         "codexVersion": "0.146.0",
         "codexHome": home,

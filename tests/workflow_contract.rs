@@ -835,6 +835,20 @@ fn disposable_ci_owns_complete_normal_home_composition() {
         ],
         "disposable normal-home transaction",
     );
+    assert_required(
+        &transaction,
+        &[
+            "controller_version=\"$(\"$controller_executable\" --version)\"",
+            "test \"$(sudo -u \"$user\" \"$controller_binary\" --version)\" = \"$controller_version\"",
+        ],
+        "disposable controller version contract",
+    );
+    assert!(
+        !transaction
+            .lines()
+            .any(|line| line.contains("grep -x 'codex-session-control ")),
+        "disposable integration must not pin a product release version"
+    );
 
     let native_probe = r#"sudo install --directory --owner "$user" --group "$user" --mode 0700 \
   "$probe_home"

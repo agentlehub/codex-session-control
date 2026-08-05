@@ -459,7 +459,8 @@ exit "$status"
     write_executable_fixture(
         &update_candidate,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'codex-session-control 0.2.0 ({})\\n'; exit 0; fi\nexit 64\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'codex-session-control {} ({})\\n'; exit 0; fi\nexit 64\n",
+            env!("CARGO_PKG_VERSION"),
             product_target()
         ),
     );

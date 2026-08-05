@@ -781,12 +781,12 @@ unknown = true
     fn installed_release_rejects_malformed_retained_release_identity() {
         let valid = json!({
             "schemaVersion": 2,
-            "productVersion": "0.2.0",
+            "productVersion": env!("CARGO_PKG_VERSION"),
             "target": "x86_64-unknown-linux-gnu",
             "binarySha256": "a".repeat(64),
             "serviceUnitSha256": "b".repeat(64),
             "projectionSha256": "c".repeat(64),
-            "pluginVersion": "0.2.0",
+            "pluginVersion": env!("CARGO_PKG_VERSION"),
             "codexExecutable": "/usr/bin/codex",
             "codexVersion": "0.145.0",
             "codexHome": "/home/test/.codex",
@@ -873,12 +873,12 @@ unknown = true
         fn schema_two_manifest_requires_explicit_nullable_desktop_attachment() {
             let manifest = json!({
                 "schemaVersion": 2,
-                "productVersion": "0.2.0",
+                "productVersion": env!("CARGO_PKG_VERSION"),
                 "target": "x86_64-unknown-linux-gnu",
                 "binarySha256": "a".repeat(64),
                 "serviceUnitSha256": "b".repeat(64),
                 "projectionSha256": "c".repeat(64),
-                "pluginVersion": "0.2.0",
+                "pluginVersion": env!("CARGO_PKG_VERSION"),
                 "codexExecutable": "/usr/bin/codex",
                 "codexVersion": "0.145.0",
                 "codexHome": SELECTED_HOME,
@@ -901,12 +901,12 @@ unknown = true
         fn desktop_attachment_is_strict_and_path_safe() {
             let valid = json!({
                 "schemaVersion": 2,
-                "productVersion": "0.2.0",
+                "productVersion": env!("CARGO_PKG_VERSION"),
                 "target": "x86_64-unknown-linux-gnu",
                 "binarySha256": "a".repeat(64),
                 "serviceUnitSha256": "b".repeat(64),
                 "projectionSha256": "c".repeat(64),
-                "pluginVersion": "0.2.0",
+                "pluginVersion": env!("CARGO_PKG_VERSION"),
                 "codexExecutable": "/usr/bin/codex",
                 "codexVersion": "0.145.0",
                 "codexHome": SELECTED_HOME,
