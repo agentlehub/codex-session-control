@@ -43,6 +43,10 @@ fn only_exact_fixture_error_exemplars_receive_special_categories() {
         ToolErrorCategory::NativeError
     );
     assert_eq!(
+        classify_fixture_error("thread/metadata/update", missing, fixture),
+        ToolErrorCategory::NativeError
+    );
+    assert_eq!(
         native_error(
             "thread_read",
             "thread/read",

@@ -245,6 +245,45 @@ pub(super) async fn set_title(
     Ok(BTreeMap::new())
 }
 
+pub(super) async fn set_pin(
+    client: &AppServerClient,
+    connection: &mut AppServerConnection,
+    input: ThreadPinSetInput,
+) -> Result<ThreadPinSetResult, ToolErrorData> {
+    let thread_id = input
+        .thread_id
+        .ok_or_else(|| malformed_result("thread_pin_set", "validation"))?;
+    let response = mutation_request(
+        client,
+        connection,
+        "thread_pin_set",
+        "thread/metadata/update",
+        json!({"threadId": thread_id, "isPinned": input.pinned}),
+        Some(&thread_id),
+        None,
+        Reconciliation::CompactThreadRead {
+            thread_id: thread_id.clone(),
+        },
+    )
+    .await?;
+    let thread = response
+        .get("thread")
+        .ok_or_else(|| malformed_result("thread_pin_set", "thread/metadata/update"))?;
+    let returned_thread_id =
+        native_required_string(thread, "id", "thread_pin_set", "thread/metadata/update")?;
+    if returned_thread_id != thread_id {
+        return Err(malformed_result("thread_pin_set", "thread/metadata/update"));
+    }
+    let pinned = thread
+        .get("isPinned")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| malformed_result("thread_pin_set", "thread/metadata/update"))?;
+    Ok(ThreadPinSetResult {
+        thread_id: returned_thread_id,
+        pinned,
+    })
+}
+
 pub(super) async fn set_goal(
     client: &AppServerClient,
     connection: &mut AppServerConnection,

@@ -6,7 +6,7 @@ Codex Session Control lets MCP clients create, inspect, message, and manage your
 
 Codex can delegate work to subagents, but its native tools for coordinating independent sessions, especially across Desktop and CLI, are limited. Desktop’s built-in tools cannot manage session goals, regular Desktop and CLI instances do not share live task control, and `codex exec` is better suited to individual non-interactive runs than ongoing coordination.
 
-Codex Session Control provides one MCP interface for managing live Codex sessions. Clients can create workers, inspect progress, wait for updates, send follow-ups, manage goals, and interrupt active responses. Attached CLI sessions, supported Desktop builds, and other MCP clients all work with the same sessions.
+Codex Session Control provides one MCP interface for managing live Codex sessions. Clients can create workers, inspect progress, wait for updates, send follow-ups, pin sessions, manage goals, and interrupt active responses. Attached CLI sessions, supported Desktop builds, and other MCP clients all work with the same sessions.
 
 This enables two powerful workflows:
 
@@ -79,6 +79,7 @@ Available commands:
 | `threads_wait` | Wait for changes across multiple sessions. |
 | `thread_message_send` | Send a message to a session. |
 | `thread_title_set` | Rename a session. |
+| `thread_pin_set` | Pin or unpin a session. |
 | `thread_goal_get` | Read a session's goal. |
 | `thread_goal_set` | Set or replace a session's goal. |
 | `thread_goal_pause` | Pause a session's goal. |

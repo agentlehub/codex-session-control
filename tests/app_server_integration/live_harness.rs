@@ -23,7 +23,7 @@ use crate::normal_home_paths::{CONFIG_TEMPLATE, DisposablePaths, atomic_write};
 use crate::protocol_support::{NativeConnection, ResponsesEndpoint};
 
 pub(super) const EXPECTED_CODEX_VERSION: &str = "codex-cli 0.146.0";
-pub(super) const SESSION_CONTROL_TOOLS: [&str; 13] = [
+pub(super) const SESSION_CONTROL_TOOLS: [&str; 14] = [
     "thread_create",
     "thread_fork",
     "threads_list",
@@ -31,6 +31,7 @@ pub(super) const SESSION_CONTROL_TOOLS: [&str; 13] = [
     "threads_wait",
     "thread_message_send",
     "thread_title_set",
+    "thread_pin_set",
     "thread_goal_get",
     "thread_goal_set",
     "thread_goal_pause",

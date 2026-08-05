@@ -55,7 +55,7 @@ CLI and MCP work without Desktop integration. Desktop support requires a verifie
 
 Updates that do not require a restart are applied without interrupting the service. If an update fails, Codex Session Control reports which steps completed and shows a command to retry. It does not undo completed changes automatically.
 
-Plugin changes apply to new sessions. Already-open sessions may continue using cached tools.
+MCP tool catalog changes apply to new sessions. Already-open sessions may continue using cached tools.
 
 ## MCP connections
 
