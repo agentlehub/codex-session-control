@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     ffi::OsString,
     fs,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -307,6 +307,38 @@ async fn override_and_launcher_validation_require_a_direct_owner_executable_not_
     ));
     assert!(validate_launcher(&root.path().join("missing")).is_err());
     assert!(validate_launcher(root.path()).is_err());
+}
+
+#[test]
+fn launcher_validation_accepts_a_safe_root_owned_executable() {
+    let launcher = Path::new("/bin/sh");
+    let metadata = fs::metadata(launcher).unwrap();
+    assert_eq!(metadata.uid(), 0, "test fixture must be root-owned");
+    assert_ne!(
+        metadata.mode() & 0o001,
+        0,
+        "test fixture must be executable by ordinary users"
+    );
+
+    assert_eq!(
+        validate_launcher(launcher).unwrap(),
+        fs::canonicalize(launcher).unwrap()
+    );
+}
+
+#[test]
+fn launcher_validation_rejects_group_or_world_writable_executables() {
+    let root = tempfile::tempdir().unwrap();
+    let launcher = root.path().join("launcher");
+    write_executable_fixture(&launcher, "#!/bin/sh\nexit 0\n");
+
+    for mode in [0o720, 0o702] {
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(mode)).unwrap();
+        assert!(
+            validate_launcher(&launcher).is_err(),
+            "launcher mode {mode:o} must be rejected"
+        );
+    }
 }
 
 #[tokio::test]

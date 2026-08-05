@@ -234,7 +234,7 @@ fn resolve_launcher(
         }
     }
     Err(DiscoveryFailure::unavailable(
-        "Desktop launcher is not an owner-owned executable",
+        "Desktop launcher is not a safe user- or root-owned executable",
     ))
 }
 
@@ -249,20 +249,15 @@ pub(super) fn validate_launcher(path: &Path) -> Result<PathBuf, DiscoveryFailure
     validate_launcher_ancestor_chain(&resolved)?;
     let metadata = fs::symlink_metadata(&resolved)
         .map_err(|_| DiscoveryFailure::unavailable("Desktop launcher cannot be inspected"))?;
-    if !metadata.file_type().is_file()
-        || metadata.uid() != effective_uid()
-        || metadata.mode() & 0o100 == 0
-    {
+    if !launcher_metadata_is_safe(&metadata) {
         return Err(DiscoveryFailure::unavailable(
-            "Desktop launcher is not an owner-owned executable",
+            "Desktop launcher is not a safe user- or root-owned executable",
         ));
     }
     validate_launcher_ancestor_chain(&resolved)?;
     let post_validation = fs::symlink_metadata(&resolved)
         .map_err(|_| DiscoveryFailure::unavailable("Desktop launcher cannot be revalidated"))?;
-    if !post_validation.file_type().is_file()
-        || post_validation.uid() != effective_uid()
-        || post_validation.mode() & 0o100 == 0
+    if !launcher_metadata_is_safe(&post_validation)
         || post_validation.dev() != metadata.dev()
         || post_validation.ino() != metadata.ino()
     {
@@ -271,6 +266,18 @@ pub(super) fn validate_launcher(path: &Path) -> Result<PathBuf, DiscoveryFailure
         ));
     }
     Ok(resolved)
+}
+
+fn launcher_metadata_is_safe(metadata: &fs::Metadata) -> bool {
+    if !metadata.file_type().is_file() {
+        return false;
+    }
+    let owner_uid = metadata.uid();
+    let mode = metadata.mode();
+    if mode & 0o022 != 0 {
+        return false;
+    }
+    (owner_uid == effective_uid() && mode & 0o100 != 0) || (owner_uid == 0 && mode & 0o001 != 0)
 }
 
 fn validate_launcher_ancestor_chain(launcher_path: &Path) -> Result<(), DiscoveryFailure> {
