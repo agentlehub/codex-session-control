@@ -14,7 +14,7 @@ pub(super) const INSTRUCTIONS: &str = "These tools inspect and control Codex thr
 pub(super) const DEFAULT_WAIT_TIMEOUT_MS: u64 = 3_600_000;
 pub(super) const MAX_WAIT_TIMEOUT_MS: u64 = 86_400_000;
 
-pub(super) const TOOL_EFFECTS: [(&str, bool, bool); 13] = [
+pub(super) const TOOL_EFFECTS: [(&str, bool, bool); 14] = [
     ("thread_create", false, false),
     ("thread_fork", false, false),
     ("threads_list", true, false),
@@ -22,6 +22,7 @@ pub(super) const TOOL_EFFECTS: [(&str, bool, bool); 13] = [
     ("threads_wait", true, false),
     ("thread_message_send", false, false),
     ("thread_title_set", false, false),
+    ("thread_pin_set", false, false),
     ("thread_goal_get", true, false),
     ("thread_goal_set", false, false),
     ("thread_goal_pause", false, false),
@@ -185,6 +186,21 @@ pub(super) struct ThreadTitleSetResult {}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct ThreadPinSetInput {
+    /// Omit to target the current thread.
+    pub(super) thread_id: Option<String>,
+    pub(super) pinned: bool,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct ThreadPinSetResult {
+    pub(super) thread_id: String,
+    pub(super) pinned: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct ThreadGoalGetInput {
     pub(super) thread_id: String,
 }
@@ -270,6 +286,7 @@ pub(super) enum ValidatedInput {
     },
     ThreadMessageSend(ThreadMessageSendInput),
     ThreadTitleSet(ThreadTitleSetInput),
+    ThreadPinSet(ThreadPinSetInput),
     ThreadGoalGet(ThreadGoalGetInput),
     ThreadGoalSet(ThreadGoalSetInput),
     ThreadGoalPause(ThreadGoalPauseInput),
@@ -305,6 +322,10 @@ pub(super) fn catalog() -> Vec<Tool> {
         catalog_tool::<ThreadTitleSetInput, ThreadTitleSetResult>(
             "thread_title_set",
             "Set a thread title.",
+        ),
+        catalog_tool::<ThreadPinSetInput, ThreadPinSetResult>(
+            "thread_pin_set",
+            "Set whether a thread is pinned.",
         ),
         catalog_tool::<ThreadGoalGetInput, ThreadGoalGetResult>(
             "thread_goal_get",
@@ -589,6 +610,14 @@ pub(super) fn validate_input(
                     None => input.thread_id = Some(caller_thread_id(meta)?),
                 }
                 Ok(ValidatedInput::ThreadTitleSet(input))
+            }
+            "thread_pin_set" => {
+                let mut input: ThreadPinSetInput = parse_input(tool, arguments)?;
+                match &input.thread_id {
+                    Some(thread_id) => require_id("threadId", thread_id)?,
+                    None => input.thread_id = Some(caller_thread_id(meta)?),
+                }
+                Ok(ValidatedInput::ThreadPinSet(input))
             }
             "thread_goal_get" => {
                 let input: ThreadGoalGetInput = parse_input(tool, arguments)?;

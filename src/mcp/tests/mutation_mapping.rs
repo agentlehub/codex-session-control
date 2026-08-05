@@ -405,6 +405,75 @@ async fn title_and_goal_clear_use_exact_single_requests() {
 }
 
 #[tokio::test]
+async fn pin_set_uses_one_exact_request_and_returns_authoritative_native_state() {
+    let harness = FakeAppServer::start(vec![FakeStep::result(
+        "thread/metadata/update",
+        json!({"threadId": "target", "isPinned": true}),
+        json!({"thread": {"id": "target", "isPinned": false}}),
+    )])
+    .await;
+    let client = AppServerClient::from_config(&harness.config);
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let result = set_pin(
+        &client,
+        &mut connection,
+        ThreadPinSetInput {
+            thread_id: Some("target".to_owned()),
+            pinned: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.thread_id, "target");
+    assert!(!result.pinned, "native state must not be replaced by input");
+    assert_eq!(harness.connection_count(), 1);
+    assert_eq!(
+        harness.log(),
+        [json!({
+            "method": "thread/metadata/update",
+            "params": {"threadId": "target", "isPinned": true},
+        })]
+    );
+}
+
+#[tokio::test]
+async fn pin_set_rejects_malformed_or_mismatched_native_results() {
+    for response in [
+        json!({}),
+        json!({"thread": {"id": "other", "isPinned": true}}),
+        json!({"thread": {"id": "target"}}),
+        json!({"thread": {"id": "target", "isPinned": "true"}}),
+    ] {
+        let harness = FakeAppServer::start(vec![FakeStep::result(
+            "thread/metadata/update",
+            json!({"threadId": "target", "isPinned": true}),
+            response,
+        )])
+        .await;
+        let client = AppServerClient::from_config(&harness.config);
+        let mut connection = client.connect_initialized().await.unwrap();
+
+        let error = set_pin(
+            &client,
+            &mut connection,
+            ThreadPinSetInput {
+                thread_id: Some("target".to_owned()),
+                pinned: true,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.category, ToolErrorCategory::NativeError);
+        assert_eq!(error.stage, "thread/metadata/update");
+        assert_eq!(harness.connection_count(), 1);
+        assert_eq!(harness.log().len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn interrupt_targets_only_the_fresh_exact_active_turn() {
     let mut steps = snapshot_steps(
         "target",

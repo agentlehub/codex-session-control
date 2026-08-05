@@ -200,6 +200,36 @@ enabled = false
         .map_err(fixture_tool_error)?;
     let safe_thread_read = safe_thread_exemplar(&thread_read)?;
 
+    let thread_metadata_update: Value = connection
+        .mutate(
+            "thread_pin_set",
+            "thread/metadata/update",
+            json!({"threadId": thread_id, "isPinned": true}),
+            Some(&thread_id),
+            None,
+        )
+        .await
+        .map_err(fixture_tool_error)?;
+    if thread_metadata_update["thread"]["id"] != thread_id
+        || thread_metadata_update["thread"]["isPinned"] != true
+    {
+        return Err("thread/metadata/update did not pin the captured thread".into());
+    }
+    let safe_thread_metadata_update = safe_thread_exemplar(&thread_metadata_update)?;
+    let unpinned: Value = connection
+        .mutate(
+            "thread_pin_set",
+            "thread/metadata/update",
+            json!({"threadId": thread_id, "isPinned": false}),
+            Some(&thread_id),
+            None,
+        )
+        .await
+        .map_err(fixture_tool_error)?;
+    if unpinned["thread"]["isPinned"] != false {
+        return Err("thread/metadata/update did not unpin the captured thread".into());
+    }
+
     let first_turn = start_fixture_turn(&mut connection, &thread_id).await?;
     wait_for_responses_requests(&endpoint, 1).await?;
     wait_for_turn_status(&mut connection, &thread_id, &first_turn, "completed").await?;
@@ -319,6 +349,10 @@ enabled = false
         ("initialize".to_owned(), initialize),
         ("threadStart".to_owned(), safe_thread_start),
         ("threadRead".to_owned(), safe_thread_read),
+        (
+            "threadMetadataUpdate".to_owned(),
+            safe_thread_metadata_update,
+        ),
         ("threadList".to_owned(), safe_thread_list),
         ("turnStart".to_owned(), safe_held_turn),
         ("turnsList".to_owned(), interrupted_turns),
@@ -695,6 +729,7 @@ fn safe_thread_exemplar(value: &Value) -> Result<Value, Box<dyn std::error::Erro
         "createdAt",
         "updatedAt",
         "forkedFromId",
+        "isPinned",
     ] {
         if let Some(value) = thread.get(key) {
             safe.insert(key.to_owned(), value.clone());

@@ -155,6 +155,11 @@ async fn execute_tool(
                 .await
                 .map_err(|error| response_error(tool, error, warning.as_deref()))?,
         ),
+        ValidatedInput::ThreadPinSet(input) => serde_json::to_value(
+            set_pin(&client, &mut connection, input)
+                .await
+                .map_err(|error| response_error(tool, error, warning.as_deref()))?,
+        ),
         ValidatedInput::ThreadGoalSet(input) => {
             let goal = set_goal(&client, &mut connection, input)
                 .await

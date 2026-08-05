@@ -81,6 +81,42 @@ pub(super) async fn live_read_list_fork_title_goal_interrupt_mappings() -> Resul
         "Live mapping title"
     );
 
+    let pinned = native
+        .request(
+            "thread/metadata/update",
+            json!({"threadId": thread_id, "isPinned": true}),
+        )
+        .await?;
+    assert_eq!(pinned["thread"]["id"], thread_id);
+    assert_eq!(pinned["thread"]["isPinned"], true);
+    assert_eq!(
+        native
+            .request(
+                "thread/read",
+                json!({"threadId": thread_id, "includeTurns": false}),
+            )
+            .await?["thread"]["isPinned"],
+        true
+    );
+
+    let unpinned = native
+        .request(
+            "thread/metadata/update",
+            json!({"threadId": thread_id, "isPinned": false}),
+        )
+        .await?;
+    assert_eq!(unpinned["thread"]["id"], thread_id);
+    assert_eq!(unpinned["thread"]["isPinned"], false);
+    assert_eq!(
+        native
+            .request(
+                "thread/read",
+                json!({"threadId": thread_id, "includeTurns": false}),
+            )
+            .await?["thread"]["isPinned"],
+        false
+    );
+
     let goal = native
         .request(
             "thread/goal/set",

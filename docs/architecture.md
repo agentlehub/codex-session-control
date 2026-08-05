@@ -55,12 +55,14 @@ CLI and MCP work without Desktop integration. Desktop support requires a verifie
 
 Updates that do not require a restart are applied without interrupting the service. If an update fails, Codex Session Control reports which steps completed and shows a command to retry. It does not undo completed changes automatically.
 
-Plugin changes apply to new sessions. Already-open sessions may continue using cached tools.
+MCP tool catalog changes apply to new sessions. Already-open sessions may continue using cached tools.
 
 ## MCP connections
 
 Each MCP client using Codex Session Control starts `codex-session-control mcp-server` as a local stdio process. The MCP server sends tool requests to the shared Codex app-server through the configured Unix socket, so all connected MCP clients work with the same sessions.
 
 MCP operations have time limits, and responses are matched to request IDs. Actions that change a session are sent at most once. If the connection is lost after an action may have been sent, the tool reports `outcome_unknown` instead of retrying automatically.
+
+`thread_pin_set` takes a required boolean pin state and an optional thread ID. When the ID is omitted, the caller's current thread is used; explicit current-thread and other-thread targets are both supported. The MCP server sends one native `thread/metadata/update` request and returns the effective thread ID and pin state reported by Codex.
 
 See [Security](security.md) for MCP access and trust boundaries.
