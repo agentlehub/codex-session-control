@@ -60,7 +60,7 @@ cleanup() {
     fi
     if [ "$verified" -eq 1 ]; then
         printf '%s\n' "Verified candidate preserved after setup failure." >&2
-        printf 'Retry: %s setup\n' "$candidate" >&2
+        printf 'Retry: %s\n' "$candidate_retry" >&2
         printf 'Cleanup: rm -rf %s\n' "$temporary_directory" >&2
     else
         rm -rf "$temporary_directory"
@@ -123,5 +123,16 @@ printf '%s  %s\n' "$checksum" "$asset" >"$temporary_directory/SHA256SUMS.selecte
     sha256sum --check SHA256SUMS.selected
 )
 verified=1
+if [ -f "$HOME/.local/share/codex-session-control/installed-release.json" ]; then
+    candidate_action=update
+    candidate_retry="CODEX_SESSION_CONTROL_STAGED_UPDATE=1 $candidate update"
+else
+    candidate_action=setup
+    candidate_retry="$candidate setup"
+fi
 chmod 0700 "$candidate"
-"$candidate" setup
+if [ "$candidate_action" = update ]; then
+    CODEX_SESSION_CONTROL_STAGED_UPDATE=1 "$candidate" update
+else
+    "$candidate" setup
+fi

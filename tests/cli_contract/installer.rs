@@ -71,12 +71,19 @@ impl Fixture {
             &format!(
                 "#!/bin/sh\n\
 test \"$#\" -eq 1\n\
-test \"$1\" = setup\n\
 test -f {verified}\n\
 candidate_mode=$(stat -c %a \"$0\")\n\
 candidate_dir=$(dirname \"$0\")\n\
 directory_mode=$(stat -c %a \"$candidate_dir\")\n\
-printf '%s\\n%s\\n%s\\n%s\\n' \"$0\" \"$*\" \"$candidate_mode\" \"$directory_mode\" > {candidate_log}\n\
+staged_update=${{CODEX_SESSION_CONTROL_STAGED_UPDATE-}}\n\
+printf '%s\\n%s\\n%s\\n%s\\n%s\\n' \"$0\" \"$*\" \"$candidate_mode\" \"$directory_mode\" \"$staged_update\" > {candidate_log}\n\
+if test -f \"$HOME/.local/share/codex-session-control/installed-release.json\"; then\n\
+  test \"$1\" = update\n\
+  test \"$staged_update\" = 1\n\
+else\n\
+  test \"$1\" = setup\n\
+  test -z \"$staged_update\"\n\
+fi\n\
 test ! -f {fail_setup}\n",
                 verified = shell_quote(&self.verified),
                 candidate_log = shell_quote(&self.candidate_log),
@@ -147,6 +154,12 @@ exit \"$status\"\n",
     fn set_platform(&self, system: &str, machine: &str) {
         fs::write(self.root.join("uname-system"), format!("{system}\n")).unwrap();
         fs::write(self.root.join("uname-machine"), format!("{machine}\n")).unwrap();
+    }
+
+    fn mark_installed(&self) {
+        let data_root = self.root.join(".local/share/codex-session-control");
+        fs::create_dir_all(&data_root).unwrap();
+        fs::write(data_root.join("installed-release.json"), b"{}\n").unwrap();
     }
 
     fn run(&self) -> Output {
@@ -264,6 +277,51 @@ fn installer_verifies_one_immutable_release_before_setup_and_cleans_success() {
     assert!(candidate_path.is_absolute());
     assert!(!candidate_path.parent().unwrap().exists());
     assert!(String::from_utf8(output.stderr).unwrap().is_empty());
+}
+
+#[test]
+fn installer_applies_a_verified_candidate_as_a_staged_update_when_already_installed() {
+    let fixture = Fixture::new();
+    fixture.mark_installed();
+
+    let output = fixture.run();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let candidate = fs::read_to_string(&fixture.candidate_log).unwrap();
+    let fields = candidate.lines().collect::<Vec<_>>();
+    assert_eq!(fields[1], "update");
+    assert_eq!(fields[4], "1");
+    assert!(!Path::new(fields[0]).parent().unwrap().exists());
+    assert!(String::from_utf8(output.stderr).unwrap().is_empty());
+}
+
+#[test]
+fn installer_preserves_the_staged_update_retry_after_an_upgrade_failure() {
+    let fixture = Fixture::new();
+    fixture.mark_installed();
+    fs::write(&fixture.fail_setup, b"fail").unwrap();
+
+    let output = fixture.run();
+
+    assert_eq!(output.status.code(), Some(1));
+    let candidate = fs::read_to_string(&fixture.candidate_log).unwrap();
+    let candidate_path = PathBuf::from(candidate.lines().next().unwrap());
+    let directory = candidate_path.parent().unwrap();
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        format!(
+            "Verified candidate preserved after setup failure.\n\
+Retry: CODEX_SESSION_CONTROL_STAGED_UPDATE=1 {} update\n\
+Cleanup: rm -rf {}\n",
+            candidate_path.display(),
+            directory.display()
+        )
+    );
+    assert!(candidate_path.is_file());
 }
 
 #[test]
