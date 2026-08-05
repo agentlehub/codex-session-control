@@ -83,10 +83,15 @@ pub(super) async fn prepare_codex_wrapper(
             "running Codex version differs from configured executable",
         ));
     }
+    let caller_cwd = std::env::current_dir().map_err(|_| ControllerError::InvalidData {
+        field: "cwd",
+        reason: "is unavailable",
+    })?;
     Ok(build_codex_wrapper_command(
         &config.codex_executable,
         &paths.codex_home,
         &paths.socket,
+        &caller_cwd,
         args,
     ))
 }
@@ -101,12 +106,15 @@ fn build_codex_wrapper_command(
     codex: &Path,
     codex_home: &Path,
     socket: &Path,
+    caller_cwd: &Path,
     args: Vec<OsString>,
 ) -> Command {
     let mut command = Command::new(codex);
     command
         .arg("--remote")
         .arg(format!("unix://{}", socket.display()))
+        .arg("--cd")
+        .arg(caller_cwd)
         .args(args)
         .env("CODEX_HOME", codex_home);
     command
