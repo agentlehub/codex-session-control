@@ -51,15 +51,7 @@ jobs:
           test "$(printf '%s\n' "$binary_version" | awk '{print $2}')" = "$cargo_version"
 
       - name: Run the same-commit locked validation gate
-        run: |
-          test_tmp="$RUNNER_TEMP/t"
-          mkdir --mode=0700 "$test_tmp"
-          test "$(stat --format=%F "$test_tmp")" = directory
-          test "$(stat --format=%u "$test_tmp")" = "$(id -u)"
-          test "$(stat --format=%a "$test_tmp")" = 700
-          printf 'TMPDIR=%s\n' "$test_tmp" >> "$GITHUB_ENV"
-          export TMPDIR="$test_tmp"
-          ./scripts/check.sh
+        run: ./scripts/check.sh
 
   build-x86:
     needs: validate

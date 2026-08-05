@@ -96,6 +96,7 @@ controller_executable="$(
   jq --exit-status --raw-output '.[0]' "$controller_binaries"
 )"
 test -x "$controller_executable"
+controller_version="$("$controller_executable" --version)"
 
 npm install --global @openai/codex@0.146.0
 codex_command="$(command -v codex)"
@@ -163,8 +164,7 @@ test "$(
     CODEX_HOME="$probe_home" \
     "$native_codex_binary" --version
 )" = "codex-cli 0.146.0"
-sudo -u "$user" "$controller_binary" --version |
-  grep -x 'codex-session-control 0\.2\.0 (x86_64-unknown-linux-gnu)'
+test "$(sudo -u "$user" "$controller_binary" --version)" = "$controller_version"
 
 show_manager_diagnostics() {
   for unit in "$runtime_unit" "$manager"; do

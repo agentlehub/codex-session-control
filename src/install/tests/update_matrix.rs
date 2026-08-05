@@ -96,14 +96,14 @@ async fn candidate_identity_and_semver_rejections_precede_all_mutation() {
         (
             "wrong-product",
             "other-product",
-            "0.2.0",
+            env!("CARGO_PKG_VERSION"),
             product_target(),
             "candidate-preflight",
         ),
         (
             "wrong-target",
             "codex-session-control",
-            "0.2.0",
+            env!("CARGO_PKG_VERSION"),
             "other-unknown-linux-gnu",
             "candidate-preflight",
         ),
@@ -542,7 +542,7 @@ async fn disabled_active_and_unknown_restart_evidence_fail_before_mutation() {
             &fixture,
             "candidate-unknown",
             "codex-session-control",
-            "0.2.0",
+            env!("CARGO_PKG_VERSION"),
             product_target(),
         );
         fixture.clear_logs();
@@ -722,7 +722,7 @@ fn candidate_apply_sets_only_the_private_staged_marker() {
     );
     let candidate = CandidateRelease {
         executable,
-        product_version: "0.2.0".to_owned(),
+        product_version: env!("CARGO_PKG_VERSION").to_owned(),
         target: product_target().to_owned(),
     };
 
