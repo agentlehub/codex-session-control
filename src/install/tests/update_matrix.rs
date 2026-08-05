@@ -542,7 +542,7 @@ async fn disabled_active_and_unknown_restart_evidence_fail_before_mutation() {
             &fixture,
             "candidate-unknown",
             "codex-session-control",
-            "0.2.0",
+            env!("CARGO_PKG_VERSION"),
             product_target(),
         );
         fixture.clear_logs();

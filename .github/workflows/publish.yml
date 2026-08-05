@@ -1,4 +1,5 @@
 name: Publish
+run-name: Publish ${{ inputs.tag }} at ${{ inputs.candidate_sha }} from Release run ${{ inputs.source_run_id }}
 
 on:
   workflow_dispatch:

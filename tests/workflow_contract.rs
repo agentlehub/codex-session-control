@@ -64,17 +64,6 @@ fn named_step_block<'a>(job: &'a str, name: &str) -> &'a str {
     block_at_indent(job, &format!("- name: {name}"), 6)
 }
 
-fn run_script_prefix_before<'a>(step: &'a str, command: &str) -> &'a str {
-    let script = step
-        .split_once("        run: |\n")
-        .unwrap_or_else(|| panic!("step has no multiline run script: {step}"))
-        .1;
-    script
-        .split_once(command)
-        .unwrap_or_else(|| panic!("step does not run {command}: {step}"))
-        .0
-}
-
 fn named_steps(job: &str) -> Vec<&str> {
     job.lines()
         .filter_map(|line| {
@@ -201,6 +190,13 @@ fn release_workflow_is_tag_triggered_assembly_only() {
 fn publish_workflow_is_manual_only_with_required_inputs() {
     let publish = workflow("publish.yml");
     let trigger = top_level_block(&publish, "on:");
+
+    assert!(
+        publish.lines().any(|line| {
+            line == "run-name: Publish ${{ inputs.tag }} at ${{ inputs.candidate_sha }} from Release run ${{ inputs.source_run_id }}"
+        }),
+        "publish run name must expose the tag, candidate SHA, and source Release run"
+    );
 
     assert!(
         trigger.starts_with("on:\n  workflow_dispatch:\n"),
@@ -732,9 +728,11 @@ fn shared_native_x86_and_release_validation_use_standard_checks() {
 }
 
 #[test]
-fn release_validation_reuses_ci_private_temporary_directory_preflight() {
+fn standard_checks_wrapper_owns_private_temporary_directory_lifecycle() {
     let ci = workflow("ci.yml");
     let release = workflow("release.yml");
+    let checks = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/check.sh"))
+        .expect("read standard checks wrapper");
     let ci_validation =
         named_step_block(job_block(&ci, "contract-x86"), "Run locked contract gate");
     let release_validation = named_step_block(
@@ -742,11 +740,24 @@ fn release_validation_reuses_ci_private_temporary_directory_preflight() {
         "Run the same-commit locked validation gate",
     );
 
-    assert_eq!(
-        run_script_prefix_before(release_validation, "./scripts/check.sh"),
-        run_script_prefix_before(ci_validation, "./scripts/check.sh"),
-        "release validation must reuse CI's private temporary-directory preflight",
+    assert_required(
+        &checks,
+        &[
+            "mktemp --directory",
+            "trap cleanup_check_tmp EXIT",
+            "export TMPDIR=\"$check_tmp\"",
+        ],
+        "standard checks private temporary-directory lifecycle",
     );
+    for (surface, validation) in [
+        ("CI x86 validation", ci_validation),
+        ("release validation", release_validation),
+    ] {
+        assert!(
+            !validation.contains("test_tmp=") && !validation.contains("printf 'TMPDIR="),
+            "{surface} must delegate temporary-directory setup to scripts/check.sh"
+        );
+    }
 }
 
 #[test]

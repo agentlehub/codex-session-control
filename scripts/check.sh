@@ -39,6 +39,22 @@ if ! actionlint -version | grep -x '1\.7\.12'; then
   exit 1
 fi
 
+check_tmp="$(mktemp --directory "${HOME:?HOME must be set}/.csc.XXXXXX")"
+cleanup_check_tmp() {
+  case "${check_tmp:-}" in
+    "$HOME"/.csc.*) rm -rf -- "$check_tmp" ;;
+  esac
+}
+trap cleanup_check_tmp EXIT
+
+if [ "$(stat --format=%F "$check_tmp")" != directory ] ||
+  [ "$(stat --format=%u "$check_tmp")" != "$(id -u)" ] ||
+  [ "$(stat --format=%a "$check_tmp")" != 700 ]; then
+  printf '%s\n' 'Failed to create a private owner-only test directory.' >&2
+  exit 1
+fi
+export TMPDIR="$check_tmp"
+
 printf '%s\n' 'Checking Rust formatting...'
 cargo fmt --all -- --check
 

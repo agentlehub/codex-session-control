@@ -45,13 +45,6 @@ jobs:
 
       - name: Run locked contract gate
         run: |
-          test_tmp="$RUNNER_TEMP/t"
-          mkdir --mode=0700 "$test_tmp"
-          test "$(stat --format=%F "$test_tmp")" = directory
-          test "$(stat --format=%u "$test_tmp")" = "$(id -u)"
-          test "$(stat --format=%a "$test_tmp")" = 700
-          printf 'TMPDIR=%s\n' "$test_tmp" >> "$GITHUB_ENV"
-          export TMPDIR="$test_tmp"
           ./scripts/check.sh
           cargo build --bin codex-session-control --locked
           binary=target/debug/codex-session-control
