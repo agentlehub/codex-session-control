@@ -839,6 +839,7 @@ impl LiveHarness {
         );
         atomic_write(&fake_codex, script.as_bytes(), 0o700)?;
 
+        let caller_cwd = std::env::current_dir()?;
         let probe = async {
             let mut product_config: toml::Value =
                 toml::from_str(std::str::from_utf8(&original_config)?)?;
@@ -927,6 +928,8 @@ impl LiveHarness {
             vec![
                 b"--remote".to_vec(),
                 format!("unix://{}", self.socket.display()).into_bytes(),
+                b"--cd".to_vec(),
+                caller_cwd.as_os_str().as_bytes().to_vec(),
                 b"--model".to_vec(),
                 b"two words".to_vec(),
                 b"--remote".to_vec(),

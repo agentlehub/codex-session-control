@@ -6,10 +6,11 @@ use super::support::{FakeAuthority, Fixture};
 use super::*;
 
 #[tokio::test]
-async fn wrapper_preflight_builds_exact_native_argv_and_selected_home_environment() {
+async fn wrapper_preflight_builds_exact_native_argv_caller_cwd_and_selected_home_environment() {
     let fixture = Fixture::new();
     let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
     setup_with_context(fixture.context(true)).await.unwrap();
+    let caller_cwd = std::env::current_dir().unwrap();
     let user_args = vec![
         OsString::from("--model"),
         OsString::from("two words"),
@@ -31,6 +32,8 @@ async fn wrapper_preflight_builds_exact_native_argv_and_selected_home_environmen
         [
             OsStr::new("--remote"),
             OsStr::new(&format!("unix://{}", fixture.paths.socket.display())),
+            OsStr::new("--cd"),
+            caller_cwd.as_os_str(),
             user_args[0].as_os_str(),
             user_args[1].as_os_str(),
             user_args[2].as_os_str(),
