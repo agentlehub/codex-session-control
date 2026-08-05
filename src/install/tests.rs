@@ -38,8 +38,9 @@ use super::{
     release::{
         RELEASE_CONNECT_TIMEOUT, RELEASE_METADATA_TIMEOUT, RELEASE_TRANSFER_IDLE_TIMEOUT,
         ReleaseAsset, ReleaseEndpoints, ReleaseStage, build_release_client,
-        discover_latest_release, download_verified_release, release_target_for_arch,
-        stream_release_asset, validate_checksum_entry, with_release_stage_timeout,
+        discover_latest_release, download_verified_release, production_release_endpoints,
+        release_target_for_arch, stream_release_asset, validate_checksum_entry,
+        with_release_stage_timeout,
     },
     render::{render_projection, render_unit},
     service::{

@@ -38,6 +38,7 @@ use super::{
         validate_existing,
     },
     persisted_codex_version, product_target,
+    release::RELEASE_REPOSITORY,
     render::{RenderedProjection, reconcile_projection, render_projection, render_unit},
     service::{
         LifecycleTarget, append_unattached_client_guidance, detect_running_unattached_clients,
@@ -881,8 +882,8 @@ fn validate_manifestless_setup_artifacts(
             format!("retry: {} setup\n", paths.binary.display())
         } else {
             format!(
-                "recovery source: https://github.com/Agentlehub/codex-session-control/releases/download/v{version}/codex-session-control-{}\nchecksum source: https://github.com/Agentlehub/codex-session-control/releases/download/v{version}/SHA256SUMS\n",
-                context.candidate.target
+                "recovery source: https://github.com/{RELEASE_REPOSITORY}/releases/download/v{version}/codex-session-control-{}\nchecksum source: https://github.com/{RELEASE_REPOSITORY}/releases/download/v{version}/SHA256SUMS\n",
+                context.candidate.target,
             )
         };
         return Err(PreflightFailure {

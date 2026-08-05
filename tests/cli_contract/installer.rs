@@ -8,7 +8,7 @@ use std::{
 use sha2::{Digest, Sha256};
 
 const TAG: &str = "v1.2.3";
-const REPOSITORY: &str = "Agentlehub/codex-session-control";
+const REPOSITORY: &str = "agentlehub/codex-session-control";
 
 struct Fixture {
     _root: tempfile::TempDir,

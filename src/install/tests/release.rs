@@ -88,7 +88,7 @@ async fn release_server(
                 .to_owned();
             recorded.lock().unwrap().push(path.clone());
             match path.as_str() {
-                "/repos/Agentlehub/codex-session-control/releases/latest" => {
+                "/repos/agentlehub/codex-session-control/releases/latest" => {
                     write_response(&mut stream, metadata.len() as u64, &metadata).await;
                 }
                 path if path.ends_with(&format!("/{binary_name}")) => {
@@ -123,6 +123,17 @@ fn release_target_mapping_accepts_only_the_two_approved_architectures() {
     for rejected in ["", "amd64", "arm64", "armv7", "riscv64", "s390x"] {
         assert!(release_target_for_arch(rejected).is_err(), "{rejected}");
     }
+}
+
+#[test]
+fn production_release_endpoints_use_githubs_canonical_repository_identity() {
+    let endpoints = production_release_endpoints();
+
+    assert_eq!(endpoints.api, "https://api.github.com");
+    assert_eq!(
+        endpoints.downloads,
+        "https://github.com/agentlehub/codex-session-control"
+    );
 }
 
 #[tokio::test]
@@ -161,7 +172,7 @@ async fn latest_metadata_resolves_once_to_exact_immutable_assets() {
     );
     assert_eq!(
         requests.lock().unwrap().as_slice(),
-        ["/repos/Agentlehub/codex-session-control/releases/latest"]
+        ["/repos/agentlehub/codex-session-control/releases/latest"]
     );
 }
 

@@ -31,7 +31,7 @@ use super::{
     persisted_codex_version, product_target,
     release::{
         ReleaseEndpoints, build_release_client, discover_latest_release, download_verified_release,
-        release_target_for_arch,
+        production_release_endpoints, release_target_for_arch,
     },
     render::{reconcile_projection, render_projection, render_unit},
     service::{
@@ -237,14 +237,7 @@ pub(crate) async fn update(
 }
 
 async fn outer_update(lifecycle: LifecycleContext) -> Result<LifecycleReceipt, ControllerError> {
-    outer_update_with_endpoints(
-        lifecycle,
-        ReleaseEndpoints {
-            api: "https://api.github.com".to_owned(),
-            downloads: "https://github.com/Agentlehub/codex-session-control".to_owned(),
-        },
-    )
-    .await
+    outer_update_with_endpoints(lifecycle, production_release_endpoints()).await
 }
 
 pub(super) async fn outer_update_with_endpoints(
