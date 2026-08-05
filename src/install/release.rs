@@ -16,6 +16,7 @@ use super::{
 pub(super) const RELEASE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) const RELEASE_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) const RELEASE_TRANSFER_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const RELEASE_REPOSITORY: &str = "agentlehub/codex-session-control";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ReleaseStage {
@@ -48,6 +49,13 @@ impl ReleaseStage {
 pub(super) struct ReleaseEndpoints {
     pub(super) api: String,
     pub(super) downloads: String,
+}
+
+pub(super) fn production_release_endpoints() -> ReleaseEndpoints {
+    ReleaseEndpoints {
+        api: "https://api.github.com".to_owned(),
+        downloads: format!("https://github.com/{RELEASE_REPOSITORY}"),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -125,8 +133,8 @@ pub(super) async fn discover_latest_release(
     target: &str,
 ) -> Result<VerifiedRelease, ControllerError> {
     let url = format!(
-        "{}/repos/Agentlehub/codex-session-control/releases/latest",
-        endpoints.api.trim_end_matches('/')
+        "{}/repos/{RELEASE_REPOSITORY}/releases/latest",
+        endpoints.api.trim_end_matches('/'),
     );
     let metadata: GithubReleaseMetadata =
         with_release_stage_timeout(ReleaseStage::Metadata, async {

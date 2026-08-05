@@ -71,7 +71,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-repository=Agentlehub/codex-session-control
+repository=agentlehub/codex-session-control
 latest_url=https://api.github.com/repos/$repository/releases/latest
 latest_json=$(curl \
     --fail \

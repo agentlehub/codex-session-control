@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.95"
 license = "MIT"
 description = "Control Codex sessions via MCP"
-repository = "https://github.com/Agentlehub/codex-session-control"
+repository = "https://github.com/agentlehub/codex-session-control"
 
 [[bin]]
 name = "codex-session-control"
