@@ -11,6 +11,8 @@ mod install;
 mod mcp;
 #[allow(dead_code)]
 mod model;
+#[cfg(test)]
+mod test_support;
 
 use clap::Parser;
 use cli::{Cli, Command};

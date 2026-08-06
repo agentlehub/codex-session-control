@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use uzers::os::unix::UserExt;
 
 use crate::{
+    app_server::{TESTED_CODEX_CLI_VERSION, TESTED_CODEX_CLI_VERSION_OUTPUT, TESTED_CODEX_VERSION},
     desktop::render_descriptor,
     error::ControllerError,
     model::{DesktopAttachmentIdentity, InstalledRelease, ProductConfig},
@@ -86,7 +87,7 @@ fn systemd_helper_initialize_response(
         "id": id,
         "result": {
             "codexHome": codex_home,
-            "userAgent": "codex-cli 0.146.0"
+            "userAgent": TESTED_CODEX_CLI_VERSION
         }
     })
 }
@@ -102,7 +103,7 @@ fn systemd_helper_reports_codex_home_as_a_protocol_string() {
             "id": 7,
             "result": {
                 "codexHome": "/home/disposable/.codex",
-                "userAgent": "codex-cli 0.146.0"
+                "userAgent": TESTED_CODEX_CLI_VERSION
             }
         })
     );

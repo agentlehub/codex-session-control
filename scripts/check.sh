@@ -59,13 +59,16 @@ printf '%s\n' 'Checking Rust formatting...'
 cargo fmt --all -- --check
 
 printf '%s\n' 'Checking shell scripts...'
-shellcheck install.sh scripts/check.sh scripts/ci/disposable-systemd-user-contract.sh
+shellcheck install.sh scripts/check.sh scripts/set-supported-codex-version.sh \
+  scripts/ci/disposable-systemd-user-contract.sh
 
 printf '%s\n' 'Checking POSIX shell syntax...'
 sh -n install.sh
 
 printf '%s\n' 'Checking wrapper Bash syntax...'
 bash -n scripts/check.sh
+printf '%s\n' 'Checking supported-version setter Bash syntax...'
+bash -n scripts/set-supported-codex-version.sh
 printf '%s\n' 'Checking systemd-contract Bash syntax...'
 bash -n scripts/ci/disposable-systemd-user-contract.sh
 

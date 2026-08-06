@@ -41,7 +41,7 @@ async fn setup_keeps_normal_home_shared_and_never_invokes_login() {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, bytes).unwrap();
     }
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
 
     let report = setup_with_context(fixture.context(true)).await.unwrap();
 
@@ -109,7 +109,7 @@ async fn exact_native_residue_keeps_the_normal_home_when_ambient_home_differs() 
     fs::write(&fixture.plugin_version_state, env!("CARGO_PKG_VERSION")).unwrap();
     fixture.paths.ambient_codex_home = Some(ambient_home.clone());
     fixture.paths.native_selection_pending = true;
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
 
     setup_with_context(fixture.context(true)).await.unwrap();
 
@@ -124,7 +124,7 @@ async fn same_release_partial_identity_repairs_without_ambient_reselection() {
     let mut fixture = Fixture::new();
     let selected_home = fixture.paths.codex_home.clone();
     let ambient_home = fixture.paths.home.join("ambient-codex-home");
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
 
     fixture.paths.ambient_codex_home = Some(ambient_home.clone());
@@ -196,7 +196,7 @@ async fn config_only_repair_keeps_the_persisted_codex_executable() {
     let fixture = Fixture::new();
     let persisted_codex = persist_codex_executable(&fixture);
     let persisted_bin = persisted_codex.parent().unwrap();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(context_with_persisted_codex(&fixture, persisted_bin))
         .await
         .unwrap();
@@ -215,7 +215,7 @@ async fn manifest_only_repair_keeps_the_persisted_codex_executable() {
     let fixture = Fixture::new();
     let persisted_codex = persist_codex_executable(&fixture);
     let persisted_bin = persisted_codex.parent().unwrap();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(context_with_persisted_codex(&fixture, persisted_bin))
         .await
         .unwrap();
@@ -232,7 +232,7 @@ async fn manifest_only_repair_keeps_the_persisted_codex_executable() {
 #[tokio::test]
 async fn foreign_native_sources_block_repair_without_removal() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
 
     for (foreign_state, field) in [

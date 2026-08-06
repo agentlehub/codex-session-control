@@ -8,7 +8,7 @@ use tempfile::TempDir;
 use super::*;
 
 fn fixture() -> (TempDir, ResolvedUserPaths) {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let home = root.path().join("home");
     let runtime = root.path().join("runtime");
     fs::create_dir(&home).unwrap();

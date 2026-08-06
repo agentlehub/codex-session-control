@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repository_root="$(cd -- "$script_dir/../.." && pwd)"
+supported_codex_version="$(cat "$repository_root/supported-codex-version.txt")"
 user=codex-session-control-ci
 home=/home/codex-session-control-ci
 uid=
@@ -9,7 +12,7 @@ runtime_unit=
 test_harness="$home/codex-session-control-tests"
 app_server_harness="$home/app-server-integration-tests"
 controller_binary="$home/codex-session-control-controller"
-native_codex_binary="$home/codex-0.146.0"
+native_codex_binary="$home/codex-$supported_codex_version"
 config_dir="$home/.config/codex-session-control"
 data_root="$home/.local/share/codex-session-control"
 codex_home="$home/.codex"
@@ -98,12 +101,12 @@ controller_executable="$(
 test -x "$controller_executable"
 controller_version="$("$controller_executable" --version)"
 
-npm install --global @openai/codex@0.146.0
+npm install --global "@openai/codex@$supported_codex_version"
 codex_command="$(command -v codex)"
 codex_wrapper="$(readlink --canonicalize "$codex_command")"
 npm_codex_root="$(dirname "$(dirname "$codex_wrapper")")"
-jq --exit-status '
-  .name == "@openai/codex" and .version == "0.146.0"
+jq --arg supported_codex_version "$supported_codex_version" --exit-status '
+  .name == "@openai/codex" and .version == $supported_codex_version
 ' "$npm_codex_root/package.json" >/dev/null
 native_codex_matches=()
 while IFS= read -r -d '' match; do
@@ -120,7 +123,7 @@ if [[ "$match_count" -ne 1 ]]; then
 fi
 native_codex_executable="${native_codex_matches[0]}"
 test -x "$native_codex_executable"
-test "$("$native_codex_executable" --version)" = "codex-cli 0.146.0"
+test "$("$native_codex_executable" --version)" = "codex-cli $supported_codex_version"
 
 cleanup() {
   if [[ -n "$uid" ]]; then
@@ -163,7 +166,7 @@ test "$(
     HOME="$home" \
     CODEX_HOME="$probe_home" \
     "$native_codex_binary" --version
-)" = "codex-cli 0.146.0"
+)" = "codex-cli $supported_codex_version"
 test "$(sudo -u "$user" "$controller_binary" --version)" = "$controller_version"
 
 show_manager_diagnostics() {

@@ -1,5 +1,5 @@
 {
-  "codexVersion": "0.146.0",
+  "codexVersion": "0.146.1",
   "errorExemplars": {
     "activeTurnMismatch": {
       "code": -32600,
@@ -10,7 +10,7 @@
       "message": "thread not loaded: 00000000-0000-7000-8000-000000000000"
     }
   },
-  "schemaSha256": "5dd3854b97c78ed6a11af73988e7a1eca45077d60e4af9403a9dfa085e2465d8",
+  "schemaSha256": "94a652018f5f6305d95335fc8a8bf4b07b72e55ea2e686d28c3b45deb5611389",
   "successfulExemplars": {
     "activeTurn": {
       "turn": {
@@ -55,7 +55,7 @@
       "codexHome": "/tmp/codex-session-control-fixture/home/.codex",
       "platformFamily": "unix",
       "platformOs": "linux",
-      "userAgent": "Codex Desktop/0.146.0 (Arch Linux Unknown; x86_64) dumb (codex_session_control; 0.2.0)"
+      "userAgent": "codex_session_control/0.146.1 (Arch Linux Unknown; x86_64) dumb (codex_session_control; 0.2.3)"
     },
     "threadList": {
       "data": [

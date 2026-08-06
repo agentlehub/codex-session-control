@@ -281,7 +281,7 @@ pub(super) async fn run_disposable_systemd_user() {
         &fake_codex,
         format!(
             r#"#!/bin/sh
-if [ "$1" = "--version" ]; then printf 'codex-cli 0.146.0\n'; exit 0; fi
+if [ "$1" = "--version" ]; then printf '{tested_codex_cli_version}\n'; exit 0; fi
 if [ "$1" = "app-server" ]; then
   export {HELPER}=1
   export {HELPER_SOCKET}={quoted_socket}
@@ -301,7 +301,8 @@ fi
 if [ "$1" = "plugin" ] && [ "$2" = "add" ]; then root=$(cat {quoted_marketplace}); printf '%s' "$root" > {quoted_plugin}; sed -n 's/.*"version": "\([^"]*\)".*/\1/p' "$root/plugins/codex-session-control/.codex-plugin/plugin.json" > {quoted_plugin_version}; printf '{{}}\n'; exit 0; fi
 if [ "$1" = "plugin" ] && [ "$2" = "remove" ]; then rm -f {quoted_plugin} {quoted_plugin_version}; printf '{{}}\n'; exit 0; fi
 exit 64
-"#
+"#,
+            tested_codex_cli_version = TESTED_CODEX_CLI_VERSION,
         ),
     );
     let fake_desktop = fixture_root.path().join("codex-desktop");

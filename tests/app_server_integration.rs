@@ -10,39 +10,41 @@ mod normal_home;
 mod normal_home_paths;
 #[path = "app_server_integration/protocol_support.rs"]
 mod protocol_support;
+#[path = "support/private_tempdir.rs"]
+mod test_support;
 
 #[tokio::test]
-#[ignore = "requires the configured installed Codex CLI 0.146.0"]
+#[ignore = "requires the configured supported Codex CLI version"]
 async fn live_schema_digest_matches_committed_fixture() -> Result<(), Box<dyn Error>> {
     cases::live_schema_digest_matches_committed_fixture().await
 }
 
 #[tokio::test]
-#[ignore = "requires the configured installed Codex CLI 0.146.0"]
+#[ignore = "requires the configured supported Codex CLI version"]
 async fn live_read_list_fork_title_goal_interrupt_mappings() -> Result<(), Box<dyn Error>> {
     cases::live_read_list_fork_title_goal_interrupt_mappings().await
 }
 
 #[tokio::test]
-#[ignore = "requires the configured installed Codex CLI 0.146.0"]
+#[ignore = "requires the configured supported Codex CLI version"]
 async fn live_remote_cli_attaches_and_reconnects() -> Result<(), Box<dyn Error>> {
     cases::live_remote_cli_attaches_and_reconnects().await
 }
 
 #[tokio::test]
-#[ignore = "requires the configured installed Codex CLI 0.146.0"]
+#[ignore = "requires the configured supported Codex CLI version"]
 async fn live_restart_preserves_shared_home_sessions() -> Result<(), Box<dyn Error>> {
     cases::live_restart_preserves_shared_home_sessions().await
 }
 
 #[tokio::test]
-#[ignore = "requires the configured installed Codex CLI 0.146.0"]
+#[ignore = "requires the configured supported Codex CLI version"]
 async fn live_socket_removed_when_app_server_exits() -> Result<(), Box<dyn Error>> {
     cases::live_socket_removed_when_app_server_exits().await
 }
 
 #[tokio::test]
-#[ignore = "requires the configured installed Codex CLI 0.146.0"]
+#[ignore = "requires the configured supported Codex CLI version"]
 async fn live_projection_converges_on_new_task_without_restart() -> Result<(), Box<dyn Error>> {
     cases::live_projection_converges_on_new_task_without_restart().await
 }

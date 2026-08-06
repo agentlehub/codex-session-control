@@ -71,7 +71,7 @@ const EXPECTED_MCP: &[u8] = br#"{
 "#;
 
 fn fixture() -> (tempfile::TempDir, ResolvedUserPaths) {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let home = root.path().join("home");
     let runtime = root.path().join("runtime");
     fs::create_dir(&home).unwrap();
@@ -137,7 +137,7 @@ WantedBy=default.target\n",
 
 #[test]
 fn service_unit_escapes_unsafe_systemd_word_bytes_without_shell() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let home = root.path().join("home with \"quote\" % $ slash\\");
     let runtime = root.path().join("runtime with space");
     let paths = ResolvedUserPaths::for_test(rustix::process::geteuid().as_raw(), home, runtime);

@@ -22,7 +22,10 @@ use tokio_tungstenite::{client_async, tungstenite::Message};
 use crate::normal_home_paths::{CONFIG_TEMPLATE, DisposablePaths, atomic_write};
 use crate::protocol_support::{NativeConnection, ResponsesEndpoint};
 
-pub(super) const EXPECTED_CODEX_VERSION: &str = "codex-cli 0.146.0";
+pub(super) const EXPECTED_CODEX_VERSION: &str = concat!(
+    "codex-cli ",
+    env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION")
+);
 pub(super) const SESSION_CONTROL_TOOLS: [&str; 14] = [
     "thread_create",
     "thread_fork",
@@ -76,7 +79,7 @@ pub(super) struct LiveHarness {
 impl LiveHarness {
     pub(super) async fn start() -> Result<Self, Box<dyn Error>> {
         let codex = configured_codex()?;
-        let root = tempfile::tempdir()?;
+        let root = crate::test_support::private_tempdir();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))?;
         let codex_home = root.path().join(".codex");
         let runtime = root.path().join("runtime");
@@ -273,7 +276,7 @@ enabled = false
             initialized["userAgent"]
                 .as_str()
                 .unwrap()
-                .contains("0.146.0")
+                .contains(env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION"))
         );
         native
             .websocket

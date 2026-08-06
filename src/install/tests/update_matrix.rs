@@ -80,7 +80,7 @@ fn equal_candidate(fixture: &Fixture, name: &str) -> PathBuf {
 }
 
 async fn setup_attached(fixture: &Fixture) -> (FakeAuthority, DesktopAttachmentIdentity) {
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     let launcher = fixture._root.path().join("desktop-launcher");
     write_compatible_launcher(&launcher);
     let mut setup = fixture.context(true);
@@ -116,7 +116,7 @@ async fn candidate_identity_and_semver_rejections_precede_all_mutation() {
         ),
     ] {
         let fixture = Fixture::new();
-        let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
         let before_binary = fs::read(&fixture.paths.binary).unwrap();
         let before_manifest = fs::read(&fixture.paths.manifest).unwrap();
@@ -141,7 +141,7 @@ async fn candidate_identity_and_semver_rejections_precede_all_mutation() {
 #[tokio::test]
 async fn coherent_equal_candidate_reports_current_only_after_state_proof() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let candidate = fixture.paths.home.join("candidate-equal");
     super::write_executable_fixture(&candidate, fs::read(&fixture.paths.binary).unwrap());
@@ -168,7 +168,7 @@ async fn coherent_equal_candidate_reports_current_only_after_state_proof() {
 async fn higher_candidate_preserves_all_three_desired_service_states() {
     for (name, enabled, active) in DESIRED_STATES {
         let fixture = Fixture::new();
-        let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
         let authority = if active {
             Some(authority)
@@ -198,7 +198,7 @@ async fn higher_candidate_preserves_all_three_desired_service_states() {
                 while !active_path.exists() {
                     tokio::task::yield_now().await;
                 }
-                FakeAuthority::start(&paths, "0.146.0").await
+                FakeAuthority::start(&paths, TESTED_CODEX_VERSION).await
             }))
         } else {
             None
@@ -360,7 +360,7 @@ async fn disabled_update_retains_desktop_identity_without_publishing_then_enable
         while !active.exists() {
             tokio::task::yield_now().await;
         }
-        FakeAuthority::start(&paths, "0.146.0").await
+        FakeAuthority::start(&paths, TESTED_CODEX_VERSION).await
     });
     let setup = fixture.context(true);
     let enabled = enable_with_context(LifecycleContext {
@@ -384,7 +384,7 @@ async fn disabled_update_retains_desktop_identity_without_publishing_then_enable
 #[tokio::test]
 async fn null_desktop_update_never_auto_selects_a_new_compatible_launcher() {
     let fixture = Fixture::new();
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let launcher = fixture._root.path().join("desktop-launcher");
     let desktop_entry = fixture
@@ -530,7 +530,7 @@ async fn unsafe_or_foreign_desktop_descriptor_stops_update_at_descriptor_stage()
 async fn disabled_active_and_unknown_restart_evidence_fail_before_mutation() {
     for case in ["disabled-active", "unknown-unit"] {
         let fixture = Fixture::new();
-        let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
         if case == "disabled-active" {
             fs::remove_file(&fixture.enabled).unwrap();
@@ -575,7 +575,7 @@ async fn disabled_active_and_unknown_restart_evidence_fail_before_mutation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn running_changed_authority_inspects_then_restarts_exactly_once() {
     let fixture = Fixture::new();
-    let old_authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let old_authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let new_bin = fixture.paths.home.join("new-codex-bin");
     fs::create_dir(&new_bin).unwrap();
@@ -607,7 +607,7 @@ async fn running_changed_authority_inspects_then_restarts_exactly_once() {
         while !restart_requested.exists() {
             tokio::task::yield_now().await;
         }
-        FakeAuthority::start(&paths, "0.146.0").await
+        FakeAuthority::start(&paths, TESTED_CODEX_VERSION).await
     });
 
     let report = staged_update_with_context(context(&fixture, candidate, Some(path)))
@@ -626,7 +626,7 @@ async fn running_changed_authority_inspects_then_restarts_exactly_once() {
 #[tokio::test]
 async fn retry_uses_last_manifest_after_partial_candidate_files() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let candidate = candidate(
         &fixture,
@@ -661,14 +661,28 @@ async fn retry_uses_last_manifest_after_partial_candidate_files() {
 
 #[tokio::test]
 async fn tested_untested_and_unparseable_versions_only_change_update_advisory() {
-    for (version_output, authority_version, warning) in [
-        ("codex-cli 0.146.0\n", "0.146.0", None),
-        ("codex-cli 0.147.0\n", "0.147.0", Some("0.147.0")),
-        ("codex-cli not-semver\n", "not-semver", Some("not-semver")),
-    ] {
+    let untested_version = crate::test_support::different_stable_version(TESTED_CODEX_VERSION);
+    let cases = [
+        (
+            TESTED_CODEX_CLI_VERSION_OUTPUT.to_owned(),
+            TESTED_CODEX_VERSION.to_owned(),
+            None,
+        ),
+        (
+            format!("codex-cli {untested_version}\n"),
+            untested_version.clone(),
+            Some(untested_version),
+        ),
+        (
+            "codex-cli not-semver\n".to_owned(),
+            "not-semver".to_owned(),
+            Some("not-semver".to_owned()),
+        ),
+    ];
+    for (version_output, authority_version, warning) in cases {
         let fixture = Fixture::new();
-        fs::write(&fixture.codex_version, version_output).unwrap();
-        let _authority = FakeAuthority::start(&fixture.paths, authority_version).await;
+        fs::write(&fixture.codex_version, &version_output).unwrap();
+        let _authority = FakeAuthority::start(&fixture.paths, &authority_version).await;
         setup_with_context(fixture.context(true)).await.unwrap();
         let candidate = candidate(
             &fixture,
@@ -710,7 +724,7 @@ async fn tested_untested_and_unparseable_versions_only_change_update_advisory() 
 
 #[test]
 fn candidate_apply_sets_only_the_private_staged_marker() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let log = root.path().join("candidate.log");
     let executable = root.path().join("candidate");
     super::write_executable_fixture(

@@ -58,7 +58,7 @@ struct FakeScript {
 impl FakeScript {
     fn happy() -> Self {
         Self {
-            codex_version: "0.146.0".to_owned(),
+            codex_version: TESTED_CODEX_VERSION.to_owned(),
             native_frames: Vec::new(),
             barrier: None,
             failure_point: FailurePoint::Never,
@@ -117,7 +117,7 @@ struct FakeAppServer {
 
 impl FakeAppServer {
     async fn start(script: FakeScript) -> Self {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = crate::test_support::private_tempdir();
         std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let socket_path = temporary.path().join("app-server.sock");
         let listener = UnixListener::bind(&socket_path).unwrap();
@@ -159,7 +159,7 @@ impl FakeAppServer {
     }
 
     async fn with_socket_violation(violation: SocketViolation) -> Self {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = crate::test_support::private_tempdir();
         std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let socket_path = temporary.path().join("app-server.sock");
         let mut listener_guard = None;

@@ -25,7 +25,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let root_path = root.path().to_path_buf();
         let bin = root_path.join("bin");
         let tmp = root_path.join("tmp");
@@ -305,7 +305,7 @@ fn installer_preserves_exact_retry_boundaries() {
 #[test]
 fn installer_rejects_stdin_and_contains_no_extra_bootstrap_behavior() {
     let script = fs::read(Fixture::installer()).unwrap();
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let output = Command::new("sh")
         .arg("-s")
         .current_dir(root.path())

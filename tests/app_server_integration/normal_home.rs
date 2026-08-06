@@ -91,7 +91,7 @@ impl Drop for PreservedNormalState {
 
 impl DisposableNormalHome {
     pub(super) fn contract() -> Self {
-        let root = tempfile::tempdir().expect("create isolated normal-home contract root");
+        let root = crate::test_support::private_tempdir();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
             .expect("protect isolated normal-home contract root");
         let home = root.path().join("home/codex-session-control-ci");

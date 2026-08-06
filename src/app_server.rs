@@ -31,7 +31,18 @@ use protocol::{
 pub(crate) use protocol::{goal_from_native, thread_from_native, turn_from_native};
 
 pub const NATIVE_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
-pub(crate) const TESTED_CODEX_VERSION: &str = "0.146.0";
+pub(crate) const TESTED_CODEX_VERSION: &str = env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION");
+#[cfg(test)]
+pub(crate) const TESTED_CODEX_CLI_VERSION: &str = concat!(
+    "codex-cli ",
+    env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION")
+);
+#[cfg(test)]
+pub(crate) const TESTED_CODEX_CLI_VERSION_OUTPUT: &str = concat!(
+    "codex-cli ",
+    env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION"),
+    "\n"
+);
 
 pub(crate) const fn socket_mode_is_owner_only(mode: u32) -> bool {
     matches!(mode & 0o777, 0o600 | 0o700)

@@ -4,8 +4,8 @@ use super::*;
 
 #[test]
 fn schema_digest_canonicalizes_objects_but_preserves_array_order() {
-    let first = tempfile::tempdir().unwrap();
-    let second = tempfile::tempdir().unwrap();
+    let first = crate::test_support::private_tempdir();
+    let second = crate::test_support::private_tempdir();
     std::fs::write(
         first.path().join("schema.json"),
         br#"{"z":{"second":2,"first":1},"a":[1,2],"scalar":"same"}"#,
@@ -94,7 +94,7 @@ async fn capture_fixture_from_live_codex() -> Result<(), Box<dyn std::error::Err
     }
 
     validate_responses_fixture()?;
-    let temporary = tempfile::tempdir()?;
+    let temporary = crate::test_support::private_tempdir();
     std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700))?;
     let schema_dir = temporary.path().join("schema");
     let home = temporary.path().join("home");

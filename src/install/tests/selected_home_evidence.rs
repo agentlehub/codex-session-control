@@ -21,7 +21,7 @@ const COMMANDS: [&str; 8] = [
 ];
 
 fn fixture() -> (TempDir, ResolvedUserPaths) {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let home = root.path().join("home");
     let runtime = root.path().join("runtime");
     fs::create_dir(&home).unwrap();
@@ -57,7 +57,7 @@ fn valid_manifest(paths: &ResolvedUserPaths, home: &Path) -> serde_json::Value {
         "projectionSha256": "c".repeat(64),
         "pluginVersion": env!("CARGO_PKG_VERSION"),
         "codexExecutable": "/usr/bin/codex",
-        "codexVersion": "0.146.0",
+        "codexVersion": TESTED_CODEX_VERSION,
         "codexHome": home,
         "socketPath": paths.socket,
         "desktopAttachment": null
@@ -559,7 +559,7 @@ fn symlinked_evidence_source_ancestors_are_invalid_and_block_identity_loaders() 
 
 #[test]
 fn intermediate_symlink_before_effective_home_invalidates_all_product_evidence() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let actual_parent = root.path().join("actual-parent");
     let actual_home = actual_parent.join("home");
     let linked_parent = root.path().join("linked-parent");

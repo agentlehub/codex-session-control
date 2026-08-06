@@ -8,7 +8,7 @@ use super::*;
 #[tokio::test]
 async fn wrapper_preflight_builds_exact_native_argv_caller_cwd_and_selected_home_environment() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let caller_cwd = std::env::current_dir().unwrap();
     let user_args = vec![
@@ -53,7 +53,7 @@ async fn wrapper_preflight_builds_exact_native_argv_caller_cwd_and_selected_home
 #[tokio::test]
 async fn wrapper_rejects_unavailable_authority_before_exec_with_status_and_enable_guidance() {
     let fixture = Fixture::new();
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     drop(authority);
     fs::remove_file(&fixture.active).unwrap();
@@ -71,7 +71,7 @@ async fn wrapper_rejects_unavailable_authority_before_exec_with_status_and_enabl
 #[tokio::test]
 async fn wrapper_rejects_a_valid_but_contradictory_manifest_before_exec() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let contradictory_home = fixture.paths.home.join(".codex-other");
     fs::create_dir(&contradictory_home).unwrap();
