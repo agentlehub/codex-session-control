@@ -86,6 +86,7 @@ impl ResolvedUserPaths {
         Ok(paths)
     }
 
+    #[cfg(test)]
     pub(super) fn from_injected_effective_user(
         euid: u32,
         home: PathBuf,
@@ -105,6 +106,7 @@ impl ResolvedUserPaths {
         Ok(paths)
     }
 
+    #[cfg(test)]
     pub(super) fn resolve_first_install_selection_with_environment(
         &mut self,
         home_environment: Option<&OsStr>,

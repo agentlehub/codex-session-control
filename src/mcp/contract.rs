@@ -273,7 +273,6 @@ pub(super) enum ThreadInterruptResult {
     NotInterrupted { interrupted: bool },
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(super) enum ValidatedInput {
     ThreadCreate(ThreadCreateInput),
