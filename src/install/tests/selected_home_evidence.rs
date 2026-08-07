@@ -430,8 +430,6 @@ fn malformed_or_incompatible_schema_two_manifest_is_invalid_evidence() {
         ("target", serde_json::json!("incompatible-target")),
         ("pluginVersion", serde_json::json!("")),
         ("pluginVersion", serde_json::json!("not-a-version")),
-        ("codexVersion", serde_json::json!("")),
-        ("codexVersion", serde_json::json!("not-a-version")),
     ] {
         let (_root, paths) = fixture();
         let mut manifest = valid_manifest(&paths, &paths.home.join(".codex"));

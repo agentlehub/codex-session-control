@@ -383,6 +383,48 @@ async fn outer_update_retries_every_release_and_candidate_apply_stage() {
 }
 
 #[tokio::test]
+async fn outer_update_hands_off_after_independent_codex_version_change() {
+    let fixture = Fixture::new();
+    let original_authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(fixture.context(true)).await.unwrap();
+    let mut legacy_receipt: Value =
+        serde_json::from_slice(&fs::read(&fixture.paths.manifest).unwrap()).unwrap();
+    legacy_receipt["schemaVersion"] = json!(2);
+    legacy_receipt["codexVersion"] = json!(TESTED_CODEX_VERSION);
+    fs::write(
+        &fixture.paths.manifest,
+        serde_json::to_vec_pretty(&legacy_receipt).unwrap(),
+    )
+    .unwrap();
+    drop(original_authority);
+    fs::remove_file(&fixture.paths.socket).unwrap();
+
+    let current_version = crate::test_support::different_stable_version(TESTED_CODEX_VERSION);
+    fs::write(
+        &fixture.codex_version,
+        format!("codex-cli {current_version}\n"),
+    )
+    .unwrap();
+    let current_authority = FakeAuthority::start(&fixture.paths, &current_version).await;
+    let (endpoints, server, candidate_log) = immutable_release_server(&fixture).await;
+    fixture.clear_logs();
+
+    let report =
+        outer_update_with_endpoints(lifecycle_context_with_stage(&fixture, None), endpoints)
+            .await
+            .unwrap();
+
+    assert_eq!(report.stderr, "completed: candidate-apply\n");
+    assert_eq!(
+        fs::read_to_string(candidate_log).unwrap(),
+        "--version\nupdate\n"
+    );
+    assert!(!fixture.systemctl_log().contains(" restart "));
+    server.abort();
+    drop(current_authority);
+}
+
+#[tokio::test]
 async fn staged_update_retries_every_stage_for_running_and_stopped_services() {
     for running in [true, false] {
         for stage in STAGED_UPDATE_STAGES {

@@ -186,12 +186,6 @@ fn normalized_codex_version(display: &str) -> String {
         .unwrap_or_else(|_| "unknown".to_owned())
 }
 
-fn persisted_codex_version(display: &str) -> String {
-    semver::Version::parse(display)
-        .map(|version| version.to_string())
-        .unwrap_or_else(|_| UNKNOWN_CODEX_VERSION.to_owned())
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DesktopAttachmentStatus {
     Available,

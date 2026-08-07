@@ -35,7 +35,7 @@ use super::{
         remove_owned_empty_dir, resolve_codex_executable, shell_quote_path, validate_config_file,
         validate_control_socket, validate_existing,
     },
-    persisted_codex_version, product_target,
+    product_target,
     release::{
         RELEASE_CONNECT_TIMEOUT, RELEASE_METADATA_TIMEOUT, RELEASE_TRANSFER_IDLE_TIMEOUT,
         ReleaseAsset, ReleaseEndpoints, ReleaseStage, build_release_client,

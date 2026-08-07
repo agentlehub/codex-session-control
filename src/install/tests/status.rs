@@ -3,8 +3,6 @@ use std::{
     os::unix::fs::{PermissionsExt, symlink},
 };
 
-use serde_json::Value;
-
 use super::support::{FakeAuthority, Fixture};
 use super::*;
 
@@ -414,11 +412,8 @@ Failed checks:\n\
 {indent}action: journalctl --user -u codex-session-control-test-Setup1.service\n\
 - socket: enabled service socket is missing\n\
 {indent}action: journalctl --user -u codex-session-control-test-Setup1.service\n\
-- codex-version: executable version {untested_version} does not match installed manifest {tested_codex_version}\n\
-{indent}action: codex-session-control update\n\
 ",
             version = env!("CARGO_PKG_VERSION"),
-            tested_codex_version = TESTED_CODEX_VERSION,
             indent = "  ",
         )
     );
@@ -503,19 +498,6 @@ async fn tested_and_unparseable_versions_have_exact_advisory_behavior() {
         fs::remove_file(&fixture.enabled).unwrap();
         fs::remove_file(&fixture.active).unwrap();
         fs::write(&fixture.codex_version, version_output).unwrap();
-        let mut manifest: Value =
-            serde_json::from_slice(&fs::read(&fixture.paths.manifest).unwrap()).unwrap();
-        manifest["codexVersion"] = serde_json::json!(persisted_codex_version(
-            version_output
-                .trim()
-                .strip_prefix("codex-cli ")
-                .unwrap_or(version_output.trim())
-        ));
-        fs::write(
-            &fixture.paths.manifest,
-            serde_json::to_vec_pretty(&manifest).unwrap(),
-        )
-        .unwrap();
         fixture.clear_logs();
 
         let report = status_with_context(context(&fixture)).await.unwrap();
