@@ -131,7 +131,7 @@ impl<'de> Deserialize<'de> for ProductConfig {
         D: serde::Deserializer<'de>,
     {
         let wire = ProductConfigWire::deserialize(deserializer)?;
-        if wire.schema_version != CURRENT_SCHEMA_VERSION {
+        if wire.schema_version != PRODUCT_CONFIG_SCHEMA_VERSION {
             return Err(D::Error::custom("unsupported schema version"));
         }
         Ok(Self {
@@ -149,7 +149,7 @@ impl ProductConfig {
         expected_codex_home: &Path,
         expected_socket_path: &Path,
     ) -> Result<(), ControllerError> {
-        require_schema_version(self.schema_version)?;
+        require_product_config_schema_version(self.schema_version)?;
         require_absolute("codex_executable", &self.codex_executable)?;
         require_absolute("codex_home", &self.codex_home)?;
         require_absolute("socket_path", &self.socket_path)?;
@@ -177,7 +177,6 @@ pub struct InstalledRelease {
     pub projection_sha256: String,
     pub plugin_version: String,
     pub codex_executable: PathBuf,
-    pub codex_version: String,
     pub codex_home: PathBuf,
     pub socket_path: PathBuf,
     pub desktop_attachment: Option<DesktopAttachmentIdentity>,
@@ -192,7 +191,7 @@ struct InstalledReleaseWire {
     projection_sha256: String,
     plugin_version: String,
     codex_executable: PathBuf,
-    codex_version: String,
+    codex_version: Option<String>,
     codex_home: PathBuf,
     socket_path: PathBuf,
     desktop_attachment: PresentNullable<DesktopAttachmentIdentity>,
@@ -320,8 +319,7 @@ impl<'de> Deserialize<'de> for InstalledReleaseWire {
                         .ok_or_else(|| serde::de::Error::missing_field("pluginVersion"))?,
                     codex_executable: codex_executable
                         .ok_or_else(|| serde::de::Error::missing_field("codexExecutable"))?,
-                    codex_version: codex_version
-                        .ok_or_else(|| serde::de::Error::missing_field("codexVersion"))?,
+                    codex_version,
                     codex_home: codex_home
                         .ok_or_else(|| serde::de::Error::missing_field("codexHome"))?,
                     socket_path: socket_path
@@ -356,11 +354,21 @@ impl<'de> Deserialize<'de> for InstalledRelease {
         D: serde::Deserializer<'de>,
     {
         let wire = InstalledReleaseWire::deserialize(deserializer)?;
-        if wire.schema_version != CURRENT_SCHEMA_VERSION {
-            return Err(D::Error::custom("unsupported schema version"));
+        match wire.schema_version {
+            INSTALLED_RELEASE_SCHEMA_VERSION if wire.codex_version.is_none() => {}
+            INSTALLED_RELEASE_SCHEMA_VERSION => {
+                return Err(D::Error::custom(
+                    "codexVersion is not part of installed-release schema 3",
+                ));
+            }
+            LEGACY_INSTALLED_RELEASE_SCHEMA_VERSION if wire.codex_version.is_some() => {}
+            LEGACY_INSTALLED_RELEASE_SCHEMA_VERSION => {
+                return Err(D::Error::missing_field("codexVersion"));
+            }
+            _ => return Err(D::Error::custom("unsupported schema version")),
         }
         Ok(Self {
-            schema_version: wire.schema_version,
+            schema_version: INSTALLED_RELEASE_SCHEMA_VERSION,
             product_version: wire.product_version,
             target: wire.target,
             binary_sha256: wire.binary_sha256,
@@ -368,7 +376,6 @@ impl<'de> Deserialize<'de> for InstalledRelease {
             projection_sha256: wire.projection_sha256,
             plugin_version: wire.plugin_version,
             codex_executable: wire.codex_executable,
-            codex_version: wire.codex_version,
             codex_home: wire.codex_home,
             socket_path: wire.socket_path,
             desktop_attachment: wire.desktop_attachment.0,
@@ -382,11 +389,10 @@ impl InstalledRelease {
         expected_codex_home: &Path,
         expected_socket_path: &Path,
     ) -> Result<(), ControllerError> {
-        require_schema_version(self.schema_version)?;
+        require_installed_release_schema_version(self.schema_version)?;
         require_release_version("product_version", &self.product_version)?;
         require_release_target(&self.target)?;
         require_release_version("plugin_version", &self.plugin_version)?;
-        require_release_version("codex_version", &self.codex_version)?;
         require_sha256("binary_sha256", &self.binary_sha256)?;
         require_sha256("service_unit_sha256", &self.service_unit_sha256)?;
         require_sha256("projection_sha256", &self.projection_sha256)?;
@@ -402,10 +408,23 @@ impl InstalledRelease {
     }
 }
 
-const CURRENT_SCHEMA_VERSION: u32 = 2;
+const PRODUCT_CONFIG_SCHEMA_VERSION: u32 = 2;
+const LEGACY_INSTALLED_RELEASE_SCHEMA_VERSION: u32 = 2;
+const INSTALLED_RELEASE_SCHEMA_VERSION: u32 = 3;
 
-fn require_schema_version(schema_version: u32) -> Result<(), ControllerError> {
-    if schema_version == CURRENT_SCHEMA_VERSION {
+fn require_product_config_schema_version(schema_version: u32) -> Result<(), ControllerError> {
+    if schema_version == PRODUCT_CONFIG_SCHEMA_VERSION {
+        Ok(())
+    } else {
+        Err(ControllerError::InvalidData {
+            field: "schema_version",
+            reason: "unsupported value",
+        })
+    }
+}
+
+fn require_installed_release_schema_version(schema_version: u32) -> Result<(), ControllerError> {
+    if schema_version == INSTALLED_RELEASE_SCHEMA_VERSION {
         Ok(())
     } else {
         Err(ControllerError::InvalidData {
@@ -778,9 +797,36 @@ unknown = true
     }
 
     #[test]
+    fn installed_release_migrates_schema_two_without_persisting_codex_version() {
+        let legacy = json!({
+            "schemaVersion": 2,
+            "productVersion": "0.1.0",
+            "target": "x86_64-unknown-linux-gnu",
+            "binarySha256": "a".repeat(64),
+            "serviceUnitSha256": "b".repeat(64),
+            "projectionSha256": "c".repeat(64),
+            "pluginVersion": "0.1.0",
+            "codexExecutable": "/usr/bin/codex",
+            "codexVersion": "0.145.0",
+            "codexHome": "/home/test/.codex",
+            "socketPath": "/run/user/1000/codex-session-control/app-server.sock",
+            "desktopAttachment": null
+        });
+
+        let release: InstalledRelease = serde_json::from_value(legacy).unwrap();
+        let mut current = serde_json::to_value(release).unwrap();
+
+        assert_eq!(current["schemaVersion"], 3);
+        assert!(current.get("codexVersion").is_none());
+
+        current["codexVersion"] = json!("0.145.0");
+        assert!(serde_json::from_value::<InstalledRelease>(current).is_err());
+    }
+
+    #[test]
     fn installed_release_rejects_malformed_retained_release_identity() {
         let valid = json!({
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "productVersion": env!("CARGO_PKG_VERSION"),
             "target": "x86_64-unknown-linux-gnu",
             "binarySha256": "a".repeat(64),
@@ -788,7 +834,6 @@ unknown = true
             "projectionSha256": "c".repeat(64),
             "pluginVersion": env!("CARGO_PKG_VERSION"),
             "codexExecutable": "/usr/bin/codex",
-            "codexVersion": "0.145.0",
             "codexHome": "/home/test/.codex",
             "socketPath": "/run/user/1000/codex-session-control/app-server.sock",
             "desktopAttachment": null
@@ -801,8 +846,6 @@ unknown = true
             ("target", json!("target with space")),
             ("pluginVersion", json!("")),
             ("pluginVersion", json!("not-a-version")),
-            ("codexVersion", json!("")),
-            ("codexVersion", json!("not-a-version")),
         ] {
             let mut invalid = valid.clone();
             invalid[field] = value;
@@ -870,9 +913,9 @@ unknown = true
         }
 
         #[test]
-        fn schema_two_manifest_requires_explicit_nullable_desktop_attachment() {
+        fn schema_three_manifest_requires_explicit_nullable_desktop_attachment() {
             let manifest = json!({
-                "schemaVersion": 2,
+                "schemaVersion": 3,
                 "productVersion": env!("CARGO_PKG_VERSION"),
                 "target": "x86_64-unknown-linux-gnu",
                 "binarySha256": "a".repeat(64),
@@ -880,7 +923,6 @@ unknown = true
                 "projectionSha256": "c".repeat(64),
                 "pluginVersion": env!("CARGO_PKG_VERSION"),
                 "codexExecutable": "/usr/bin/codex",
-                "codexVersion": "0.145.0",
                 "codexHome": SELECTED_HOME,
                 "socketPath": SOCKET_PATH,
                 "desktopAttachment": null
@@ -900,7 +942,7 @@ unknown = true
         #[test]
         fn desktop_attachment_is_strict_and_path_safe() {
             let valid = json!({
-                "schemaVersion": 2,
+                "schemaVersion": 3,
                 "productVersion": env!("CARGO_PKG_VERSION"),
                 "target": "x86_64-unknown-linux-gnu",
                 "binarySha256": "a".repeat(64),
@@ -908,7 +950,6 @@ unknown = true
                 "projectionSha256": "c".repeat(64),
                 "pluginVersion": env!("CARGO_PKG_VERSION"),
                 "codexExecutable": "/usr/bin/codex",
-                "codexVersion": "0.145.0",
                 "codexHome": SELECTED_HOME,
                 "socketPath": SOCKET_PATH,
                 "desktopAttachment": {

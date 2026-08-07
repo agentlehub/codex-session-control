@@ -631,6 +631,93 @@ async fn running_changed_authority_inspects_then_restarts_exactly_once() {
 }
 
 #[tokio::test]
+async fn independently_changed_codex_version_does_not_depend_on_installed_receipt() {
+    let tested = semver::Version::parse(TESTED_CODEX_VERSION).unwrap();
+    let lower = if tested.patch > 0 {
+        semver::Version::new(tested.major, tested.minor, tested.patch - 1)
+    } else if tested.minor > 0 {
+        semver::Version::new(tested.major, tested.minor - 1, 0)
+    } else if tested.major > 0 {
+        semver::Version::new(tested.major - 1, 0, 0)
+    } else {
+        panic!("tested Codex version must have a lower stable version")
+    };
+    let versions = [
+        lower.to_string(),
+        crate::test_support::different_stable_version(TESTED_CODEX_VERSION),
+    ];
+
+    for version in versions {
+        let fixture = Fixture::new();
+        let original_authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+        setup_with_context(fixture.context(true)).await.unwrap();
+        drop(original_authority);
+        fs::remove_file(&fixture.paths.socket).unwrap();
+        fs::write(&fixture.codex_version, format!("codex-cli {version}\n")).unwrap();
+        let changed_authority = FakeAuthority::start(&fixture.paths, &version).await;
+        let candidate = higher_candidate(&fixture, "candidate-independent-codex-change");
+        fixture.clear_logs();
+
+        let report = staged_update_with_context(context(&fixture, candidate, None))
+            .await
+            .unwrap();
+
+        assert!(report.stdout.starts_with(&format!(
+            "Installed release: {}\n",
+            higher_test_release_version()
+        )));
+        assert_eq!(fixture.systemctl_log().matches(" restart ").count(), 0);
+        let receipt: Value =
+            serde_json::from_slice(&fs::read(&fixture.paths.manifest).unwrap()).unwrap();
+        assert_eq!(receipt["schemaVersion"], 3);
+        assert!(receipt.get("codexVersion").is_none());
+        drop(changed_authority);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_running_codex_is_restarted_to_match_the_current_executable() {
+    let fixture = Fixture::new();
+    let running_authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(fixture.context(true)).await.unwrap();
+    let current_version = crate::test_support::different_stable_version(TESTED_CODEX_VERSION);
+    fs::write(
+        &fixture.codex_version,
+        format!("codex-cli {current_version}\n"),
+    )
+    .unwrap();
+    let candidate = higher_candidate(&fixture, "candidate-stale-running-codex");
+    fs::write(&fixture.wait_for_socket, b"wait").unwrap();
+    fixture.clear_logs();
+    let paths = fixture.paths.clone();
+    let restart_requested = fixture.restart_requested.clone();
+    let version_after_restart = current_version.clone();
+    let starter = tokio::spawn(async move {
+        while !restart_requested.exists() {
+            tokio::task::yield_now().await;
+        }
+        FakeAuthority::start(&paths, &version_after_restart).await
+    });
+
+    let report = staged_update_with_context(context(&fixture, candidate, None))
+        .await
+        .unwrap();
+    let restarted_authority = starter.await.unwrap();
+
+    assert!(report.stdout.starts_with(&format!(
+        "Installed release: {}\n",
+        higher_test_release_version()
+    )));
+    assert_eq!(fixture.systemctl_log().matches(" restart ").count(), 1);
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(&fixture.paths.manifest).unwrap()).unwrap();
+    assert_eq!(receipt["schemaVersion"], 3);
+    assert!(receipt.get("codexVersion").is_none());
+    drop(restarted_authority);
+    drop(running_authority);
+}
+
+#[tokio::test]
 async fn retry_uses_last_manifest_after_partial_candidate_files() {
     let fixture = Fixture::new();
     let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
@@ -714,15 +801,10 @@ async fn tested_untested_and_unparseable_versions_only_change_update_advisory() 
                     )));
             assert_eq!(report.stderr.matches("Compatibility warning:").count(), 1);
         }
-        assert_eq!(
-            manifest(&fixture.paths).codex_version,
-            persisted_codex_version(
-                version_output
-                    .trim()
-                    .strip_prefix("codex-cli ")
-                    .unwrap_or(version_output.trim())
-            )
-        );
+        let receipt: Value =
+            serde_json::from_slice(&fs::read(&fixture.paths.manifest).unwrap()).unwrap();
+        assert_eq!(receipt["schemaVersion"], 3);
+        assert!(receipt.get("codexVersion").is_none());
     }
 }
 

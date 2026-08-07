@@ -473,16 +473,9 @@ completed: manifest\n"
         expected_stderr
             .push_str("Desktop attachment unavailable: codex-desktop.desktop was not found\n");
         assert_eq!(report.stderr, expected_stderr, "{version_output}");
-        let manifest: InstalledRelease =
+        let manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(&fixture.paths.manifest).unwrap()).unwrap();
-        assert_eq!(
-            manifest.codex_version,
-            persisted_codex_version(
-                version_output
-                    .trim()
-                    .strip_prefix("codex-cli ")
-                    .unwrap_or(version_output.trim())
-            )
-        );
+        assert_eq!(manifest["schemaVersion"], 3);
+        assert!(manifest.get("codexVersion").is_none());
     }
 }

@@ -29,7 +29,7 @@ use super::{
         run_codex_json,
     },
     paths::{SOCKET_SECURITY_REQUIREMENT, StatusFileError, read_status_file},
-    persisted_codex_version, product_target,
+    product_target,
     render::{RenderedProjection, render_projection},
     service::{LifecycleTarget, query_systemctl_state},
     sha256_bytes,
@@ -511,20 +511,6 @@ async fn inspect_app_server_health(
                 action: journal_action.to_owned(),
             }),
         }
-    }
-
-    if let (Some((display_version, _)), Some(manifest)) =
-        (&installed.codex_version, &installed.manifest)
-        && persisted_codex_version(display_version) != manifest.codex_version
-    {
-        failures.push(StatusFailure {
-            check: "codex-version",
-            detail: format!(
-                "executable version {display_version} does not match installed manifest {}",
-                manifest.codex_version
-            ),
-            action: update_action.to_owned(),
-        });
     }
 
     if let Some(manifest) = &installed.manifest

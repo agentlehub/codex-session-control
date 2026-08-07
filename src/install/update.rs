@@ -28,7 +28,7 @@ use super::{
         lifecycle_file_error, read_product_evidence_file, read_status_file, reconcile_file,
         resolve_codex_executable,
     },
-    persisted_codex_version, product_target,
+    product_target,
     release::{
         ReleaseEndpoints, build_release_client, discover_latest_release, download_verified_release,
         production_release_endpoints, release_target_for_arch,
@@ -364,7 +364,7 @@ async fn outer_restart_preflight(
     }
     let codex = resolve_codex_executable(&lifecycle.path_environment, &lifecycle.cwd)
         .map_err(|error| progress.fail(UpdateStage::RestartInspection, error, retry))?;
-    let (codex_version, _) = read_codex_version(&codex, &paths.codex_home)
+    let (_, expected_running_version) = read_codex_version(&codex, &paths.codex_home)
         .map_err(|error| progress.fail(UpdateStage::RestartInspection, error, retry))?;
     let desired_unit_sha256 = sha256_bytes(
         &render_unit(paths, &codex)
@@ -386,7 +386,7 @@ async fn outer_restart_preflight(
         &manifest,
         snapshot,
         &codex,
-        &codex_version,
+        &expected_running_version,
         &desired_unit_sha256,
     )
     .await
@@ -511,7 +511,7 @@ pub(super) async fn staged_update_with_context(
         &manifest,
         snapshot,
         &codex,
-        &codex_version,
+        &expected_running_version,
         &desired_unit_sha256,
     )
     .await;
@@ -551,7 +551,7 @@ disable stops running turns; the final enable is needed only when the service sh
     }
 
     if snapshot.active && restart == RestartInspection::ProvenChanged {
-        baseline_active_turn_gate(paths, &manifest.codex_version, context.terminal)
+        baseline_active_turn_gate(paths, &expected_running_version, context.terminal)
             .await
             .map_err(|error| progress.fail(UpdateStage::ActiveTurnGate, error, &retry))?;
         complete_lifecycle_stage!(
@@ -718,7 +718,7 @@ disable stops running turns; the final enable is needed only when the service sh
     );
 
     let installed = InstalledRelease {
-        schema_version: 2,
+        schema_version: 3,
         product_version: candidate.product_version.clone(),
         target: candidate.target.clone(),
         binary_sha256: candidate_sha256,
@@ -726,7 +726,6 @@ disable stops running turns; the final enable is needed only when the service sh
         projection_sha256: desired_projection.sha256.clone(),
         plugin_version: candidate.product_version.clone(),
         codex_executable: codex,
-        codex_version: persisted_codex_version(&codex_version),
         codex_home: paths.codex_home.clone(),
         socket_path: paths.socket.clone(),
         desktop_attachment: manifest.desktop_attachment.clone(),
@@ -905,7 +904,7 @@ async fn inspect_restart(
     manifest: &InstalledRelease,
     snapshot: ServiceSnapshot,
     desired_codex: &Path,
-    desired_codex_version: &str,
+    expected_running_version: &str,
     desired_unit_sha256: &str,
 ) -> RestartInspection {
     if !snapshot.active {
@@ -951,15 +950,11 @@ async fn inspect_restart(
         paths.socket.clone(),
         paths.codex_home.clone(),
         env!("CARGO_PKG_VERSION").to_owned(),
-        super::normalized_codex_version(&manifest.codex_version),
+        expected_running_version.to_owned(),
     );
     match client.connect_initialized().await {
         Ok(connection) if connection.compatibility_warning().is_none() => {}
-        Ok(_) => {
-            return RestartInspection::Unknown {
-                evidence: "running Codex version contradicts last coherent manifest".to_owned(),
-            };
-        }
+        Ok(_) => return RestartInspection::ProvenChanged,
         Err(_) => {
             return RestartInspection::Unknown {
                 evidence: "running app-server identity cannot be proven".to_owned(),
@@ -967,7 +962,6 @@ async fn inspect_restart(
         }
     }
     if desired_codex != manifest.codex_executable
-        || persisted_codex_version(desired_codex_version) != manifest.codex_version
         || desired_unit_sha256 != manifest.service_unit_sha256
     {
         RestartInspection::ProvenChanged

@@ -37,7 +37,7 @@ use super::{
         lifecycle_file_error, read_product_evidence_file, reconcile_file, resolve_codex_executable,
         validate_existing,
     },
-    persisted_codex_version, product_target,
+    product_target,
     release::RELEASE_REPOSITORY,
     render::{RenderedProjection, reconcile_projection, render_projection, render_unit},
     service::{
@@ -133,7 +133,6 @@ impl SetupProgress {
 pub(super) struct SetupPreflight {
     codex: PathBuf,
     systemctl: PathBuf,
-    codex_version: String,
     expected_running_version: String,
     compatibility_warning: Option<String>,
     binary: Vec<u8>,
@@ -485,7 +484,7 @@ pub(super) async fn setup_with_context(
     );
 
     let manifest = InstalledRelease {
-        schema_version: 2,
+        schema_version: 3,
         product_version: context.candidate.product_version.clone(),
         target: context.candidate.target.clone(),
         binary_sha256: preflight.binary_sha256,
@@ -493,7 +492,6 @@ pub(super) async fn setup_with_context(
         projection_sha256: preflight.projection.sha256.clone(),
         plugin_version: context.candidate.product_version.clone(),
         codex_executable: preflight.codex,
-        codex_version: persisted_codex_version(&preflight.codex_version),
         codex_home: paths.codex_home.clone(),
         socket_path: paths.socket.clone(),
         desktop_attachment: preflight.desktop.attachment.clone(),
@@ -671,7 +669,6 @@ pub(super) async fn setup_preflight(
     Ok(SetupPreflight {
         codex,
         systemctl,
-        codex_version,
         expected_running_version,
         compatibility_warning,
         binary,
