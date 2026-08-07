@@ -5,6 +5,8 @@ mod error;
 mod install;
 mod mcp;
 mod model;
+#[cfg(test)]
+mod test_support;
 
 use clap::Parser;
 use cli::{Cli, Command};

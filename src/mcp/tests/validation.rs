@@ -383,10 +383,12 @@ fn validation_requires_boolean_pinned_state() {
 
 #[test]
 fn validation_warning_prefixes_preserve_structured_success_and_error_bytes() {
-    let warnings = [
-        "WARNING: Target Codex 0.147.0 is untested. Codex session control was validated against Codex 0.146.0. Report this warning to the operator. The accompanying structured data remains authoritative.",
-        "WARNING: Target Codex unknown is untested. Codex session control was validated against Codex 0.146.0. Report this warning to the operator. The accompanying structured data remains authoritative.",
-    ];
+    let untested_version = crate::test_support::different_stable_version(TESTED_CODEX_VERSION);
+    let warnings = [untested_version.as_str(), "unknown"].map(|version| {
+        format!(
+            "WARNING: Target Codex {version} is untested. Codex session control was validated against Codex {TESTED_CODEX_VERSION}. Report this warning to the operator. The accompanying structured data remains authoritative."
+        )
+    });
 
     for (tool, _, _) in TOOL_EFFECTS {
         let structured = json!({"tool": tool, "value": [3, 2, 1]});
@@ -395,7 +397,7 @@ fn validation_warning_prefixes_preserve_structured_success_and_error_bytes() {
         let error_value = serde_json::to_value(&error).unwrap();
         let error_bytes = serde_json::to_vec(&error_value).unwrap();
 
-        for warning in warnings {
+        for warning in &warnings {
             let success = success_result(structured.clone(), Some(warning));
             assert_eq!(
                 serde_json::to_vec(success.structured_content.as_ref().unwrap()).unwrap(),

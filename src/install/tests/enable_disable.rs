@@ -46,7 +46,7 @@ fn apply_state(
 async fn enable_converges_every_service_state_with_exact_receipt_and_argv() {
     for (name, enabled, active, socket) in SERVICE_STATES {
         let fixture = Fixture::new();
-        let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
         let authority = apply_state(&fixture, authority, enabled, active, socket);
         fixture.clear_logs();
@@ -61,7 +61,7 @@ async fn enable_converges_every_service_state_with_exact_receipt_and_argv() {
                     tokio::task::yield_now().await;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                FakeAuthority::start(&paths, "0.146.0").await
+                FakeAuthority::start(&paths, TESTED_CODEX_VERSION).await
             }))
         };
 
@@ -106,7 +106,7 @@ Run codex-session-control setup to attach Desktop.\n",
 #[tokio::test]
 async fn enable_with_null_attachment_does_not_auto_select_desktop() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let launcher = fixture._root.path().join("desktop-launcher");
     let desktop_entry = fixture
@@ -153,7 +153,7 @@ async fn enable_with_null_attachment_does_not_auto_select_desktop() {
 #[tokio::test]
 async fn enable_publishes_a_verified_persisted_descriptor_before_service_enable() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let launcher = fixture._root.path().join("desktop-launcher");
     let descriptor = fixture
@@ -202,7 +202,7 @@ async fn enable_publishes_a_verified_persisted_descriptor_before_service_enable(
 async fn enable_start_failure_preserves_service_state_and_cleans_a_published_descriptor_when_inactive_absent()
  {
     let fixture = Fixture::new();
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let launcher = fixture._root.path().join("desktop-launcher");
     let descriptor = fixture
@@ -249,7 +249,7 @@ async fn enable_start_failure_preserves_service_state_and_cleans_a_published_des
 async fn enable_inspects_a_known_descriptor_before_service_mutation_when_launcher_is_unavailable() {
     for unsafe_descriptor in [false, true] {
         let fixture = Fixture::new();
-        let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         let launcher = fixture._root.path().join("desktop-launcher");
         let descriptor = fixture
             .paths
@@ -286,7 +286,7 @@ async fn enable_inspects_a_known_descriptor_before_service_mutation_when_launche
 async fn enable_rejects_config_or_unit_drift_before_service_mutation() {
     for drift in ["configuration", "service-unit"] {
         let fixture = Fixture::new();
-        let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
         if drift == "configuration" {
             fs::write(&fixture.paths.config, b"invalid").unwrap();
@@ -305,8 +305,13 @@ async fn enable_rejects_config_or_unit_drift_before_service_mutation() {
 #[tokio::test]
 async fn enable_prints_only_the_approved_compatibility_advisory() {
     let fixture = Fixture::new();
-    fs::write(&fixture.codex_version, b"codex-cli 0.147.0\n").unwrap();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.147.0").await;
+    let untested_version = crate::test_support::different_stable_version(TESTED_CODEX_VERSION);
+    fs::write(
+        &fixture.codex_version,
+        format!("codex-cli {untested_version}\n"),
+    )
+    .unwrap();
+    let _authority = FakeAuthority::start(&fixture.paths, &untested_version).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     fixture.clear_logs();
 
@@ -317,8 +322,8 @@ async fn enable_prints_only_the_approved_compatibility_advisory() {
         format!(
             "completed: service-enable\n\
 completed: service-verify\n\
-Compatibility warning: Codex app-server 0.147.0 has not been tested with codex-session-control {}; native results remain authoritative.\n",
-            env!("CARGO_PKG_VERSION")
+Compatibility warning: Codex app-server {untested_version} has not been tested with codex-session-control {}; native results remain authoritative.\n",
+            env!("CARGO_PKG_VERSION"),
         )
     );
 }
@@ -327,7 +332,7 @@ Compatibility warning: Codex app-server 0.147.0 has not been tested with codex-s
 async fn disable_without_install_metadata_stops_safely_and_reports_incomplete_descriptor_cleanup() {
     for (name, enabled, active, socket) in SERVICE_STATES {
         let fixture = Fixture::new();
-        let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
         let authority = apply_state(&fixture, authority, enabled, active, socket);
         for path in [
@@ -371,7 +376,7 @@ failed at descriptor-remove: Desktop descriptor cleanup is incomplete:"
 #[tokio::test]
 async fn lifecycle_stage_failure_has_exact_exit_one_error_and_no_false_receipt() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     fs::write(
         &fixture.systemctl_fail,

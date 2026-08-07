@@ -9,7 +9,7 @@ use crate::model::InstalledRelease;
 #[tokio::test]
 async fn first_install_writes_manifest_last_and_exact_receipt() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
 
     let report = setup_with_context(fixture.context(false)).await.unwrap();
 
@@ -68,7 +68,7 @@ async fn first_install_waits_for_safe_socket_after_service_start_returns() {
             tokio::task::yield_now().await;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
-        FakeAuthority::start(&paths, "0.146.0").await
+        FakeAuthority::start(&paths, TESTED_CODEX_VERSION).await
     });
 
     let report = setup_with_context(fixture.context(true)).await.unwrap();
@@ -111,7 +111,7 @@ async fn preflight_treats_absent_selected_home_as_empty_native_state() {
 #[tokio::test]
 async fn setup_is_idempotent_blocks_invalid_identity_and_accepts_manifestless_matching_partial() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     fixture.clear_logs();
 
@@ -208,7 +208,7 @@ async fn setup_is_idempotent_blocks_invalid_identity_and_accepts_manifestless_ma
 #[tokio::test]
 async fn setup_service_verify_accepts_mode_0700_owner_only_socket() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     fs::set_permissions(&fixture.paths.socket, fs::Permissions::from_mode(0o700)).unwrap();
 
     let report = setup_with_context(fixture.context(true)).await.unwrap();
@@ -224,7 +224,7 @@ async fn setup_service_verify_accepts_mode_0700_owner_only_socket() {
 #[tokio::test]
 async fn manifestless_older_release_routes_to_its_exact_executable() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     create_shared_dir(fixture.paths.binary.parent().unwrap(), fixture.paths.euid).unwrap();
     super::write_executable_fixture(
         &fixture.paths.binary,
@@ -253,7 +253,7 @@ async fn manifestless_older_release_routes_to_its_exact_executable() {
 #[tokio::test]
 async fn manifestless_unsafe_binary_is_never_executed_for_release_discovery() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     create_shared_dir(fixture.paths.binary.parent().unwrap(), fixture.paths.euid).unwrap();
     let marker = fixture._root.path().join("unsafe-binary-executed");
     let target = fixture._root.path().join("unsafe-binary-target");
@@ -298,7 +298,7 @@ fn malformed_product_marketplace_entry_is_not_treated_as_absent() {
 #[tokio::test]
 async fn different_manifest_and_ambiguous_partial_fail_before_mutation() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
 
     let mut manifest: Value =
@@ -332,7 +332,7 @@ async fn different_manifest_and_ambiguous_partial_fail_before_mutation() {
 #[tokio::test]
 async fn exact_product_native_plugin_drift_is_repaired_without_marketplace_churn() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     fs::write(&fixture.plugin_version_state, b"0.0.1").unwrap();
     fixture.clear_logs();
@@ -349,7 +349,8 @@ async fn exact_product_native_plugin_drift_is_repaired_without_marketplace_churn
 #[tokio::test]
 async fn running_version_mismatch_and_stage_failure_never_write_manifest() {
     let mismatch = Fixture::new();
-    let _authority = FakeAuthority::start(&mismatch.paths, "0.145.0").await;
+    let untested_version = crate::test_support::different_stable_version(TESTED_CODEX_VERSION);
+    let _authority = FakeAuthority::start(&mismatch.paths, &untested_version).await;
     let error = setup_with_context(mismatch.context(true))
         .await
         .unwrap_err();
@@ -359,7 +360,7 @@ async fn running_version_mismatch_and_stage_failure_never_write_manifest() {
     assert!(!mismatch.systemctl_log().contains("restart"));
 
     let failed = Fixture::new();
-    let _authority = FakeAuthority::start(&failed.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&failed.paths, TESTED_CODEX_VERSION).await;
     fs::write(&failed.systemctl_fail, "--user daemon-reload").unwrap();
     let error = setup_with_context(failed.context(true)).await.unwrap_err();
     assert_eq!(
@@ -384,7 +385,7 @@ async fn initialize_home_mismatch_fails_service_verify_without_manifest() {
     let fixture = Fixture::new();
     let _authority = FakeAuthority::start_reporting(
         &fixture.paths,
-        "0.146.0",
+        TESTED_CODEX_VERSION,
         fixture.paths.home.join("wrong-codex-home"),
     )
     .await;
@@ -398,15 +399,28 @@ async fn initialize_home_mismatch_fails_service_verify_without_manifest() {
 
 #[tokio::test]
 async fn tested_untested_and_unparseable_versions_only_change_advisory() {
-    for (version_output, authority_version, warning) in [
-        ("codex-cli 0.145.0\n", "0.145.0", true),
-        ("codex-cli 0.146.0\n", "0.146.0", false),
-        ("codex-cli 0.147.0\n", "0.147.0", true),
-        ("codex-cli not-semver\n", "not-semver", true),
-    ] {
+    let untested_version = crate::test_support::different_stable_version(TESTED_CODEX_VERSION);
+    let cases = [
+        (
+            format!("codex-cli {untested_version}\n"),
+            untested_version,
+            true,
+        ),
+        (
+            TESTED_CODEX_CLI_VERSION_OUTPUT.to_owned(),
+            TESTED_CODEX_VERSION.to_owned(),
+            false,
+        ),
+        (
+            "codex-cli not-semver\n".to_owned(),
+            "not-semver".to_owned(),
+            true,
+        ),
+    ];
+    for (version_output, authority_version, warning) in cases {
         let fixture = Fixture::new();
-        fs::write(&fixture.codex_version, version_output).unwrap();
-        let _authority = FakeAuthority::start(&fixture.paths, authority_version).await;
+        fs::write(&fixture.codex_version, &version_output).unwrap();
+        let _authority = FakeAuthority::start(&fixture.paths, &authority_version).await;
 
         let report = setup_with_context(fixture.context(true)).await.unwrap();
 

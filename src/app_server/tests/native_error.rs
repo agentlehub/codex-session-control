@@ -5,7 +5,7 @@ fn only_exact_fixture_error_exemplars_receive_special_categories() {
     let fixture = protocol_fixture();
     let missing = &fixture.error_exemplars["threadNotFound"];
     let conflict = &fixture.error_exemplars["activeTurnMismatch"];
-    assert_eq!(fixture.codex_version, "0.146.0");
+    assert_eq!(fixture.codex_version, TESTED_CODEX_VERSION);
     assert_eq!(fixture.schema_sha256.len(), 64);
     assert!(fixture.successful_exemplars.contains_key("initialize"));
     assert!(fixture.turns_newest_first);

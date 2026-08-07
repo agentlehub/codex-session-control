@@ -18,7 +18,7 @@ use super::{
 
 #[test]
 fn descriptor_rendering_and_inspection_are_value_exact_and_safe() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let config = root.path().join("config");
     let identity = DesktopAttachmentIdentity {
         launcher_path: PathBuf::from("/bin/true"),
@@ -84,7 +84,7 @@ fn descriptor_rendering_and_inspection_are_value_exact_and_safe() {
 
 #[test]
 fn descriptor_parent_creation_is_limited_to_the_root_and_app_child() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let config = root.path().join("config");
     let identity = DesktopAttachmentIdentity {
         launcher_path: PathBuf::from("/bin/true"),
@@ -103,7 +103,7 @@ fn descriptor_parent_creation_is_limited_to_the_root_and_app_child() {
 
 #[test]
 fn switch_preflight_never_mutates_and_rejects_foreign_paths() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let old = DesktopAttachmentIdentity {
         launcher_path: PathBuf::from("/bin/true"),
         app_id: "old-desktop".to_owned(),
@@ -141,7 +141,7 @@ fn switch_preflight_never_mutates_and_rejects_foreign_paths() {
 
 #[test]
 fn descriptor_parent_creation_requests_private_new_directories_without_chmodding_existing_ones() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let config = root.path().join("config");
     let app = config.join("codex-desktop");
     fs::create_dir(&config).unwrap();
@@ -160,7 +160,7 @@ fn descriptor_parent_creation_requests_private_new_directories_without_chmodding
 
 #[test]
 fn descriptor_inspection_and_switch_preflight_reject_unsafe_and_foreign_states_without_writes() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let first = DesktopAttachmentIdentity {
         launcher_path: PathBuf::from("/bin/true"),
         app_id: "first".to_owned(),
@@ -205,7 +205,7 @@ fn descriptor_inspection_and_switch_preflight_reject_unsafe_and_foreign_states_w
 
 #[test]
 fn descriptor_bytes_and_open_parent_race_checks_are_exact_and_non_following() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let identity = DesktopAttachmentIdentity {
         launcher_path: PathBuf::from("/bin/true"),
         app_id: "codex-desktop".to_owned(),
@@ -244,7 +244,7 @@ fn descriptor_bytes_and_open_parent_race_checks_are_exact_and_non_following() {
 
 #[test]
 fn switch_preflight_rejects_old_foreign_and_unsafe_paths_without_mutating_either_descriptor() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let old = DesktopAttachmentIdentity {
         launcher_path: PathBuf::from("/bin/true"),
         app_id: "old".to_owned(),

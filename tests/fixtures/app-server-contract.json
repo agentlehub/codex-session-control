@@ -1,5 +1,5 @@
 {
-  "codexVersion": "0.146.0",
+  "codexVersion": "0.147.0",
   "errorExemplars": {
     "activeTurnMismatch": {
       "code": -32600,
@@ -10,7 +10,7 @@
       "message": "thread not loaded: 00000000-0000-7000-8000-000000000000"
     }
   },
-  "schemaSha256": "5dd3854b97c78ed6a11af73988e7a1eca45077d60e4af9403a9dfa085e2465d8",
+  "schemaSha256": "87557fffd00346edf42cdafca5d4f0b1365beb79710d2e7c0bfb9f04b2539f0f",
   "successfulExemplars": {
     "activeTurn": {
       "turn": {
@@ -55,7 +55,7 @@
       "codexHome": "/tmp/codex-session-control-fixture/home/.codex",
       "platformFamily": "unix",
       "platformOs": "linux",
-      "userAgent": "Codex Desktop/0.146.0 (Arch Linux Unknown; x86_64) dumb (codex_session_control; 0.2.0)"
+      "userAgent": "codex_session_control/0.147.0 (Arch Linux Unknown; x86_64) dumb (codex_session_control; 0.2.3)"
     },
     "threadList": {
       "data": [
@@ -64,8 +64,9 @@
           "cwd": "/tmp/codex-session-control-fixture/workspace",
           "forkedFromId": null,
           "id": "thread_session_control_1",
-          "isPinned": false,
           "name": null,
+          "section": null,
+          "sectionEnteredAt": null,
           "status": {
             "type": "idle"
           },
@@ -74,45 +75,52 @@
       ],
       "nextCursor": null
     },
-    "threadMetadataUpdate": {
-      "thread": {
-        "createdAt": 0,
-        "cwd": "/tmp/codex-session-control-fixture/workspace",
-        "forkedFromId": null,
-        "id": "thread_session_control_1",
-        "isPinned": true,
-        "name": null,
-        "preview": "",
-        "status": {
-          "type": "idle"
-        },
-        "updatedAt": 0
-      }
-    },
     "threadRead": {
       "thread": {
         "createdAt": 0,
         "cwd": "/tmp/codex-session-control-fixture/workspace",
         "forkedFromId": null,
         "id": "thread_session_control_1",
-        "isPinned": false,
         "name": null,
         "preview": "",
+        "section": null,
+        "sectionEnteredAt": null,
         "status": {
           "type": "idle"
         },
         "updatedAt": 0
       }
     },
+    "threadReadPinned": {
+      "thread": {
+        "createdAt": 0,
+        "cwd": "/tmp/codex-session-control-fixture/workspace",
+        "forkedFromId": null,
+        "id": "thread_session_control_1",
+        "name": null,
+        "preview": "",
+        "section": {
+          "id": "01984de2-8f74-7c91-a3b2-5c5e937cf318",
+          "name": "Pinned"
+        },
+        "sectionEnteredAt": 0,
+        "status": {
+          "type": "idle"
+        },
+        "updatedAt": 0
+      }
+    },
+    "threadSectionMove": {},
     "threadStart": {
       "thread": {
         "createdAt": 0,
         "cwd": "/tmp/codex-session-control-fixture/workspace",
         "forkedFromId": null,
         "id": "thread_session_control_1",
-        "isPinned": false,
         "name": null,
         "preview": "",
+        "section": null,
+        "sectionEnteredAt": null,
         "status": {
           "type": "idle"
         },

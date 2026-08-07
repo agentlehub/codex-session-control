@@ -21,7 +21,7 @@ fn descriptor(fixture: &Fixture) -> PathBuf {
 }
 
 async fn setup_attached(fixture: &Fixture) -> FakeAuthority {
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     let launcher = fixture._root.path().join("desktop-launcher");
     super::write_executable_fixture(
         &launcher,

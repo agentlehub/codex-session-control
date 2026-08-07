@@ -293,7 +293,7 @@ async fn setup_retries_after_every_completed_stage_without_rollback() {
     for stage in SETUP_STAGES {
         let fixture = Fixture::new();
         let preserved = seed_preserved_normal_home_state(&fixture);
-        let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         let mut context = fixture.context(true);
         context.target = context.target.fail_after_completed_stage(stage);
 
@@ -326,7 +326,7 @@ async fn outer_update_retries_every_release_and_candidate_apply_stage() {
         "candidate-apply",
     ] {
         let fixture = Fixture::new();
-        let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
         let (endpoints, server, candidate_log) = immutable_release_server(&fixture).await;
         let setup = fixture.context(true);
@@ -387,7 +387,7 @@ async fn staged_update_retries_every_stage_for_running_and_stopped_services() {
     for running in [true, false] {
         for stage in STAGED_UPDATE_STAGES {
             let fixture = Fixture::new();
-            let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+            let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
             setup_with_context(fixture.context(true)).await.unwrap();
             let authority = if running {
                 Some(authority)
@@ -453,7 +453,7 @@ async fn staged_update_retries_every_stage_for_running_and_stopped_services() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn active_turn_gate_failure_retries_without_a_process_handoff() {
     let fixture = Fixture::new();
-    let old_authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let old_authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let candidate = candidate(&fixture, "candidate-active-turn-retry");
     let new_bin = fixture.paths.home.join("new-codex-bin");
@@ -495,7 +495,7 @@ async fn active_turn_gate_failure_retries_without_a_process_handoff() {
         while !restart_requested.exists() {
             tokio::task::yield_now().await;
         }
-        FakeAuthority::start(&paths, "0.146.0").await
+        FakeAuthority::start(&paths, TESTED_CODEX_VERSION).await
     });
 
     let report = staged_update_with_context(update_context(&fixture, candidate, None, Some(path)))
@@ -521,7 +521,7 @@ async fn enable_and_disable_retry_after_each_completed_service_stage() {
     ] {
         for stage in stages {
             let fixture = Fixture::new();
-            let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+            let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
             setup_with_context(fixture.context(true)).await.unwrap();
             if operation == "enable" {
                 disable_with_context(lifecycle_context_with_stage(&fixture, None))
@@ -534,7 +534,7 @@ async fn enable_and_disable_retry_after_each_completed_service_stage() {
                     while !active.exists() {
                         tokio::task::yield_now().await;
                     }
-                    FakeAuthority::start(&paths, "0.146.0").await
+                    FakeAuthority::start(&paths, TESTED_CODEX_VERSION).await
                 });
                 let error =
                     enable_with_context(lifecycle_context_with_stage(&fixture, Some(stage)))
@@ -570,7 +570,7 @@ async fn enable_and_disable_retry_after_each_completed_service_stage() {
 async fn uninstall_retries_while_a_valid_identity_survives() {
     for stage in UNINSTALL_STAGES {
         let fixture = Fixture::new();
-        let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
 
         let error = uninstall_with_context(lifecycle_context_with_stage(&fixture, Some(stage)))
@@ -608,7 +608,7 @@ async fn uninstall_retries_while_a_valid_identity_survives() {
 #[tokio::test]
 async fn uninstall_retry_crosses_the_exact_missing_managed_unit_boundary() {
     let fixture = Fixture::new();
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
 
     let error = uninstall_with_context(lifecycle_context_with_stage(
@@ -660,7 +660,7 @@ async fn missing_unit_retry_rejects_every_unproven_service_boundary() {
         "socket",
     ] {
         let fixture = Fixture::new();
-        let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
         let unit = fs::read(&fixture.paths.unit).unwrap();
         uninstall_with_context(lifecycle_context_with_stage(
@@ -704,7 +704,8 @@ async fn missing_unit_retry_rejects_every_unproven_service_boundary() {
                 .unwrap();
             }
             "socket" => {
-                socket_authority = Some(FakeAuthority::start(&fixture.paths, "0.146.0").await);
+                socket_authority =
+                    Some(FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await);
             }
             _ => unreachable!(),
         }
@@ -727,7 +728,7 @@ async fn missing_unit_retry_rejects_every_unproven_service_boundary() {
 #[tokio::test]
 async fn binary_remove_failure_reports_terminal_partial_without_a_retry_or_full_receipt() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let binary_parent = fixture.paths.binary.parent().unwrap();
     fs::set_permissions(binary_parent, fs::Permissions::from_mode(0o500)).unwrap();

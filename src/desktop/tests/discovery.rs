@@ -20,7 +20,7 @@ use super::{
 
 #[test]
 fn xdg_resolution_shadows_lower_entries_including_hidden_entries() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let home = root.path().join("home");
     let data_home = root.path().join("data-home");
     let data_dir = root.path().join("data-dir");
@@ -69,7 +69,7 @@ fn xdg_resolution_shadows_lower_entries_including_hidden_entries() {
 
 #[tokio::test]
 async fn discovery_uses_direct_argv_and_requires_complete_capable_build_info() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let home = root.path().join("home");
     let config = root.path().join("config");
     let launcher = root.path().join("codex-desktop");
@@ -173,7 +173,7 @@ async fn discovery_uses_direct_argv_and_requires_complete_capable_build_info() {
 
 #[tokio::test]
 async fn build_info_child_receives_only_the_supplied_environment() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let launcher = root.path().join("codex-desktop");
     let observed = root.path().join("observed");
     write_executable_fixture(
@@ -199,7 +199,7 @@ async fn build_info_child_receives_only_the_supplied_environment() {
 
 #[test]
 fn xdg_empty_values_default_and_relative_roots_are_ignored_without_other_filename_scans() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let home = root.path().join("home");
     let data_home = home.join(".local/share");
     fs::create_dir_all(data_home.join("applications")).unwrap();
@@ -258,7 +258,7 @@ fn xdg_empty_values_default_and_relative_roots_are_ignored_without_other_filenam
 
 #[tokio::test]
 async fn override_and_launcher_validation_require_a_direct_owner_executable_not_a_desktop_entry() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let home = root.path().join("home");
     let config = root.path().join("config");
     let launcher = root.path().join("launcher");
@@ -328,7 +328,7 @@ fn launcher_validation_accepts_a_safe_root_owned_executable() {
 
 #[test]
 fn launcher_validation_rejects_group_or_world_writable_executables() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let launcher = root.path().join("launcher");
     write_executable_fixture(&launcher, "#!/bin/sh\nexit 0\n");
 
@@ -343,7 +343,7 @@ fn launcher_validation_rejects_group_or_world_writable_executables() {
 
 #[tokio::test]
 async fn launcher_rejects_cross_uid_replaceable_ancestors_before_spawning_a_replacement() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let home = root.path().join("home");
     let config = root.path().join("config");
     let unsafe_parent = root.path().join("non-sticky-writable");
@@ -388,7 +388,7 @@ async fn launcher_rejects_cross_uid_replaceable_ancestors_before_spawning_a_repl
 #[tokio::test]
 async fn discovery_classifies_absent_hidden_malformed_unreadable_and_unexecutable_entries_without_lifecycle_work()
  {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let home = root.path().join("home");
     let data_home = root.path().join("data-home");
     let launcher = root.path().join("launcher");
@@ -443,7 +443,7 @@ async fn discovery_classifies_absent_hidden_malformed_unreadable_and_unexecutabl
 
 #[tokio::test]
 async fn desktop_entry_environment_is_the_exact_child_environment_used_for_build_info() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let home = root.path().join("home");
     let child_home = root.path().join("child-home");
     let child_config = root.path().join("child-config");

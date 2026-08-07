@@ -97,7 +97,7 @@ impl ScriptedAuthority {
                                 "id": initialize["id"],
                                 "result": {
                                     "codexHome": codex_home,
-                                    "userAgent": "codex-cli 0.146.0"
+                                    "userAgent": TESTED_CODEX_CLI_VERSION
                                 }
                             })
                             .to_string(),
@@ -223,7 +223,7 @@ async fn pagination_requests_all_sources_and_keeps_only_normalized_active_thread
     )
     .await;
 
-    let active = list_active_threads(&fixture.paths, "0.146.0")
+    let active = list_active_threads(&fixture.paths, TESTED_CODEX_VERSION)
         .await
         .unwrap();
 
@@ -249,10 +249,13 @@ async fn page_and_decode_failures_abort_the_gate() {
         let fixture = Fixture::new();
         let authority = ScriptedAuthority::start(&fixture.paths, vec![response]).await;
 
-        let error =
-            baseline_active_turn_gate(&fixture.paths, "0.146.0", TerminalState::noninteractive())
-                .await
-                .unwrap_err();
+        let error = baseline_active_turn_gate(
+            &fixture.paths,
+            TESTED_CODEX_VERSION,
+            TerminalState::noninteractive(),
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(error.to_string(), "active task inspection failed");
         assert_eq!(authority.requests().len(), 1);
@@ -265,10 +268,13 @@ async fn initialize_failure_aborts_the_gate_before_listing() {
     let authority =
         ScriptedAuthority::start_with_initialize_failures(&fixture.paths, vec![], vec![true]).await;
 
-    let error =
-        baseline_active_turn_gate(&fixture.paths, "0.146.0", TerminalState::noninteractive())
-            .await
-            .unwrap_err();
+    let error = baseline_active_turn_gate(
+        &fixture.paths,
+        TESTED_CODEX_VERSION,
+        TerminalState::noninteractive(),
+    )
+    .await
+    .unwrap_err();
 
     assert_eq!(error.to_string(), "active task inspection failed");
     assert!(authority.requests().is_empty());
@@ -286,9 +292,13 @@ async fn zero_active_still_runs_one_final_complete_inspection() {
     )
     .await;
 
-    baseline_active_turn_gate(&fixture.paths, "0.146.0", TerminalState::noninteractive())
-        .await
-        .unwrap();
+    baseline_active_turn_gate(
+        &fixture.paths,
+        TESTED_CODEX_VERSION,
+        TerminalState::noninteractive(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(authority.requests().len(), 2);
 }
@@ -301,10 +311,13 @@ async fn noninteractive_and_declined_active_work_leave_the_gate_closed() {
         vec![page(vec![active("thread-a", "Alpha")], None)],
     )
     .await;
-    let error =
-        baseline_active_turn_gate(&fixture.paths, "0.146.0", TerminalState::noninteractive())
-            .await
-            .unwrap_err();
+    let error = baseline_active_turn_gate(
+        &fixture.paths,
+        TESTED_CODEX_VERSION,
+        TerminalState::noninteractive(),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(
         error.to_string(),
         "active tasks require interactive restart approval"
@@ -318,7 +331,7 @@ async fn noninteractive_and_declined_active_work_leave_the_gate_closed() {
     )
     .await;
     let (terminal, prompt) = TerminalState::scripted([""]);
-    let error = baseline_active_turn_gate(&fixture.paths, "0.146.0", terminal)
+    let error = baseline_active_turn_gate(&fixture.paths, TESTED_CODEX_VERSION, terminal)
         .await
         .unwrap_err();
     assert_eq!(error.to_string(), "active task restart approval declined");
@@ -346,7 +359,7 @@ async fn affirmative_rechecks_and_new_ids_require_the_complete_current_set_again
     .await;
     let (terminal, prompt) = TerminalState::scripted(["y", "yes"]);
 
-    baseline_active_turn_gate(&fixture.paths, "0.146.0", terminal)
+    baseline_active_turn_gate(&fixture.paths, TESTED_CODEX_VERSION, terminal)
         .await
         .unwrap();
 
@@ -409,7 +422,7 @@ fn higher_candidate(fixture: &Fixture, name: &str) -> PathBuf {
 async fn every_gate_failure_keeps_installed_state_unchanged() {
     for case in ["initialize", "page", "decode", "noninteractive"] {
         let fixture = Fixture::new();
-        let setup_authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let setup_authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
         drop(setup_authority);
         let responses = match case {
@@ -460,7 +473,7 @@ async fn every_gate_failure_keeps_installed_state_unchanged() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accepted_gate_has_no_second_handoff_and_restarts_only_the_service() {
     let fixture = Fixture::new();
-    let setup_authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let setup_authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     drop(setup_authority);
     let authority = ScriptedAuthority::start(
@@ -491,7 +504,7 @@ async fn accepted_gate_has_no_second_handoff_and_restarts_only_the_service() {
         while !restart_requested.exists() {
             tokio::task::yield_now().await;
         }
-        FakeAuthority::start(&paths, "0.146.0").await
+        FakeAuthority::start(&paths, TESTED_CODEX_VERSION).await
     });
 
     let report = staged_update_with_context(context).await.unwrap();
