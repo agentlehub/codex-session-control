@@ -21,8 +21,8 @@ async fn live_schema_digest_matches_committed_fixture() -> Result<(), Box<dyn Er
 
 #[tokio::test]
 #[ignore = "requires the configured supported Codex CLI version"]
-async fn live_read_list_fork_title_goal_interrupt_mappings() -> Result<(), Box<dyn Error>> {
-    cases::live_read_list_fork_title_goal_interrupt_mappings().await
+async fn live_read_list_fork_title_pin_goal_interrupt_mappings() -> Result<(), Box<dyn Error>> {
+    cases::live_read_list_fork_title_pin_goal_interrupt_mappings().await
 }
 
 #[tokio::test]

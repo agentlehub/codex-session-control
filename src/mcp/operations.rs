@@ -14,6 +14,8 @@ use crate::{
 
 use super::contract::*;
 
+const PINNED_THREAD_SECTION_ID: &str = "01984de2-8f74-7c91-a3b2-5c5e937cf318";
+
 #[derive(Debug)]
 pub(super) enum Reconciliation {
     GoalGet { thread_id: String },
@@ -253,12 +255,31 @@ pub(super) async fn set_pin(
     let thread_id = input
         .thread_id
         .ok_or_else(|| malformed_result("thread_pin_set", "validation"))?;
+    let read: Value = connection
+        .request(
+            "thread/read",
+            json!({"threadId": thread_id, "includeTurns": false}),
+        )
+        .await?;
+    let currently_pinned = pin_state_from_native(&read, &thread_id)?;
+    if currently_pinned == input.pinned {
+        return Ok(ThreadPinSetResult {
+            thread_id,
+            pinned: currently_pinned,
+        });
+    }
+
+    let section_id = if input.pinned {
+        json!(PINNED_THREAD_SECTION_ID)
+    } else {
+        Value::Null
+    };
     let response = mutation_request(
         client,
         connection,
         "thread_pin_set",
-        "thread/metadata/update",
-        json!({"threadId": thread_id, "isPinned": input.pinned}),
+        "thread/section/move",
+        json!({"threadId": thread_id, "sectionId": section_id}),
         Some(&thread_id),
         None,
         Reconciliation::CompactThreadRead {
@@ -266,22 +287,36 @@ pub(super) async fn set_pin(
         },
     )
     .await?;
+    if !response.is_object() {
+        return Err(malformed_result("thread_pin_set", "thread/section/move"));
+    }
+    Ok(ThreadPinSetResult {
+        thread_id,
+        pinned: input.pinned,
+    })
+}
+
+fn pin_state_from_native(
+    response: &Value,
+    expected_thread_id: &str,
+) -> Result<bool, ToolErrorData> {
     let thread = response
         .get("thread")
-        .ok_or_else(|| malformed_result("thread_pin_set", "thread/metadata/update"))?;
-    let returned_thread_id =
-        native_required_string(thread, "id", "thread_pin_set", "thread/metadata/update")?;
-    if returned_thread_id != thread_id {
-        return Err(malformed_result("thread_pin_set", "thread/metadata/update"));
+        .filter(|thread| thread.is_object())
+        .ok_or_else(|| malformed_result("thread_pin_set", "thread/read"))?;
+    let returned_thread_id = native_required_string(thread, "id", "thread_pin_set", "thread/read")?;
+    if returned_thread_id != expected_thread_id {
+        return Err(malformed_result("thread_pin_set", "thread/read"));
     }
-    let pinned = thread
-        .get("isPinned")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| malformed_result("thread_pin_set", "thread/metadata/update"))?;
-    Ok(ThreadPinSetResult {
-        thread_id: returned_thread_id,
-        pinned,
-    })
+    match thread.get("section") {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Object(section)) => section
+            .get("id")
+            .and_then(Value::as_str)
+            .map(|section_id| section_id == PINNED_THREAD_SECTION_ID)
+            .ok_or_else(|| malformed_result("thread_pin_set", "thread/read")),
+        _ => Err(malformed_result("thread_pin_set", "thread/read")),
+    }
 }
 
 pub(super) async fn set_goal(

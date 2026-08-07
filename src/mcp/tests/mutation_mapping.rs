@@ -4,6 +4,16 @@ fn native_error() -> Value {
     json!({"code": -32090, "message": "native mutation rejected"})
 }
 
+const EXPECTED_PINNED_SECTION_ID: &str = "01984de2-8f74-7c91-a3b2-5c5e937cf318";
+
+fn pin_read_step(section: Value) -> FakeStep {
+    FakeStep::result(
+        "thread/read",
+        json!({"threadId": "target", "includeTurns": false}),
+        json!({"thread": {"id": "target", "section": section}}),
+    )
+}
+
 #[tokio::test]
 async fn create_uses_exact_sequence_and_effective_native_values() {
     let prompt = "CREATE_PROMPT_SENTINEL";
@@ -405,11 +415,49 @@ async fn title_and_goal_clear_use_exact_single_requests() {
 }
 
 #[tokio::test]
-async fn pin_set_uses_one_exact_request_and_returns_authoritative_native_state() {
+async fn pin_set_noops_when_native_section_already_matches() {
+    for (section, requested) in [
+        (
+            json!({"id": EXPECTED_PINNED_SECTION_ID, "name": "Pinned"}),
+            true,
+        ),
+        (Value::Null, false),
+        (json!({"id": "custom-section", "name": "Custom"}), false),
+    ] {
+        let harness = FakeAppServer::start(vec![pin_read_step(section)]).await;
+        let client = AppServerClient::from_config(&harness.config);
+        let mut connection = client.connect_initialized().await.unwrap();
+
+        let result = set_pin(
+            &client,
+            &mut connection,
+            ThreadPinSetInput {
+                thread_id: Some("target".to_owned()),
+                pinned: requested,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.thread_id, "target");
+        assert_eq!(result.pinned, requested);
+        assert_eq!(harness.connection_count(), 1);
+        assert_eq!(
+            harness.log(),
+            [json!({
+                "method": "thread/read",
+                "params": {"threadId": "target", "includeTurns": false},
+            })]
+        );
+    }
+}
+
+#[tokio::test]
+async fn pin_set_treats_omitted_native_section_as_unpinned() {
     let harness = FakeAppServer::start(vec![FakeStep::result(
-        "thread/metadata/update",
-        json!({"threadId": "target", "isPinned": true}),
-        json!({"thread": {"id": "target", "isPinned": false}}),
+        "thread/read",
+        json!({"threadId": "target", "includeTurns": false}),
+        json!({"thread": {"id": "target"}}),
     )])
     .await;
     let client = AppServerClient::from_config(&harness.config);
@@ -420,35 +468,85 @@ async fn pin_set_uses_one_exact_request_and_returns_authoritative_native_state()
         &mut connection,
         ThreadPinSetInput {
             thread_id: Some("target".to_owned()),
-            pinned: true,
+            pinned: false,
         },
     )
     .await
     .unwrap();
 
     assert_eq!(result.thread_id, "target");
-    assert!(!result.pinned, "native state must not be replaced by input");
-    assert_eq!(harness.connection_count(), 1);
-    assert_eq!(
-        harness.log(),
-        [json!({
-            "method": "thread/metadata/update",
-            "params": {"threadId": "target", "isPinned": true},
-        })]
-    );
+    assert!(!result.pinned);
+    assert_eq!(harness.log().len(), 1);
+    assert_eq!(harness.log()[0]["method"], "thread/read");
 }
 
 #[tokio::test]
-async fn pin_set_rejects_malformed_or_mismatched_native_results() {
+async fn pin_set_moves_only_when_native_section_differs() {
+    for (section, requested, destination) in [
+        (Value::Null, true, json!(EXPECTED_PINNED_SECTION_ID)),
+        (
+            json!({"id": "custom-section", "name": "Custom"}),
+            true,
+            json!(EXPECTED_PINNED_SECTION_ID),
+        ),
+        (
+            json!({"id": EXPECTED_PINNED_SECTION_ID, "name": "Pinned"}),
+            false,
+            Value::Null,
+        ),
+    ] {
+        let harness = FakeAppServer::start(vec![
+            pin_read_step(section),
+            FakeStep::result(
+                "thread/section/move",
+                json!({"threadId": "target", "sectionId": destination}),
+                json!({}),
+            ),
+        ])
+        .await;
+        let client = AppServerClient::from_config(&harness.config);
+        let mut connection = client.connect_initialized().await.unwrap();
+
+        let result = set_pin(
+            &client,
+            &mut connection,
+            ThreadPinSetInput {
+                thread_id: Some("target".to_owned()),
+                pinned: requested,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.thread_id, "target");
+        assert_eq!(result.pinned, requested);
+        assert_eq!(harness.connection_count(), 1);
+        assert_eq!(
+            harness
+                .log()
+                .iter()
+                .map(|request| request["method"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["thread/read", "thread/section/move"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn pin_set_rejects_malformed_or_mismatched_pre_reads_without_mutating() {
     for response in [
         json!({}),
-        json!({"thread": {"id": "other", "isPinned": true}}),
-        json!({"thread": {"id": "target"}}),
-        json!({"thread": {"id": "target", "isPinned": "true"}}),
+        json!({"thread": null}),
+        json!({"thread": {}}),
+        json!({"thread": {"id": null, "section": null}}),
+        json!({"thread": {"id": "other", "section": null}}),
+        json!({"thread": {"id": "target", "section": "Pinned"}}),
+        json!({"thread": {"id": "target", "section": {}}}),
+        json!({"thread": {"id": "target", "section": {"id": 1}}}),
     ] {
         let harness = FakeAppServer::start(vec![FakeStep::result(
-            "thread/metadata/update",
-            json!({"threadId": "target", "isPinned": true}),
+            "thread/read",
+            json!({"threadId": "target", "includeTurns": false}),
             response,
         )])
         .await;
@@ -467,10 +565,227 @@ async fn pin_set_rejects_malformed_or_mismatched_native_results() {
         .unwrap_err();
 
         assert_eq!(error.category, ToolErrorCategory::NativeError);
-        assert_eq!(error.stage, "thread/metadata/update");
+        assert_eq!(error.stage, "thread/read");
         assert_eq!(harness.connection_count(), 1);
-        assert_eq!(harness.log().len(), 1);
+        assert_eq!(
+            harness
+                .log()
+                .iter()
+                .filter(|request| request["method"] == "thread/section/move")
+                .count(),
+            0
+        );
     }
+}
+
+#[tokio::test]
+async fn pin_set_pre_read_failure_never_mutates() {
+    let harness = FakeAppServer::start(vec![FakeStep::error(
+        "thread/read",
+        json!({"threadId": "target", "includeTurns": false}),
+        native_error(),
+    )])
+    .await;
+    let client = AppServerClient::from_config(&harness.config);
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let error = set_pin(
+        &client,
+        &mut connection,
+        ThreadPinSetInput {
+            thread_id: Some("target".to_owned()),
+            pinned: true,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.category, ToolErrorCategory::NativeError);
+    assert_eq!(harness.log().len(), 1);
+    assert_eq!(harness.log()[0]["method"], "thread/read");
+}
+
+#[tokio::test]
+async fn pin_set_rejected_move_returns_native_error_without_replay() {
+    let harness = FakeAppServer::start(vec![
+        pin_read_step(Value::Null),
+        FakeStep::error(
+            "thread/section/move",
+            json!({"threadId": "target", "sectionId": EXPECTED_PINNED_SECTION_ID}),
+            native_error(),
+        ),
+    ])
+    .await;
+    let client = AppServerClient::from_config(&harness.config);
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let error = set_pin(
+        &client,
+        &mut connection,
+        ThreadPinSetInput {
+            thread_id: Some("target".to_owned()),
+            pinned: true,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.category, ToolErrorCategory::NativeError);
+    assert_eq!(error.stage, "thread/section/move");
+    assert_eq!(
+        harness
+            .log()
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["thread/read", "thread/section/move"]
+    );
+}
+
+#[tokio::test]
+async fn pin_set_unknown_move_observes_once_without_replay_or_inference() {
+    let harness = FakeAppServer::start_connections(vec![
+        vec![
+            pin_read_step(Value::Null),
+            FakeStep {
+                method: "thread/section/move",
+                params: json!({
+                    "threadId": "target",
+                    "sectionId": EXPECTED_PINNED_SECTION_ID,
+                }),
+                response: FakeResponse::Disconnect,
+                notify_after: false,
+                delay: Duration::ZERO,
+            },
+        ],
+        vec![pin_read_step(json!({
+            "id": EXPECTED_PINNED_SECTION_ID,
+            "name": "Pinned",
+        }))],
+    ])
+    .await;
+    let client = AppServerClient::from_config(&harness.config);
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let error = set_pin(
+        &client,
+        &mut connection,
+        ThreadPinSetInput {
+            thread_id: Some("target".to_owned()),
+            pinned: true,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.category, ToolErrorCategory::OutcomeUnknown);
+    assert_eq!(
+        error.observation.as_ref().unwrap()["thread"]["section"]["id"],
+        EXPECTED_PINNED_SECTION_ID
+    );
+    assert_eq!(harness.connection_count(), 2);
+    assert_eq!(
+        harness
+            .log()
+            .iter()
+            .filter(|request| request["method"] == "thread/section/move")
+            .count(),
+        1
+    );
+    assert_eq!(
+        harness
+            .log()
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["thread/read", "thread/section/move", "thread/read"]
+    );
+}
+
+#[tokio::test]
+async fn pin_set_failed_reconciliation_keeps_unknown_outcome_without_replay() {
+    let harness = FakeAppServer::start_connections(vec![
+        vec![
+            pin_read_step(Value::Null),
+            FakeStep {
+                method: "thread/section/move",
+                params: json!({
+                    "threadId": "target",
+                    "sectionId": EXPECTED_PINNED_SECTION_ID,
+                }),
+                response: FakeResponse::Disconnect,
+                notify_after: false,
+                delay: Duration::ZERO,
+            },
+        ],
+        vec![FakeStep {
+            method: "thread/read",
+            params: json!({"threadId": "target", "includeTurns": false}),
+            response: FakeResponse::Disconnect,
+            notify_after: false,
+            delay: Duration::ZERO,
+        }],
+    ])
+    .await;
+    let client = AppServerClient::from_config(&harness.config);
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let error = set_pin(
+        &client,
+        &mut connection,
+        ThreadPinSetInput {
+            thread_id: Some("target".to_owned()),
+            pinned: true,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.category, ToolErrorCategory::OutcomeUnknown);
+    assert!(error.observation.is_none());
+    assert_eq!(
+        error.reconciliation_error.as_deref(),
+        Some("app-server transport failed")
+    );
+    assert_eq!(harness.connection_count(), 2);
+    assert_eq!(
+        harness
+            .log()
+            .iter()
+            .filter(|request| request["method"] == "thread/section/move")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn pin_set_rejects_non_object_move_acknowledgement() {
+    let harness = FakeAppServer::start(vec![
+        pin_read_step(Value::Null),
+        FakeStep::result(
+            "thread/section/move",
+            json!({"threadId": "target", "sectionId": EXPECTED_PINNED_SECTION_ID}),
+            Value::Null,
+        ),
+    ])
+    .await;
+    let client = AppServerClient::from_config(&harness.config);
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let error = set_pin(
+        &client,
+        &mut connection,
+        ThreadPinSetInput {
+            thread_id: Some("target".to_owned()),
+            pinned: true,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.category, ToolErrorCategory::NativeError);
+    assert_eq!(error.stage, "thread/section/move");
+    assert_eq!(harness.log().len(), 2);
 }
 
 #[tokio::test]
