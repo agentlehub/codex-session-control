@@ -44,7 +44,7 @@ completed: binary-remove\n"
 #[tokio::test]
 async fn uninstall_is_service_first_uses_exact_order_and_preserves_native_home() {
     let fixture = Fixture::new();
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let session = fixture
         .paths
@@ -146,7 +146,7 @@ async fn uninstall_is_service_first_uses_exact_order_and_preserves_native_home()
 #[tokio::test]
 async fn empty_config_root_with_special_mode_fails_closed_at_configuration_remove() {
     let fixture = Fixture::new();
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let config_dir = fixture.paths.config.parent().unwrap();
     fs::set_permissions(config_dir, fs::Permissions::from_mode(0o1700)).unwrap();
@@ -184,7 +184,7 @@ async fn empty_config_root_with_special_mode_fails_closed_at_configuration_remov
 #[tokio::test]
 async fn nonempty_config_root_preserves_unknown_content_at_configuration_remove() {
     let fixture = Fixture::new();
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let config_dir = fixture.paths.config.parent().unwrap();
     let unknown = config_dir.join("unknown-operator-content");
@@ -226,7 +226,7 @@ fn empty_product_root_removal_is_idempotent_when_absent() {
 #[tokio::test]
 async fn empty_product_root_with_special_mode_is_preserved_as_terminal_partial() {
     let fixture = Fixture::new();
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     fs::set_permissions(&fixture.paths.data_root, fs::Permissions::from_mode(0o1700)).unwrap();
 
@@ -259,7 +259,7 @@ async fn empty_product_root_with_special_mode_is_preserved_as_terminal_partial()
 #[tokio::test]
 async fn nonempty_product_root_preserves_unknown_content_as_terminal_partial() {
     let fixture = Fixture::new();
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let unknown = fixture.paths.data_root.join("unknown-operator-content");
     fs::write(&unknown, b"preserve exactly").unwrap();
@@ -298,7 +298,7 @@ async fn nonempty_product_root_preserves_unknown_content_as_terminal_partial() {
 async fn stop_or_verification_failure_removes_nothing_after_service_boundary() {
     for verification_failure in [false, true] {
         let fixture = Fixture::new();
-        let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
         if verification_failure {
             fs::write(&fixture.preserve_service_state, b"preserve").unwrap();
@@ -335,7 +335,7 @@ async fn stop_or_verification_failure_removes_nothing_after_service_boundary() {
 #[tokio::test]
 async fn late_failure_is_retryable_without_reordering_or_restoring_state() {
     let fixture = Fixture::new();
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     fs::write(
         &fixture.codex_fail,
@@ -376,7 +376,7 @@ async fn late_failure_is_retryable_without_reordering_or_restoring_state() {
 #[tokio::test]
 async fn missing_config_and_manifest_stop_after_the_service_boundary() {
     let fixture = Fixture::new();
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     fs::remove_file(&fixture.paths.config).unwrap();
     fs::remove_file(&fixture.paths.manifest).unwrap();
@@ -400,7 +400,7 @@ async fn missing_config_and_manifest_stop_after_the_service_boundary() {
 #[tokio::test]
 async fn unprovable_native_absence_stops_with_exact_manual_command() {
     let fixture = Fixture::new();
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let codex = std::env::split_paths(&fixture.context(true).path_environment)
         .next()
@@ -436,7 +436,7 @@ async fn unprovable_native_absence_stops_with_exact_manual_command() {
 #[tokio::test]
 async fn filesystem_cleanup_order_is_state_based_across_partial_retry() {
     let fixture = Fixture::new();
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let manifest = fs::read(&fixture.paths.manifest).unwrap();
     fs::remove_file(&fixture.paths.manifest).unwrap();
@@ -463,8 +463,13 @@ async fn filesystem_cleanup_order_is_state_based_across_partial_retry() {
 #[tokio::test]
 async fn untested_codex_version_adds_one_advisory_without_changing_receipt() {
     let fixture = Fixture::new();
-    fs::write(&fixture.codex_version, b"codex-cli 0.147.0\n").unwrap();
-    let authority = FakeAuthority::start(&fixture.paths, "0.147.0").await;
+    let untested_version = crate::test_support::different_stable_version(TESTED_CODEX_VERSION);
+    fs::write(
+        &fixture.codex_version,
+        format!("codex-cli {untested_version}\n"),
+    )
+    .unwrap();
+    let authority = FakeAuthority::start(&fixture.paths, &untested_version).await;
     setup_with_context(fixture.context(true)).await.unwrap();
 
     let report = uninstall_with_context(context(&fixture)).await.unwrap();
@@ -473,9 +478,9 @@ async fn untested_codex_version_adds_one_advisory_without_changing_receipt() {
     assert_eq!(
         report.stderr,
         format!(
-            "{}Compatibility warning: Codex app-server 0.147.0 has not been tested with codex-session-control {}; native results remain authoritative.\n",
+            "{}Compatibility warning: Codex app-server {untested_version} has not been tested with codex-session-control {}; native results remain authoritative.\n",
             expected_stages(),
-            env!("CARGO_PKG_VERSION")
+            env!("CARGO_PKG_VERSION"),
         )
     );
     drop(authority);

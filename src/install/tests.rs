@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use uzers::os::unix::UserExt;
 
 use crate::{
+    app_server::{TESTED_CODEX_CLI_VERSION, TESTED_CODEX_CLI_VERSION_OUTPUT, TESTED_CODEX_VERSION},
     desktop::render_descriptor,
     error::ControllerError,
     model::{DesktopAttachmentIdentity, InstalledRelease, ProductConfig},
@@ -69,6 +70,24 @@ fn write_executable_fixture(path: &std::path::Path, contents: impl AsRef<[u8]>) 
     std::fs::rename(stage, path).unwrap();
 }
 
+fn higher_test_release_version() -> String {
+    let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+    let next_minor = current
+        .minor
+        .checked_add(1)
+        .expect("package minor version must permit a higher test release");
+
+    semver::Version::new(current.major, next_minor, 0).to_string()
+}
+
+#[test]
+fn synthetic_release_version_is_strictly_higher_than_package_version() {
+    let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+    let synthetic = semver::Version::parse(&higher_test_release_version()).unwrap();
+
+    assert!(synthetic > current);
+}
+
 fn assert_disposable_systemd_fixture_path(path: &std::path::Path, expected: FileKind, euid: u32) {
     validate_existing(path, expected, euid).unwrap_or_else(|error| {
         panic!(
@@ -86,7 +105,7 @@ fn systemd_helper_initialize_response(
         "id": id,
         "result": {
             "codexHome": codex_home,
-            "userAgent": "codex-cli 0.146.0"
+            "userAgent": TESTED_CODEX_CLI_VERSION
         }
     })
 }
@@ -102,7 +121,7 @@ fn systemd_helper_reports_codex_home_as_a_protocol_string() {
             "id": 7,
             "result": {
                 "codexHome": "/home/disposable/.codex",
-                "userAgent": "codex-cli 0.146.0"
+                "userAgent": TESTED_CODEX_CLI_VERSION
             }
         })
     );

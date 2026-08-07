@@ -399,10 +399,8 @@ pub(super) async fn setup_with_context(
             error,
             &retry_setup,
             desktop_intent_changed,
-            &preflight.systemctl,
+            &preflight,
             &context.target,
-            preflight.desktop.target.as_ref(),
-            preflight.desktop.descriptor.as_deref(),
         ));
     }
     complete_lifecycle_stage!(
@@ -424,10 +422,8 @@ pub(super) async fn setup_with_context(
             error,
             &retry_setup,
             desktop_intent_changed,
-            &preflight.systemctl,
+            &preflight,
             &context.target,
-            preflight.desktop.target.as_ref(),
-            preflight.desktop.descriptor.as_deref(),
         ));
     }
     complete_lifecycle_stage!(
@@ -452,10 +448,8 @@ pub(super) async fn setup_with_context(
             error,
             &retry_setup,
             desktop_intent_changed,
-            &preflight.systemctl,
+            &preflight,
             &context.target,
-            preflight.desktop.target.as_ref(),
-            preflight.desktop.descriptor.as_deref(),
         ));
     }
     complete_lifecycle_stage!(
@@ -479,10 +473,8 @@ pub(super) async fn setup_with_context(
             error,
             &update,
             desktop_intent_changed,
-            &preflight.systemctl,
+            &preflight,
             &context.target,
-            preflight.desktop.target.as_ref(),
-            preflight.desktop.descriptor.as_deref(),
         ));
     }
     complete_lifecycle_stage!(
@@ -748,22 +740,24 @@ async fn resolve_setup_desktop(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn fail_after_descriptor_publication(
     progress: &mut SetupProgress,
     stage: SetupStage,
     cause: impl std::fmt::Display,
     recovery: &str,
     descriptor_intent_changed: bool,
-    systemctl: &Path,
+    preflight: &SetupPreflight,
     target: &LifecycleTarget,
-    desktop: Option<&DesktopTarget>,
-    descriptor: Option<&[u8]>,
 ) -> ControllerError {
     let cause = cause.to_string();
     let cleanup = descriptor_intent_changed
         .then(|| {
-            cleanup_changed_descriptor_after_start_failure(systemctl, target, desktop, descriptor)
+            cleanup_changed_descriptor_after_start_failure(
+                &preflight.systemctl,
+                target,
+                preflight.desktop.target.as_ref(),
+                preflight.desktop.descriptor.as_deref(),
+            )
         })
         .transpose();
     match cleanup {

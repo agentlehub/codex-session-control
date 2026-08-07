@@ -50,7 +50,7 @@ async fn publishes_descriptor_before_service_enable() {
         descriptor.display().to_string(),
     )
     .unwrap();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
 
     let report = setup_with_context(fixture.context(true)).await.unwrap();
 
@@ -82,7 +82,7 @@ async fn publishes_descriptor_before_service_enable() {
 #[tokio::test]
 async fn unavailable_explicit_launcher_keeps_cli_mcp_setup_and_null_attachment() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     let launcher = fixture._root.path().join("desktop-launcher");
     let descriptor = fixture
         .paths
@@ -111,7 +111,7 @@ async fn unavailable_explicit_launcher_keeps_cli_mcp_setup_and_null_attachment()
 #[tokio::test]
 async fn missing_absolute_explicit_launcher_keeps_cli_mcp_setup_and_null_attachment() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     let launcher = fixture._root.path().join("missing-desktop-launcher");
     let descriptor = fixture
         .paths
@@ -138,7 +138,7 @@ async fn missing_absolute_explicit_launcher_keeps_cli_mcp_setup_and_null_attachm
 #[tokio::test]
 async fn setup_records_desktop_discovery_and_noop_descriptor_after_plugin_install() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
 
     let report = setup_with_context(fixture.context(true)).await.unwrap();
     let stages: Vec<&str> = report
@@ -177,7 +177,7 @@ async fn setup_failures_before_descriptor_leave_existing_routing_intent_and_mani
         "plugin-install",
     ] {
         let fixture = Fixture::new();
-        let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         let original_launcher = fixture._root.path().join("desktop-launcher");
         let replacement_launcher = fixture._root.path().join("replacement-launcher");
         let original_descriptor = fixture
@@ -223,7 +223,7 @@ async fn setup_failures_before_descriptor_leave_existing_routing_intent_and_mani
 async fn failed_reverification_or_explicit_replacement_preserves_persisted_intent() {
     for explicit_replacement in [false, true] {
         let fixture = Fixture::new();
-        let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         let launcher = fixture._root.path().join("desktop-launcher");
         let descriptor = fixture
             .paths
@@ -268,7 +268,7 @@ async fn failed_reverification_or_explicit_replacement_preserves_persisted_inten
 #[tokio::test]
 async fn successful_explicit_replacement_publishes_new_before_removing_old_intent() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     let original_launcher = fixture._root.path().join("desktop-launcher");
     let replacement_launcher = fixture._root.path().join("replacement-launcher");
     let original_descriptor = fixture
@@ -317,7 +317,7 @@ async fn successful_explicit_replacement_publishes_new_before_removing_old_inten
 #[tokio::test]
 async fn same_descriptor_path_replacement_keeps_live_routing_and_requires_no_restart() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     let first_launcher = fixture._root.path().join("first-launcher");
     let second_launcher = fixture._root.path().join("second-launcher");
     let descriptor = fixture
@@ -349,7 +349,7 @@ async fn same_descriptor_path_replacement_keeps_live_routing_and_requires_no_res
 #[tokio::test]
 async fn replacement_old_descriptor_removal_race_cleans_new_publication() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     let original_launcher = fixture._root.path().join("desktop-launcher");
     let replacement_launcher = fixture._root.path().join("replacement-launcher");
     let original_descriptor = fixture
@@ -531,7 +531,7 @@ async fn unproven_service_activity_retains_a_changed_descriptor_without_stop() {
 #[tokio::test]
 async fn preexisting_running_authority_and_unchanged_descriptor_are_never_stopped() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     let launcher = fixture._root.path().join("desktop-launcher");
     let descriptor = fixture
         .paths
@@ -593,7 +593,7 @@ async fn newly_active_authority_after_failed_start_retains_changed_descriptor_wi
 #[tokio::test]
 async fn preexisting_exact_descriptor_is_retained_when_this_invocation_does_not_change_intent() {
     let fixture = Fixture::new();
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     let launcher = fixture._root.path().join("desktop-launcher");
     let descriptor = fixture
         .paths
@@ -683,7 +683,7 @@ fn process_snapshot_filters_uid_and_never_reads_the_operator_proc_tree() {
 #[tokio::test]
 async fn lifecycle_uses_the_injected_process_snapshot_not_the_live_proc_tree() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     let launcher = fixture._root.path().join("desktop-launcher");
     write_compatible_launcher(&launcher);
     let euid = fixture.paths.euid;

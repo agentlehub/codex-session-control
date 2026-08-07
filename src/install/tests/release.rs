@@ -186,7 +186,7 @@ async fn release_files_stream_privately_with_exact_sizes_and_checksum() {
     let release = discover_latest_release(&client, &endpoints, product_target())
         .await
         .unwrap();
-    let destination = tempfile::tempdir().unwrap();
+    let destination = crate::test_support::private_tempdir();
 
     let downloaded = download_verified_release(&client, &release, destination.path())
         .await
@@ -276,7 +276,7 @@ async fn content_length_short_malformed_and_oversized_bodies_fail_exactly() {
             url,
             size: metadata_size,
         };
-        let directory = tempfile::tempdir().unwrap();
+        let directory = crate::test_support::private_tempdir();
         let path = directory.path().join("asset");
 
         let error = stream_release_asset(
@@ -376,7 +376,7 @@ async fn transfer_idle_deadline_resets_on_each_byte_then_expires() {
         url,
         size: 3,
     };
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_support::private_tempdir();
     let path = directory.path().join("asset");
     let task = tokio::spawn(async move {
         stream_release_asset(

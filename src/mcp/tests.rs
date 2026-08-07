@@ -15,7 +15,10 @@ use tempfile::TempDir;
 use tokio::net::UnixListener;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
-use crate::model::TurnItemsView;
+use crate::{
+    app_server::{TESTED_CODEX_CLI_VERSION, TESTED_CODEX_VERSION},
+    model::TurnItemsView,
+};
 
 use super::*;
 

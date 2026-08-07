@@ -21,7 +21,7 @@ struct BundleFixture {
 
 impl BundleFixture {
     fn valid() -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let directory = root.path().join("release");
         fs::create_dir(&directory).unwrap();
         fs::write(

@@ -30,7 +30,7 @@ pub(super) struct Fixture {
 
 impl Fixture {
     pub(super) fn new() -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let home = root.path().join("home");
         let runtime = root.path().join("runtime");
         let fake_bin = root.path().join("fake-bin");
@@ -67,7 +67,7 @@ impl Fixture {
         let wait_for_socket = root.path().join("wait-for-socket");
         let restart_requested = root.path().join("restart-requested");
         let required_descriptor = root.path().join("required-descriptor");
-        fs::write(&codex_version, b"codex-cli 0.146.0\n").unwrap();
+        fs::write(&codex_version, TESTED_CODEX_CLI_VERSION_OUTPUT).unwrap();
 
         let codex = fake_bin.join("codex");
         let codex_script = format!(

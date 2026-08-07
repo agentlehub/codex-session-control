@@ -70,7 +70,7 @@ impl FakeAppServer {
     }
 
     pub(super) async fn start_connections(scripts: Vec<Vec<FakeStep>>) -> Self {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::test_support::private_tempdir();
         let socket_parent = root.path().join("socket");
         let codex_home = root.path().join(".codex");
         fs::create_dir(&socket_parent).unwrap();
@@ -104,7 +104,7 @@ impl FakeAppServer {
                             "id": initialize_id,
                             "result": {
                                 "codexHome": codex_home,
-                                "userAgent": "codex-cli 0.146.0"
+                                "userAgent": TESTED_CODEX_CLI_VERSION
                             }
                         })
                         .to_string(),

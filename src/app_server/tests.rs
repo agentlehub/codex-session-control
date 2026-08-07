@@ -55,10 +55,21 @@ struct FakeScript {
     failure_point: FailurePoint,
 }
 
+#[derive(Clone)]
+struct FakeServerState {
+    codex_home: PathBuf,
+    frames: Arc<Mutex<Vec<Value>>>,
+    connections: Arc<AtomicUsize>,
+    barrier: Arc<Notify>,
+    closed: Arc<Notify>,
+    frame_recorded: Arc<Notify>,
+    native_state_changed: Arc<AtomicBool>,
+}
+
 impl FakeScript {
     fn happy() -> Self {
         Self {
-            codex_version: "0.146.0".to_owned(),
+            codex_version: TESTED_CODEX_VERSION.to_owned(),
             native_frames: Vec::new(),
             barrier: None,
             failure_point: FailurePoint::Never,
@@ -117,7 +128,7 @@ struct FakeAppServer {
 
 impl FakeAppServer {
     async fn start(script: FakeScript) -> Self {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = crate::test_support::private_tempdir();
         std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let socket_path = temporary.path().join("app-server.sock");
         let listener = UnixListener::bind(&socket_path).unwrap();
@@ -131,17 +142,17 @@ impl FakeAppServer {
         let failure_point = script.failure_point;
         let native_state_changed = Arc::new(AtomicBool::new(false));
 
-        tokio::spawn(serve_fake(
-            listener,
-            script,
-            codex_home.clone(),
-            Arc::clone(&frames),
-            Arc::clone(&connections),
-            Arc::clone(&barrier),
-            Arc::clone(&closed),
-            Arc::clone(&frame_recorded),
-            Arc::clone(&native_state_changed),
-        ));
+        let state = FakeServerState {
+            codex_home: codex_home.clone(),
+            frames: Arc::clone(&frames),
+            connections: Arc::clone(&connections),
+            barrier: Arc::clone(&barrier),
+            closed: Arc::clone(&closed),
+            frame_recorded: Arc::clone(&frame_recorded),
+            native_state_changed: Arc::clone(&native_state_changed),
+        };
+
+        tokio::spawn(serve_fake(listener, script, state));
 
         Self {
             _temporary: temporary,
@@ -159,7 +170,7 @@ impl FakeAppServer {
     }
 
     async fn with_socket_violation(violation: SocketViolation) -> Self {
-        let temporary = tempfile::tempdir().unwrap();
+        let temporary = crate::test_support::private_tempdir();
         std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let socket_path = temporary.path().join("app-server.sock");
         let mut listener_guard = None;
@@ -274,18 +285,17 @@ impl FakeAppServer {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn serve_fake(
-    listener: UnixListener,
-    script: FakeScript,
-    codex_home: PathBuf,
-    frames: Arc<Mutex<Vec<Value>>>,
-    connections: Arc<AtomicUsize>,
-    barrier: Arc<Notify>,
-    closed: Arc<Notify>,
-    frame_recorded: Arc<Notify>,
-    native_state_changed: Arc<AtomicBool>,
-) {
+async fn serve_fake(listener: UnixListener, script: FakeScript, state: FakeServerState) {
+    let FakeServerState {
+        codex_home,
+        frames,
+        connections,
+        barrier,
+        closed,
+        frame_recorded,
+        native_state_changed,
+    } = state;
+
     loop {
         let Ok((stream, _)) = listener.accept().await else {
             return;

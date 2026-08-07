@@ -53,7 +53,7 @@ fn assert_read_only_logs(fixture: &Fixture) {
 async fn service_state_table_has_exact_health_stdout_and_read_only_argv() {
     for (name, enabled, active, socket) in SERVICE_STATES {
         let fixture = Fixture::new();
-        let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
         fixture.clear_logs();
         if !enabled {
@@ -146,7 +146,7 @@ Failed checks:\n\
 #[tokio::test]
 async fn status_reports_compatible_desktop_as_available_after_setup_without_mutation() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let launcher = fixture._root.path().join("desktop-launcher");
     let desktop_entry = fixture
@@ -183,7 +183,7 @@ async fn status_reports_compatible_desktop_as_available_after_setup_without_muta
 #[tokio::test]
 async fn status_detects_foreign_discovered_descriptor_after_null_setup_without_mutation() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let launcher = fixture._root.path().join("desktop-launcher");
     let desktop_entry = fixture
@@ -238,7 +238,7 @@ async fn status_detects_foreign_discovered_descriptor_after_null_setup_without_m
 #[tokio::test]
 async fn status_reports_descriptor_service_matrix_without_mutation() {
     let fixture = Fixture::new();
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     let launcher = fixture._root.path().join("desktop-launcher");
     let descriptor = fixture
         .paths
@@ -300,7 +300,7 @@ async fn status_reports_descriptor_service_matrix_without_mutation() {
 #[tokio::test]
 async fn status_keeps_a_missing_persisted_launcher_unverified_and_read_only() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     let launcher = fixture._root.path().join("desktop-launcher");
     let descriptor = fixture
         .paths
@@ -328,7 +328,7 @@ async fn status_keeps_a_missing_persisted_launcher_unverified_and_read_only() {
 #[tokio::test]
 async fn status_detects_unsafe_descriptor_when_persisted_launcher_is_unavailable() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     let launcher = fixture._root.path().join("desktop-launcher");
     let descriptor = fixture
         .paths
@@ -362,7 +362,8 @@ async fn status_detects_unsafe_descriptor_when_persisted_launcher_is_unavailable
 #[tokio::test]
 async fn status_accumulates_every_failure_with_exact_routes_and_advisory() {
     let fixture = Fixture::new();
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let untested_version = crate::test_support::different_stable_version(TESTED_CODEX_VERSION);
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     drop(authority);
     fs::remove_file(&fixture.paths.socket).unwrap();
@@ -379,7 +380,11 @@ async fn status_accumulates_every_failure_with_exact_routes_and_advisory() {
     .unwrap();
     fs::write(&fixture.plugin_state, b"/wrong/plugin").unwrap();
     fs::write(&fixture.paths.unit, b"unit drift").unwrap();
-    fs::write(&fixture.codex_version, b"codex-cli 0.145.0\n").unwrap();
+    fs::write(
+        &fixture.codex_version,
+        format!("codex-cli {untested_version}\n"),
+    )
+    .unwrap();
     fixture.clear_logs();
 
     let report = status_with_context(context(&fixture)).await.unwrap();
@@ -387,7 +392,7 @@ async fn status_accumulates_every_failure_with_exact_routes_and_advisory() {
     assert_eq!(
         report.stdout,
         format!(
-            "Compatibility warning: Codex app-server 0.145.0 has not been tested with codex-session-control {version}; native results remain authoritative.\n\
+            "Compatibility warning: Codex app-server {untested_version} has not been tested with codex-session-control {version}; native results remain authoritative.\n\
 Status: drifted\n\
 Installed release: {version}\n\
 Codex app-server service: enabled, inactive\n\
@@ -409,10 +414,11 @@ Failed checks:\n\
 {indent}action: journalctl --user -u codex-session-control-test-Setup1.service\n\
 - socket: enabled service socket is missing\n\
 {indent}action: journalctl --user -u codex-session-control-test-Setup1.service\n\
-- codex-version: executable version 0.145.0 does not match installed manifest 0.146.0\n\
+- codex-version: executable version {untested_version} does not match installed manifest {tested_codex_version}\n\
 {indent}action: codex-session-control update\n\
 ",
             version = env!("CARGO_PKG_VERSION"),
+            tested_codex_version = TESTED_CODEX_VERSION,
             indent = "  ",
         )
     );
@@ -423,7 +429,7 @@ Failed checks:\n\
 #[tokio::test]
 async fn unsafe_path_drift_names_the_path_and_invariant_without_repair() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let original = fs::read(&fixture.paths.config).unwrap();
     let target = fixture.paths.home.join("unsafe-config-target");
@@ -459,7 +465,7 @@ Failed checks:\n\
 #[tokio::test]
 async fn status_accepts_only_owner_read_write_socket_modes() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
 
     for mode in [0o600, 0o700] {
@@ -486,11 +492,11 @@ async fn status_accepts_only_owner_read_write_socket_modes() {
 #[tokio::test]
 async fn tested_and_unparseable_versions_have_exact_advisory_behavior() {
     for (version_output, warning) in [
-        ("codex-cli 0.146.0\n", None),
+        (TESTED_CODEX_CLI_VERSION_OUTPUT, None),
         ("codex-cli not-semver\n", Some("not-semver")),
     ] {
         let fixture = Fixture::new();
-        let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
         drop(authority);
         fs::remove_file(&fixture.paths.socket).unwrap();

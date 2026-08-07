@@ -6,6 +6,8 @@ mod installer;
 mod release_bundle;
 #[path = "cli_contract/systemd_ci.rs"]
 mod systemd_ci;
+#[path = "support/private_tempdir.rs"]
+mod test_support;
 
 #[test]
 fn release_assets() {

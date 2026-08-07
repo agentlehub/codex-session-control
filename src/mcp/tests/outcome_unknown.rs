@@ -76,8 +76,11 @@ fn cases() -> Vec<Case> {
         },
         Case {
             tool: "thread_pin_set",
-            mutation_method: "thread/metadata/update",
-            mutation_params: json!({"threadId": "target", "isPinned": true}),
+            mutation_method: "thread/section/move",
+            mutation_params: json!({
+                "threadId": "target",
+                "sectionId": "01984de2-8f74-7c91-a3b2-5c5e937cf318",
+            }),
             reconciliation: ReconciliationKind::CompactThread,
         },
         Case {

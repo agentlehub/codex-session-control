@@ -22,6 +22,16 @@ fn candidate(fixture: &Fixture, name: &str, product: &str, version: &str, target
     path
 }
 
+fn higher_candidate(fixture: &Fixture, name: &str) -> PathBuf {
+    candidate(
+        fixture,
+        name,
+        "codex-session-control",
+        &higher_test_release_version(),
+        product_target(),
+    )
+}
+
 fn context(
     fixture: &Fixture,
     candidate: PathBuf,
@@ -80,7 +90,7 @@ fn equal_candidate(fixture: &Fixture, name: &str) -> PathBuf {
 }
 
 async fn setup_attached(fixture: &Fixture) -> (FakeAuthority, DesktopAttachmentIdentity) {
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     let launcher = fixture._root.path().join("desktop-launcher");
     write_compatible_launcher(&launcher);
     let mut setup = fixture.context(true);
@@ -116,7 +126,7 @@ async fn candidate_identity_and_semver_rejections_precede_all_mutation() {
         ),
     ] {
         let fixture = Fixture::new();
-        let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
         let before_binary = fs::read(&fixture.paths.binary).unwrap();
         let before_manifest = fs::read(&fixture.paths.manifest).unwrap();
@@ -141,7 +151,7 @@ async fn candidate_identity_and_semver_rejections_precede_all_mutation() {
 #[tokio::test]
 async fn coherent_equal_candidate_reports_current_only_after_state_proof() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let candidate = fixture.paths.home.join("candidate-equal");
     super::write_executable_fixture(&candidate, fs::read(&fixture.paths.binary).unwrap());
@@ -168,7 +178,7 @@ async fn coherent_equal_candidate_reports_current_only_after_state_proof() {
 async fn higher_candidate_preserves_all_three_desired_service_states() {
     for (name, enabled, active) in DESIRED_STATES {
         let fixture = Fixture::new();
-        let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
         let authority = if active {
             Some(authority)
@@ -181,13 +191,7 @@ async fn higher_candidate_preserves_all_three_desired_service_states() {
         if !enabled {
             fs::remove_file(&fixture.enabled).unwrap();
         }
-        let candidate = candidate(
-            &fixture,
-            "candidate-higher",
-            "codex-session-control",
-            "0.3.0",
-            product_target(),
-        );
+        let candidate = higher_candidate(&fixture, "candidate-higher");
         fixture.clear_logs();
 
         let starter = if enabled && !active {
@@ -198,7 +202,7 @@ async fn higher_candidate_preserves_all_three_desired_service_states() {
                 while !active_path.exists() {
                     tokio::task::yield_now().await;
                 }
-                FakeAuthority::start(&paths, "0.146.0").await
+                FakeAuthority::start(&paths, TESTED_CODEX_VERSION).await
             }))
         } else {
             None
@@ -212,10 +216,16 @@ async fn higher_candidate_preserves_all_three_desired_service_states() {
         };
 
         assert!(
-            report.stdout.starts_with("Installed release: 0.3.0\n"),
+            report.stdout.starts_with(&format!(
+                "Installed release: {}\n",
+                higher_test_release_version()
+            )),
             "{name}"
         );
-        assert_eq!(manifest(&fixture.paths).product_version, "0.3.0");
+        assert_eq!(
+            manifest(&fixture.paths).product_version,
+            higher_test_release_version()
+        );
         assert_eq!(
             fs::read(&fixture.paths.binary).unwrap(),
             fs::read(candidate).unwrap()
@@ -360,7 +370,7 @@ async fn disabled_update_retains_desktop_identity_without_publishing_then_enable
         while !active.exists() {
             tokio::task::yield_now().await;
         }
-        FakeAuthority::start(&paths, "0.146.0").await
+        FakeAuthority::start(&paths, TESTED_CODEX_VERSION).await
     });
     let setup = fixture.context(true);
     let enabled = enable_with_context(LifecycleContext {
@@ -384,7 +394,7 @@ async fn disabled_update_retains_desktop_identity_without_publishing_then_enable
 #[tokio::test]
 async fn null_desktop_update_never_auto_selects_a_new_compatible_launcher() {
     let fixture = Fixture::new();
-    let authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let launcher = fixture._root.path().join("desktop-launcher");
     let desktop_entry = fixture
@@ -530,7 +540,7 @@ async fn unsafe_or_foreign_desktop_descriptor_stops_update_at_descriptor_stage()
 async fn disabled_active_and_unknown_restart_evidence_fail_before_mutation() {
     for case in ["disabled-active", "unknown-unit"] {
         let fixture = Fixture::new();
-        let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+        let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
         if case == "disabled-active" {
             fs::remove_file(&fixture.enabled).unwrap();
@@ -575,7 +585,7 @@ async fn disabled_active_and_unknown_restart_evidence_fail_before_mutation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn running_changed_authority_inspects_then_restarts_exactly_once() {
     let fixture = Fixture::new();
-    let old_authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let old_authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
     let new_bin = fixture.paths.home.join("new-codex-bin");
     fs::create_dir(&new_bin).unwrap();
@@ -592,13 +602,7 @@ async fn running_changed_authority_inspects_then_restarts_exactly_once() {
     let mut path = vec![new_bin];
     path.extend(std::env::split_paths(&setup.path_environment));
     let path = std::env::join_paths(path).unwrap();
-    let candidate = candidate(
-        &fixture,
-        "candidate-changed",
-        "codex-session-control",
-        "0.3.0",
-        product_target(),
-    );
+    let candidate = higher_candidate(&fixture, "candidate-changed");
     fs::write(&fixture.wait_for_socket, b"wait").unwrap();
     fixture.clear_logs();
     let paths = fixture.paths.clone();
@@ -607,7 +611,7 @@ async fn running_changed_authority_inspects_then_restarts_exactly_once() {
         while !restart_requested.exists() {
             tokio::task::yield_now().await;
         }
-        FakeAuthority::start(&paths, "0.146.0").await
+        FakeAuthority::start(&paths, TESTED_CODEX_VERSION).await
     });
 
     let report = staged_update_with_context(context(&fixture, candidate, Some(path)))
@@ -615,7 +619,10 @@ async fn running_changed_authority_inspects_then_restarts_exactly_once() {
         .unwrap();
     let new_authority = starter.await.unwrap();
 
-    assert!(report.stdout.starts_with("Installed release: 0.3.0\n"));
+    assert!(report.stdout.starts_with(&format!(
+        "Installed release: {}\n",
+        higher_test_release_version()
+    )));
     assert_eq!(manifest(&fixture.paths).codex_executable, new_codex);
     assert_eq!(fixture.systemctl_log().matches(" restart ").count(), 1);
     assert!(!fixture.codex_log().contains("thread/interrupt"));
@@ -626,15 +633,9 @@ async fn running_changed_authority_inspects_then_restarts_exactly_once() {
 #[tokio::test]
 async fn retry_uses_last_manifest_after_partial_candidate_files() {
     let fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
-    let candidate = candidate(
-        &fixture,
-        "candidate-retry",
-        "codex-session-control",
-        "0.3.0",
-        product_target(),
-    );
+    let candidate = higher_candidate(&fixture, "candidate-retry");
     fs::write(&fixture.systemctl_fail, "--user daemon-reload").unwrap();
 
     let error = staged_update_with_context(context(&fixture, candidate.clone(), None))
@@ -655,35 +656,52 @@ async fn retry_uses_last_manifest_after_partial_candidate_files() {
     let report = staged_update_with_context(context(&fixture, candidate, None))
         .await
         .unwrap();
-    assert!(report.stdout.starts_with("Installed release: 0.3.0\n"));
-    assert_eq!(manifest(&fixture.paths).product_version, "0.3.0");
+    assert!(report.stdout.starts_with(&format!(
+        "Installed release: {}\n",
+        higher_test_release_version()
+    )));
+    assert_eq!(
+        manifest(&fixture.paths).product_version,
+        higher_test_release_version()
+    );
 }
 
 #[tokio::test]
 async fn tested_untested_and_unparseable_versions_only_change_update_advisory() {
-    for (version_output, authority_version, warning) in [
-        ("codex-cli 0.146.0\n", "0.146.0", None),
-        ("codex-cli 0.147.0\n", "0.147.0", Some("0.147.0")),
-        ("codex-cli not-semver\n", "not-semver", Some("not-semver")),
-    ] {
+    let untested_version = crate::test_support::different_stable_version(TESTED_CODEX_VERSION);
+    let cases = [
+        (
+            TESTED_CODEX_CLI_VERSION_OUTPUT.to_owned(),
+            TESTED_CODEX_VERSION.to_owned(),
+            None,
+        ),
+        (
+            format!("codex-cli {untested_version}\n"),
+            untested_version.clone(),
+            Some(untested_version),
+        ),
+        (
+            "codex-cli not-semver\n".to_owned(),
+            "not-semver".to_owned(),
+            Some("not-semver".to_owned()),
+        ),
+    ];
+    for (version_output, authority_version, warning) in cases {
         let fixture = Fixture::new();
-        fs::write(&fixture.codex_version, version_output).unwrap();
-        let _authority = FakeAuthority::start(&fixture.paths, authority_version).await;
+        fs::write(&fixture.codex_version, &version_output).unwrap();
+        let _authority = FakeAuthority::start(&fixture.paths, &authority_version).await;
         setup_with_context(fixture.context(true)).await.unwrap();
-        let candidate = candidate(
-            &fixture,
-            "candidate-advisory",
-            "codex-session-control",
-            "0.3.0",
-            product_target(),
-        );
+        let candidate = higher_candidate(&fixture, "candidate-advisory");
         fixture.clear_logs();
 
         let report = staged_update_with_context(context(&fixture, candidate, None))
             .await
             .unwrap();
 
-        assert!(report.stdout.starts_with("Installed release: 0.3.0\n"));
+        assert!(report.stdout.starts_with(&format!(
+            "Installed release: {}\n",
+            higher_test_release_version()
+        )));
         assert_eq!(
             report.stderr.contains("Compatibility warning:"),
             warning.is_some(),
@@ -710,7 +728,7 @@ async fn tested_untested_and_unparseable_versions_only_change_update_advisory() 
 
 #[test]
 fn candidate_apply_sets_only_the_private_staged_marker() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::test_support::private_tempdir();
     let log = root.path().join("candidate.log");
     let executable = root.path().join("candidate");
     super::write_executable_fixture(

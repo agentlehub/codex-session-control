@@ -1,6 +1,10 @@
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
+use std::process::Command;
+
+#[path = "support/private_tempdir.rs"]
+mod test_support;
 
 const CHECKOUT_SHA: &str = "3d3c42e5aac5ba805825da76410c181273ba90b1";
 const CHECKOUT_REFERENCE: &str =
@@ -21,6 +25,264 @@ fn workflow(name: &str) -> String {
         .join(name);
     fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("cannot read workflow {}: {error}", path.display()))
+}
+
+#[test]
+fn tested_codex_version_has_one_canonical_source() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let raw = fs::read_to_string(root.join("supported-codex-version.txt")).unwrap();
+    let version = raw
+        .strip_suffix('\n')
+        .expect("tested Codex version must end with one newline");
+    assert!(!version.contains(['\r', '\n']));
+    let components = version.split('.').collect::<Vec<_>>();
+    assert_eq!(components.len(), 3, "tested Codex version must be SemVer");
+    assert!(components.iter().all(|component| {
+        !component.is_empty()
+            && component.bytes().all(|byte| byte.is_ascii_digit())
+            && (component == &"0" || !component.starts_with('0'))
+    }));
+
+    let build_script = fs::read_to_string(root.join("build.rs")).unwrap();
+    assert_required(
+        &build_script,
+        &[
+            "supported-codex-version.txt",
+            "CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION",
+        ],
+        "tested Codex version build bridge",
+    );
+
+    let app_server = fs::read_to_string(root.join("src/app_server.rs")).unwrap();
+    assert_required(
+        &app_server,
+        &["env!(\"CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION\")"],
+        "application tested Codex version",
+    );
+    let disposable_ci =
+        fs::read_to_string(root.join("scripts/ci/disposable-systemd-user-contract.sh")).unwrap();
+    assert_required(
+        &disposable_ci,
+        &["cat \"$repository_root/supported-codex-version.txt\""],
+        "disposable systemd tested Codex version",
+    );
+
+    let readme = fs::read_to_string(root.join("README.md")).unwrap();
+    let marker = "<!-- generated: supported-codex-version -->";
+    let marked_lines = readme
+        .lines()
+        .filter(|line| line.contains(marker))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        marked_lines,
+        [format!("- Codex CLI `{version}` on `PATH` {marker}")],
+        "README must expose exactly one generated tested-version line"
+    );
+
+    let fixture_raw =
+        fs::read_to_string(root.join("tests/fixtures/app-server-contract.json")).unwrap();
+    assert!(!fixture_raw.contains("__TESTED_CODEX_VERSION__"));
+    let fixture: serde_json::Value = serde_json::from_str(&fixture_raw).unwrap();
+    assert_eq!(fixture["codexVersion"], version);
+    assert!(
+        fixture["successfulExemplars"]["initialize"]["userAgent"]
+            .as_str()
+            .unwrap()
+            .contains(version)
+    );
+
+    let setter = root.join("scripts/set-supported-codex-version.sh");
+    assert_eq!(
+        fs::metadata(&setter).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    let setter_source = fs::read_to_string(setter).unwrap();
+    assert_required(
+        &setter_source,
+        &[
+            "supported-codex-version.txt",
+            "generated: supported-codex-version",
+            "VERSION must be stable SemVer",
+        ],
+        "supported Codex version setter",
+    );
+    for unrelated_action in ["codex --version", "cargo test", "npm install"] {
+        assert!(
+            !setter_source.contains(unrelated_action),
+            "setter must not perform unrelated action: {unrelated_action}"
+        );
+    }
+}
+
+#[test]
+fn tested_codex_version_setter_updates_only_generated_version_data() {
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let original_version =
+        fs::read_to_string(source_root.join("supported-codex-version.txt")).unwrap();
+    let original_version = original_version.trim();
+    let original_readme = fs::read_to_string(source_root.join("README.md")).unwrap();
+    let original_fixture =
+        fs::read(source_root.join("tests/fixtures/app-server-contract.json")).unwrap();
+    let root = test_support::private_tempdir();
+    let scripts = root.path().join("scripts");
+    let fixtures = root.path().join("tests/fixtures");
+    fs::create_dir(&scripts).unwrap();
+    fs::create_dir_all(&fixtures).unwrap();
+    fs::copy(source_root.join("README.md"), root.path().join("README.md")).unwrap();
+    fs::copy(
+        source_root.join("supported-codex-version.txt"),
+        root.path().join("supported-codex-version.txt"),
+    )
+    .unwrap();
+    fs::copy(
+        source_root.join("tests/fixtures/app-server-contract.json"),
+        fixtures.join("app-server-contract.json"),
+    )
+    .unwrap();
+    let setter = scripts.join("set-supported-codex-version.sh");
+    fs::copy(
+        source_root.join("scripts/set-supported-codex-version.sh"),
+        &setter,
+    )
+    .unwrap();
+    let current = semver::Version::parse(original_version).unwrap();
+    let fake_version = format!("{}.0.0", current.major.checked_add(1).unwrap());
+    let output = Command::new(&setter).arg(&fake_version).output().unwrap();
+    assert!(
+        output.status.success(),
+        "setter failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("supported-codex-version.txt")).unwrap(),
+        format!("{fake_version}\n")
+    );
+    let readme = fs::read_to_string(root.path().join("README.md")).unwrap();
+    let old_line = format!(
+        "- Codex CLI `{original_version}` on `PATH` <!-- generated: supported-codex-version -->"
+    );
+    let new_line = format!(
+        "- Codex CLI `{fake_version}` on `PATH` <!-- generated: supported-codex-version -->"
+    );
+    assert_eq!(readme, original_readme.replace(&old_line, &new_line));
+    assert_eq!(
+        fs::read(fixtures.join("app-server-contract.json")).unwrap(),
+        original_fixture
+    );
+
+    let version_before_rejection =
+        fs::read(root.path().join("supported-codex-version.txt")).unwrap();
+    let readme_before_rejection = fs::read(root.path().join("README.md")).unwrap();
+    let fixture_before_rejection = fs::read(fixtures.join("app-server-contract.json")).unwrap();
+    let rejected = Command::new(&setter).arg("1.2.3-beta.1").output().unwrap();
+    assert!(!rejected.status.success());
+    assert_eq!(
+        fs::read(root.path().join("supported-codex-version.txt")).unwrap(),
+        version_before_rejection
+    );
+    assert_eq!(
+        fs::read(root.path().join("README.md")).unwrap(),
+        readme_before_rejection
+    );
+    assert_eq!(
+        fs::read(fixtures.join("app-server-contract.json")).unwrap(),
+        fixture_before_rejection
+    );
+
+    let real_mv = Command::new("sh")
+        .args(["-c", "command -v mv"])
+        .output()
+        .unwrap();
+    assert!(real_mv.status.success());
+    let real_mv = String::from_utf8(real_mv.stdout).unwrap();
+    let real_mv = real_mv.trim();
+    let fake_bin = root.path().join("fake-bin");
+    fs::create_dir(&fake_bin).unwrap();
+    let mv_count = root.path().join("mv-count");
+    let fake_mv = fake_bin.join("mv");
+    fs::write(
+        &fake_mv,
+        format!(
+            "#!/bin/sh\ncount=0\n[ ! -f '{count}' ] || count=$(cat '{count}')\ncount=$((count + 1))\nprintf '%s\\n' \"$count\" > '{count}'\n[ \"$count\" -ne 2 ] || exit 91\nexec '{real_mv}' \"$@\"\n",
+            count = mv_count.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_mv, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut path = vec![fake_bin.clone()];
+    path.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+    let path = std::env::join_paths(path).unwrap();
+    let failed_version = format!("{}.0.0", current.major.checked_add(2).unwrap());
+    let failed_replace = Command::new(&setter)
+        .arg(&failed_version)
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    assert!(!failed_replace.status.success());
+    assert_eq!(
+        fs::read(root.path().join("supported-codex-version.txt")).unwrap(),
+        version_before_rejection
+    );
+    assert_eq!(
+        fs::read(root.path().join("README.md")).unwrap(),
+        readme_before_rejection
+    );
+    assert!(!fs::read_dir(root.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".set-supported-version.")
+    }));
+
+    let fake_mktemp = fake_bin.join("mktemp");
+    fs::write(&fake_mktemp, "#!/bin/sh\nexit 92\n").unwrap();
+    fs::set_permissions(&fake_mktemp, fs::Permissions::from_mode(0o755)).unwrap();
+    let failed_stage = Command::new(&setter)
+        .arg(&failed_version)
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    assert!(!failed_stage.status.success());
+    assert_eq!(
+        fs::read(root.path().join("supported-codex-version.txt")).unwrap(),
+        version_before_rejection
+    );
+    assert_eq!(
+        fs::read(root.path().join("README.md")).unwrap(),
+        readme_before_rejection
+    );
+}
+
+#[test]
+fn integration_temp_roots_ignore_ambient_tmpdir() {
+    const PROBE: &str = "CODEX_SESSION_CONTROL_PRIVATE_TMPDIR_PROBE";
+    if std::env::var_os(PROBE).is_some() {
+        let root = test_support::private_tempdir();
+        let metadata = fs::metadata(root.path()).unwrap();
+        assert!(root.path().starts_with(test_support::effective_user_home()));
+        assert_eq!(metadata.uid(), rustix::process::geteuid().as_raw());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        assert!(!root.path().starts_with("/tmp"));
+        return;
+    }
+
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "integration_temp_roots_ignore_ambient_tmpdir",
+            "--exact",
+            "--nocapture",
+        ])
+        .env(PROBE, "1")
+        .env("TMPDIR", "/tmp")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "private TMPDIR probe failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
 }
 
 fn block_at_indent<'a>(document: &'a str, header: &str, indent: usize) -> &'a str {
@@ -675,9 +937,11 @@ fn standard_checks_wrapper_contains_shared_checks_and_is_executable() {
         &checks,
         &[
             "cargo fmt --all -- --check",
-            "shellcheck install.sh scripts/check.sh scripts/ci/disposable-systemd-user-contract.sh",
+            "shellcheck install.sh scripts/check.sh scripts/set-supported-codex-version.sh",
+            "scripts/ci/disposable-systemd-user-contract.sh",
             "sh -n install.sh",
             "bash -n scripts/check.sh",
+            "bash -n scripts/set-supported-codex-version.sh",
             "bash -n scripts/ci/disposable-systemd-user-contract.sh",
             "actionlint -version | grep -x '1\\.7\\.12'",
             "actionlint .github/workflows/ci.yml",
@@ -860,7 +1124,7 @@ test "$(
     HOME="$home" \
     CODEX_HOME="$probe_home" \
     "$native_codex_binary" --version
-)" = "codex-cli 0.146.0""#;
+)" = "codex-cli $supported_codex_version""#;
     assert!(
         transaction.contains(native_probe),
         "the native Codex probe must be one exact isolated, owned, mode-checked stanza"

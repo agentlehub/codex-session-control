@@ -15,7 +15,7 @@ use crate::{
         render_descriptor, verify_persisted_desktop,
     },
     error::ControllerError,
-    model::{DesktopAttachmentIdentity, InstalledRelease, ProductConfig},
+    model::{DesktopAttachmentIdentity, InstalledRelease},
 };
 
 use super::{
@@ -58,7 +58,6 @@ struct StatusFailure {
 
 struct InstalledStatusState {
     manifest: Option<InstalledRelease>,
-    configuration: Option<ProductConfig>,
     codex: Option<PathBuf>,
     codex_version: Option<(String, String)>,
 }
@@ -306,7 +305,6 @@ fn inspect_installed_artifacts(
 
     InstalledStatusState {
         manifest,
-        configuration,
         codex,
         codex_version,
     }

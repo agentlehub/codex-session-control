@@ -81,12 +81,13 @@ fn systemd_ci_uses_the_native_disposable_user_manager() {
         "cargo build --bin codex-session-control --locked",
         ".profile.test == false",
         "expected exactly one codex-session-control controller binary, found $match_count",
-        "npm install --global @openai/codex@0.146.0",
+        "supported_codex_version=\"$(cat \"$repository_root/supported-codex-version.txt\")\"",
+        "npm install --global \"@openai/codex@$supported_codex_version\"",
         "expected exactly one npm Codex native executable, found $match_count",
-        "codex-cli 0.146.0",
+        "codex-cli $supported_codex_version",
         "app_server_harness=\"$home/app-server-integration-tests\"",
         "controller_binary=\"$home/codex-session-control-controller\"",
-        "native_codex_binary=\"$home/codex-0.146.0\"",
+        "native_codex_binary=\"$home/codex-$supported_codex_version\"",
         "CODEX_SESSION_CONTROL_DISPOSABLE_CLI_CANARY=1",
         "CODEX_SESSION_CONTROL_CODEX_BIN=\"$native_codex_binary\"",
         "CODEX_SESSION_CONTROL_CONTROLLER_BIN=\"$controller_binary\"",
@@ -132,14 +133,14 @@ fn systemd_ci_uses_the_native_disposable_user_manager() {
         "the disposable lifecycle proof must complete before the CLI composition canary"
     );
     let codex_install = transaction
-        .find("npm install --global @openai/codex@0.146.0")
+        .find("npm install --global \"@openai/codex@$supported_codex_version\"")
         .unwrap();
     let codex_resolution = transaction
         .find("codex_command=\"$(command -v codex)\"")
         .unwrap();
     assert!(
         codex_install < codex_resolution,
-        "Codex 0.146.0 must be installed before its native executable is resolved"
+        "the supported Codex version must be installed before its native executable is resolved"
     );
     assert!(
         transaction

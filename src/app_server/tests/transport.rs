@@ -4,7 +4,7 @@ use crate::model::ThreadStatus;
 #[tokio::test]
 async fn initialize_precedes_initialized_and_checks_codex_home() {
     let harness = FakeAppServer::start(FakeScript::happy()).await;
-    let client = harness.client("0.146.0");
+    let client = harness.client(TESTED_CODEX_VERSION);
     let connection = client.connect_initialized().await.unwrap();
     harness.wait_for_frames(2).await;
     assert_eq!(
@@ -13,7 +13,7 @@ async fn initialize_precedes_initialized_and_checks_codex_home() {
             "codexHome": harness.codex_home(),
             "platformFamily": "unix",
             "platformOs": "linux",
-            "userAgent": "codex-cli 0.146.0"
+            "userAgent": TESTED_CODEX_CLI_VERSION
         }))
     );
 
@@ -27,7 +27,7 @@ async fn initialize_precedes_initialized_and_checks_codex_home() {
     assert_eq!(harness.connection_count(), 1);
     drop(connection);
 
-    let mismatch = harness.client_with_codex_home("/tmp/not-the-target", "0.146.0");
+    let mismatch = harness.client_with_codex_home("/tmp/not-the-target", TESTED_CODEX_VERSION);
     let error = mismatch.connect_initialized().await.unwrap_err();
     assert_eq!(error.category, ToolErrorCategory::TargetUnavailable);
 }
@@ -46,7 +46,7 @@ async fn request_ids_correlate_across_notifications() {
     ]))
     .await;
     let mut connection = harness
-        .client("0.146.0")
+        .client(TESTED_CODEX_VERSION)
         .connect_initialized()
         .await
         .unwrap();
@@ -83,7 +83,7 @@ async fn server_requests_receive_no_client_response() {
     ]))
     .await;
     let mut connection = harness
-        .client("0.146.0")
+        .client(TESTED_CODEX_VERSION)
         .connect_initialized()
         .await
         .unwrap();
@@ -112,7 +112,7 @@ async fn socket_parent_owner_mode_and_type_are_required() {
     ] {
         let harness = FakeAppServer::with_socket_violation(violation).await;
         let error = harness
-            .client("0.146.0")
+            .client(TESTED_CODEX_VERSION)
             .connect_initialized()
             .await
             .unwrap_err();
@@ -128,7 +128,7 @@ async fn socket_parent_owner_mode_and_type_are_required() {
 
 #[tokio::test]
 async fn socket_mode_requires_owner_read_write_and_no_group_or_other_bits() {
-    let temporary = tempfile::tempdir().unwrap();
+    let temporary = crate::test_support::private_tempdir();
     std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let socket_path = temporary.path().join("app-server.sock");
 
@@ -164,7 +164,10 @@ async fn each_non_wait_stage_has_an_independent_ten_second_deadline() {
         TransportBarrier::BeforeNativeResponse,
     ] {
         let harness = FakeAppServer::start(FakeScript::blocked_at(barrier)).await;
-        let operation = tokio::spawn(run_to_barrier(harness.client("0.146.0"), barrier));
+        let operation = tokio::spawn(run_to_barrier(
+            harness.client(TESTED_CODEX_VERSION),
+            barrier,
+        ));
         harness.wait_until_barrier().await;
         tokio::time::advance(Duration::from_secs(9)).await;
         assert!(!operation.is_finished());
@@ -186,7 +189,7 @@ async fn one_primary_connection_is_closed_after_result() {
     let harness = FakeAppServer::start(FakeScript::happy()).await;
     {
         let mut connection = harness
-            .client("0.146.0")
+            .client(TESTED_CODEX_VERSION)
             .connect_initialized()
             .await
             .unwrap();
@@ -233,7 +236,7 @@ async fn mutation_failure_points_preserve_dispatch_truth() {
     ] {
         let harness = FakeAppServer::start(FakeScript::at_failure(failure_point)).await;
         let mut connection = harness
-            .client("0.146.0")
+            .client(TESTED_CODEX_VERSION)
             .connect_initialized()
             .await
             .unwrap();
@@ -304,7 +307,7 @@ async fn correlated_native_error_marks_the_mutation_result_received() {
         )
         .await;
     let mut connection = harness
-        .client("0.146.0")
+        .client(TESTED_CODEX_VERSION)
         .connect_initialized()
         .await
         .unwrap();
@@ -335,13 +338,14 @@ async fn correlated_native_error_marks_the_mutation_result_received() {
 #[tokio::test]
 async fn tested_version_has_no_warning() {
     assert_eq!(
-        extract_codex_version(
-            "Codex Desktop/0.146.0 (Arch Linux Unknown; x86_64) dumb \
-                     (codex_session_control; 0.1.0)"
-        ),
-        Some("0.146.0".to_owned())
+        extract_codex_version(&format!(
+            "Codex Desktop/{TESTED_CODEX_VERSION} (Arch Linux Unknown; x86_64) dumb \
+             (codex_session_control; 0.1.0)"
+        )),
+        Some(TESTED_CODEX_VERSION.to_owned())
     );
-    let harness = FakeAppServer::start(FakeScript::happy().with_codex_version("0.146.0")).await;
+    let harness =
+        FakeAppServer::start(FakeScript::happy().with_codex_version(TESTED_CODEX_VERSION)).await;
     let connection = harness
         .configured_client()
         .connect_initialized()
@@ -355,7 +359,9 @@ async fn tested_version_has_no_warning() {
 
 #[tokio::test]
 async fn untested_version_preserves_structured_result_and_prefixes_text() {
-    let harness = FakeAppServer::start(FakeScript::happy().with_codex_version("0.147.0")).await;
+    let untested_version = crate::test_support::different_stable_version(TESTED_CODEX_VERSION);
+    let harness =
+        FakeAppServer::start(FakeScript::happy().with_codex_version(&untested_version)).await;
     let connection = harness
         .configured_client()
         .connect_initialized()
@@ -369,7 +375,9 @@ async fn untested_version_preserves_structured_result_and_prefixes_text() {
     );
     assert_eq!(
         connection.prefix_text("ready"),
-        "WARNING: Target Codex 0.147.0 is untested. Codex session control was validated against Codex 0.146.0. Report this warning to the operator. The accompanying structured data remains authoritative.\n\nready"
+        format!(
+            "WARNING: Target Codex {untested_version} is untested. Codex session control was validated against Codex {TESTED_CODEX_VERSION}. Report this warning to the operator. The accompanying structured data remains authoritative.\n\nready"
+        )
     );
     assert_eq!(harness.connection_count(), 1);
 }

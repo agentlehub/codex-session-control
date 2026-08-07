@@ -1,4 +1,4 @@
-#![allow(
+#![expect(
     clippy::result_large_err,
     reason = "the approved validation boundary returns structured ToolErrorData directly"
 )]
