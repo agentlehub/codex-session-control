@@ -397,7 +397,8 @@ fn higher_candidate(fixture: &Fixture, name: &str) -> PathBuf {
     super::write_executable_fixture(
         &candidate,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'codex-session-control 0.3.0 ({})\\n'; exit 0; fi\nexit 64\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'codex-session-control {} ({})\\n'; exit 0; fi\nexit 64\n",
+            higher_test_release_version(),
             product_target()
         ),
     );
@@ -475,8 +476,9 @@ async fn accepted_gate_has_no_second_handoff_and_restarts_only_the_service() {
     super::write_executable_fixture(
         &candidate,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"--version\" ]; then printf 'codex-session-control 0.3.0 ({})\\n'; exit 0; fi\nexit 64\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"--version\" ]; then printf 'codex-session-control {} ({})\\n'; exit 0; fi\nexit 64\n",
             candidate_log.display(),
+            higher_test_release_version(),
             product_target()
         ),
     );
@@ -495,7 +497,10 @@ async fn accepted_gate_has_no_second_handoff_and_restarts_only_the_service() {
     let report = staged_update_with_context(context).await.unwrap();
     let restarted_authority = starter.await.unwrap();
 
-    assert!(report.stdout.starts_with("Installed release: 0.3.0\n"));
+    assert!(report.stdout.starts_with(&format!(
+        "Installed release: {}\n",
+        higher_test_release_version()
+    )));
     assert_eq!(
         serde_json::from_slice::<InstalledRelease>(&fs::read(&fixture.paths.manifest).unwrap())
             .unwrap()
