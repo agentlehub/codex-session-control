@@ -21,8 +21,6 @@ mod wrapper;
 
 pub(crate) use evidence::{ResolvedUserPaths, load_installed_config};
 pub(crate) use service::LifecycleTarget;
-#[allow(unused_imports)]
-pub(crate) use status::StatusReport;
 pub(crate) use status::status;
 pub(crate) use wrapper::codex_wrapper;
 
@@ -93,11 +91,7 @@ mod setup;
 mod uninstall;
 
 pub(crate) use enable_disable::{disable, enable};
-#[allow(unused_imports)]
-pub(crate) use setup::SetupReport;
 pub(crate) use setup::setup;
-#[allow(unused_imports)]
-pub(crate) use uninstall::UninstallReceipt;
 pub(crate) use uninstall::uninstall;
 
 #[cfg(target_arch = "x86_64")]

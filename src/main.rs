@@ -1,15 +1,9 @@
-#[allow(dead_code)]
 mod app_server;
 mod cli;
-#[allow(dead_code)]
 mod desktop;
-#[allow(dead_code)]
 mod error;
-#[allow(dead_code)]
 mod install;
-#[allow(dead_code)]
 mod mcp;
-#[allow(dead_code)]
 mod model;
 
 use clap::Parser;

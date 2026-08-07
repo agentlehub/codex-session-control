@@ -20,6 +20,7 @@ pub(super) const RELEASE_REPOSITORY: &str = "agentlehub/codex-session-control";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ReleaseStage {
+    #[cfg(test)]
     Connect,
     Metadata,
     Download,
@@ -29,6 +30,7 @@ pub(super) enum ReleaseStage {
 impl ReleaseStage {
     const fn name(self) -> &'static str {
         match self {
+            #[cfg(test)]
             Self::Connect => "release-connect",
             Self::Metadata => "release-metadata",
             Self::Download => "release-download",
@@ -38,6 +40,7 @@ impl ReleaseStage {
 
     const fn timeout(self) -> Duration {
         match self {
+            #[cfg(test)]
             Self::Connect => RELEASE_CONNECT_TIMEOUT,
             Self::Metadata => RELEASE_METADATA_TIMEOUT,
             Self::Download | Self::TransferIdle => RELEASE_TRANSFER_IDLE_TIMEOUT,
@@ -67,6 +70,7 @@ pub(super) struct ReleaseAsset {
 
 #[derive(Clone, Debug)]
 pub(super) struct VerifiedRelease {
+    #[cfg(test)]
     pub(super) tag: String,
     pub(super) version: semver::Version,
     pub(super) target: String,
@@ -77,7 +81,9 @@ pub(super) struct VerifiedRelease {
 #[derive(Clone, Debug)]
 pub(super) struct DownloadedRelease {
     pub(super) binary_path: PathBuf,
+    #[cfg(test)]
     pub(super) checksums_path: PathBuf,
+    #[cfg(test)]
     pub(super) sha256: String,
 }
 
@@ -181,7 +187,8 @@ pub(super) async fn discover_latest_release(
     let binary = exact_release_asset(&metadata.assets, &binary_name, &expected_binary_url)?;
     let checksums = exact_release_asset(&metadata.assets, "SHA256SUMS", &expected_checksums_url)?;
     Ok(VerifiedRelease {
-        tag: metadata.tag_name,
+        #[cfg(test)]
+        tag: metadata.tag_name.clone(),
         version,
         target: target.to_owned(),
         binary,
@@ -244,7 +251,9 @@ pub(super) async fn download_verified_release(
     }
     Ok(DownloadedRelease {
         binary_path,
+        #[cfg(test)]
         checksums_path,
+        #[cfg(test)]
         sha256,
     })
 }
