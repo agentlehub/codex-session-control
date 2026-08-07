@@ -45,9 +45,11 @@ use super::{
     },
     render::{render_projection, render_unit},
     service::{
-        CONTROL_SOCKET_READINESS_TIMEOUT, LifecycleTarget, append_unattached_client_guidance,
+        CONTROL_SOCKET_READINESS_TIMEOUT, CallerUnitEvidence, CallerUnitInspection,
+        LifecycleTarget, ServiceActivity, ServiceEnablement, append_unattached_client_guidance,
+        cgroup_proves_self_hosted, classify_service_activity, classify_service_enablement,
         classify_unattached_client, detect_running_unattached_clients_from_snapshot,
-        wait_for_control_socket,
+        inspect_caller_unit, wait_for_control_socket,
     },
     setup::{SetupContext, setup_preflight, setup_with_context},
     status::{StatusContext, status_with_context},
@@ -148,6 +150,7 @@ mod paths;
 mod release;
 mod render;
 mod selected_home_evidence;
+mod service_safety;
 mod setup;
 mod status;
 mod support;

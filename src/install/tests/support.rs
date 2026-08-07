@@ -20,6 +20,8 @@ pub(super) struct Fixture {
     pub(super) plugin_version_state: PathBuf,
     pub(super) codex_fail: PathBuf,
     pub(super) systemctl_fail: PathBuf,
+    pub(super) whoami_unit: PathBuf,
+    pub(super) control_group: PathBuf,
     pub(super) preserve_service_state: PathBuf,
     pub(super) enabled: PathBuf,
     pub(super) active: PathBuf,
@@ -61,6 +63,8 @@ impl Fixture {
         let plugin_version_state = root.path().join("plugin-version-state");
         let codex_fail = root.path().join("codex-fail");
         let systemctl_fail = root.path().join("systemctl-fail");
+        let whoami_unit = root.path().join("whoami-unit");
+        let control_group = root.path().join("control-group");
         let preserve_service_state = root.path().join("preserve-service-state");
         let enabled = root.path().join("enabled");
         let active = root.path().join("active");
@@ -68,6 +72,15 @@ impl Fixture {
         let restart_requested = root.path().join("restart-requested");
         let required_descriptor = root.path().join("required-descriptor");
         fs::write(&codex_version, TESTED_CODEX_CLI_VERSION_OUTPUT).unwrap();
+        fs::write(&whoami_unit, b"session-42.scope\n").unwrap();
+        fs::write(
+            &control_group,
+            format!(
+                "/user.slice/app.slice/{}\n",
+                paths.unit.file_name().unwrap().to_string_lossy()
+            ),
+        )
+        .unwrap();
 
         let codex = fake_bin.join("codex");
         let codex_script = format!(
@@ -205,10 +218,21 @@ if [ "$1" = "--user" ] && [ "$2" = "is-active" ]; then
   [ "$3" = "--quiet" ] || printf 'inactive\n'
   exit 3
 fi
+if [ "$1" = "--user" ] && [ "$2" = "whoami" ]; then
+  cat '{whoami_unit}'
+  exit 0
+fi
+if [ "$1" = "--user" ] && [ "$2" = "show" ] && \
+   [ "$3" = "--property=ControlGroup" ] && [ "$4" = "--value" ]; then
+  cat '{control_group}'
+  exit 0
+fi
 exit 64
 "#,
             systemctl_log = systemctl_log.display(),
             systemctl_fail = systemctl_fail.display(),
+            whoami_unit = whoami_unit.display(),
+            control_group = control_group.display(),
             preserve_service_state = preserve_service_state.display(),
             unit = paths.unit.display(),
             enabled = enabled.display(),
@@ -237,6 +261,8 @@ exit 64
             plugin_version_state,
             codex_fail,
             systemctl_fail,
+            whoami_unit,
+            control_group,
             preserve_service_state,
             enabled,
             active,
