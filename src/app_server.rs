@@ -1,4 +1,4 @@
-#![allow(
+#![expect(
     clippy::result_large_err,
     reason = "native protocol stages return the approved structured ToolErrorData directly"
 )]
@@ -200,38 +200,6 @@ impl AppServerClient {
             TESTED_CODEX_VERSION.to_owned(),
         )
     }
-
-    pub async fn threads_list(
-        &self,
-        cursor: Option<&str>,
-        limit: Option<u32>,
-        archived: Option<bool>,
-        cwd: Option<&str>,
-    ) -> Result<(Vec<Thread>, Option<String>), ToolErrorData> {
-        let mut connection = self.connect_initialized().await?;
-        connection.threads_list(cursor, limit, archived, cwd).await
-    }
-
-    pub async fn thread_read(
-        &self,
-        thread_id: &str,
-        cursor: Option<&str>,
-        limit: Option<u32>,
-        items_view: Option<TurnItemsView>,
-    ) -> Result<(Thread, Vec<Turn>, Option<String>), ToolErrorData> {
-        let mut connection = self.connect_initialized().await?;
-        connection
-            .thread_read(thread_id, cursor, limit, items_view)
-            .await
-    }
-
-    pub async fn thread_goal_get(
-        &self,
-        thread_id: &str,
-    ) -> Result<Option<ThreadGoal>, ToolErrorData> {
-        let mut connection = self.connect_initialized().await?;
-        connection.thread_goal_get(thread_id).await
-    }
 }
 
 impl AppServerConnection {
@@ -390,6 +358,7 @@ impl AppServerConnection {
         self.compatibility_warning.as_deref()
     }
 
+    #[cfg(test)]
     pub fn prefix_text(&self, text: &str) -> String {
         match &self.compatibility_warning {
             Some(warning) => format!("{warning}\n\n{text}"),
@@ -592,7 +561,6 @@ pub async fn with_native_stage_timeout<T>(
         .map_err(|_| ToolErrorData::fixed(ToolErrorCategory::StageTimeout, stage, stage))?
 }
 
-#[allow(clippy::result_large_err)]
 fn validate_socket(socket_path: &Path) -> Result<(), ToolErrorData> {
     let error = || transport_error("socket_validation");
     let parent = socket_path.parent().ok_or_else(error)?;
@@ -624,7 +592,6 @@ fn extract_codex_version(user_agent: &str) -> Option<String> {
         })
 }
 
-#[allow(clippy::result_large_err)]
 fn insert_optional<T: Serialize>(
     params: &mut serde_json::Map<String, Value>,
     name: &'static str,

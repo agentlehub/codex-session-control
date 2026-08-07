@@ -464,7 +464,10 @@ pub(super) async fn interrupt_thread(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "native mutation dispatch requires explicit tool, method, payload, target identifiers, and reconciliation policy"
+)]
 pub(super) async fn mutation_request(
     client: &AppServerClient,
     connection: &mut AppServerConnection,

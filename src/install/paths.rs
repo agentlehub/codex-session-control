@@ -17,6 +17,7 @@ pub(super) const SOCKET_SECURITY_REQUIREMENT: &str = "must be an owner-owned Uni
 pub(super) enum FileKind {
     Directory,
     RegularFile,
+    #[cfg(test)]
     UnixSocket,
 }
 
@@ -318,6 +319,7 @@ pub(super) fn validate_existing(
     let type_matches = match expected {
         FileKind::Directory => file_type.is_dir(),
         FileKind::RegularFile => file_type.is_file(),
+        #[cfg(test)]
         FileKind::UnixSocket => file_type.is_socket(),
     };
     if file_type.is_symlink()
@@ -777,6 +779,7 @@ pub(super) fn reconcile_file(
     Ok(true)
 }
 
+#[cfg(test)]
 pub(super) fn validate_config_file(path: &Path, euid: u32) -> Result<(), ControllerError> {
     let metadata = fs::symlink_metadata(path).map_err(|_| ControllerError::InvalidData {
         field: "config",

@@ -27,6 +27,7 @@ pub(crate) struct LifecycleTarget {
 #[derive(Clone, Debug)]
 pub(super) enum ClientProcessSource {
     ProcRoot(PathBuf),
+    #[cfg(test)]
     Snapshot(Vec<(u32, Vec<u8>)>),
 }
 
@@ -376,6 +377,7 @@ pub(super) fn detect_running_unattached_clients(
 ) -> BTreeSet<&'static str> {
     let snapshot = match source {
         ClientProcessSource::ProcRoot(root) => read_client_process_snapshot(root, euid),
+        #[cfg(test)]
         ClientProcessSource::Snapshot(snapshot) => snapshot.clone(),
     };
     detect_running_unattached_clients_from_snapshot(
