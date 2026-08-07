@@ -54,17 +54,6 @@ fn capture_protocol_fixture_uses_disposable_normal_home_shape() {
     );
 }
 
-#[test]
-fn fixture_normalization_zeroes_section_entry_time() {
-    let fixture = normalize_fixture(
-        json!({"thread": {"sectionEnteredAt": 123}}),
-        &HashMap::new(),
-        "/capture-root",
-    );
-
-    assert_eq!(fixture["thread"]["sectionEnteredAt"], 0);
-}
-
 fn fixture_codex_home(temporary: &Path) -> PathBuf {
     temporary.join("home/.codex")
 }
@@ -215,60 +204,6 @@ enabled = false
     wait_for_responses_requests(&endpoint, 1).await?;
     wait_for_turn_status(&mut connection, &thread_id, &first_turn, "completed").await?;
 
-    let thread_section_move: Value = connection
-        .mutate(
-            "thread_pin_set",
-            "thread/section/move",
-            json!({
-                "threadId": thread_id,
-                "sectionId": "01984de2-8f74-7c91-a3b2-5c5e937cf318",
-            }),
-            Some(&thread_id),
-            None,
-        )
-        .await
-        .map_err(fixture_tool_error)?;
-    if !thread_section_move.is_object() {
-        return Err("thread/section/move returned a malformed acknowledgement".into());
-    }
-    let pinned: Value = connection
-        .request(
-            "thread/read",
-            json!({"threadId": thread_id, "includeTurns": false}),
-        )
-        .await
-        .map_err(fixture_tool_error)?;
-    if pinned["thread"]["id"] != thread_id
-        || pinned["thread"]["section"]["id"] != "01984de2-8f74-7c91-a3b2-5c5e937cf318"
-    {
-        return Err("thread/section/move did not pin the captured thread".into());
-    }
-    let mut safe_pinned_thread = safe_thread_exemplar(&pinned)?;
-    safe_pinned_thread["thread"]["preview"] = json!("");
-    let unpinned: Value = connection
-        .mutate(
-            "thread_pin_set",
-            "thread/section/move",
-            json!({"threadId": thread_id, "sectionId": null}),
-            Some(&thread_id),
-            None,
-        )
-        .await
-        .map_err(fixture_tool_error)?;
-    if !unpinned.is_object() {
-        return Err("thread/section/move returned a malformed acknowledgement".into());
-    }
-    let unpinned_read: Value = connection
-        .request(
-            "thread/read",
-            json!({"threadId": thread_id, "includeTurns": false}),
-        )
-        .await
-        .map_err(fixture_tool_error)?;
-    if !unpinned_read["thread"]["section"].is_null() {
-        return Err("thread/section/move did not unpin the captured thread".into());
-    }
-
     let second_turn = start_fixture_turn(&mut connection, &thread_id).await?;
     wait_for_responses_requests(&endpoint, 2).await?;
     let turns =
@@ -385,8 +320,6 @@ enabled = false
         ("initialize".to_owned(), initialize),
         ("threadStart".to_owned(), safe_thread_start),
         ("threadRead".to_owned(), safe_thread_read),
-        ("threadReadPinned".to_owned(), safe_pinned_thread),
-        ("threadSectionMove".to_owned(), thread_section_move),
         ("threadList".to_owned(), safe_thread_list),
         ("turnStart".to_owned(), safe_held_turn),
         ("turnsList".to_owned(), interrupted_turns),
@@ -983,12 +916,7 @@ fn normalize_fixture(
                     .map(|(key, value)| {
                         let value = if matches!(
                             key.as_str(),
-                            "createdAt"
-                                | "updatedAt"
-                                | "startedAt"
-                                | "completedAt"
-                                | "durationMs"
-                                | "sectionEnteredAt"
+                            "createdAt" | "updatedAt" | "startedAt" | "completedAt" | "durationMs"
                         ) {
                             match value {
                                 Value::Null => Value::Null,

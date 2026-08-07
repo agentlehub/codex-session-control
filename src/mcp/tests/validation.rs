@@ -38,38 +38,11 @@ fn validation_resolves_omitted_metadata_targets_and_allows_explicit_self() {
     for (tool, args) in [
         ("thread_fork", json!({})),
         ("thread_title_set", json!({"title": "title"})),
-        ("thread_pin_set", json!({"pinned": true})),
     ] {
         assert_category(
             validate_input(tool, arguments(args), &Value::Null).unwrap_err(),
             ToolErrorCategory::InvalidRequest,
         );
-    }
-
-    let pin = validate_input(
-        "thread_pin_set",
-        arguments(json!({"pinned": true})),
-        &meta("caller"),
-    )
-    .unwrap();
-    let ValidatedInput::ThreadPinSet(pin) = pin else {
-        panic!("wrong validated input")
-    };
-    assert_eq!(pin.thread_id.as_deref(), Some("caller"));
-    assert!(pin.pinned);
-
-    for target in ["caller", "other"] {
-        let pin = validate_input(
-            "thread_pin_set",
-            arguments(json!({"threadId": target, "pinned": false})),
-            &meta("caller"),
-        )
-        .unwrap();
-        let ValidatedInput::ThreadPinSet(pin) = pin else {
-            panic!("wrong validated input")
-        };
-        assert_eq!(pin.thread_id.as_deref(), Some(target));
-        assert!(!pin.pinned);
     }
 
     let fork = validate_input(
@@ -191,11 +164,6 @@ fn validation_enforces_id_cursor_cwd_limit_and_open_effort_shapes() {
     for (tool, args, caller) in [
         ("thread_read", json!({"threadId": ""}), Value::Null),
         (
-            "thread_pin_set",
-            json!({"threadId": "bad id", "pinned": true}),
-            Value::Null,
-        ),
-        (
             "thread_read",
             json!({"threadId": "target", "cursor": "bad cursor"}),
             Value::Null,
@@ -289,10 +257,6 @@ fn validation_rejects_unknown_public_fields_for_every_tool() {
             "thread_title_set",
             json!({"threadId": "target", "title": "t"}),
         ),
-        (
-            "thread_pin_set",
-            json!({"threadId": "target", "pinned": true}),
-        ),
         ("thread_goal_get", json!({"threadId": "target"})),
         (
             "thread_goal_set",
@@ -354,28 +318,9 @@ fn validation_rejects_explicit_null_for_every_optional_public_field() {
             json!({"threadId": "target", "prompt": "p", "reasoningEffort": null}),
         ),
         ("thread_title_set", json!({"threadId": null, "title": "t"})),
-        ("thread_pin_set", json!({"threadId": null, "pinned": true})),
-        (
-            "thread_pin_set",
-            json!({"threadId": "target", "pinned": null}),
-        ),
     ] {
         assert_category(
             validate_input(tool, arguments(args), &meta("caller")).unwrap_err(),
-            ToolErrorCategory::InvalidRequest,
-        );
-    }
-}
-
-#[test]
-fn validation_requires_boolean_pinned_state() {
-    for args in [
-        json!({"threadId": "target"}),
-        json!({"threadId": "target", "pinned": "true"}),
-        json!({"threadId": "target", "pinned": 1}),
-    ] {
-        assert_category(
-            validate_input("thread_pin_set", arguments(args), &meta("caller")).unwrap_err(),
             ToolErrorCategory::InvalidRequest,
         );
     }

@@ -14,7 +14,6 @@ use crate::{
 
 use super::contract::*;
 
-const PINNED_THREAD_SECTION_ID: &str = "01984de2-8f74-7c91-a3b2-5c5e937cf318";
 const THREAD_HISTORY_NOT_MATERIALIZED: &str = "Codex has not materialized this thread's history yet. No message was sent. Wait a few seconds, then retry `thread_message_send`.";
 
 #[derive(Debug)]
@@ -264,78 +263,6 @@ pub(super) async fn set_title(
     )
     .await?;
     Ok(BTreeMap::new())
-}
-
-pub(super) async fn set_pin(
-    client: &AppServerClient,
-    connection: &mut AppServerConnection,
-    input: ThreadPinSetInput,
-) -> Result<ThreadPinSetResult, ToolErrorData> {
-    let thread_id = input
-        .thread_id
-        .ok_or_else(|| malformed_result("thread_pin_set", "validation"))?;
-    let read: Value = connection
-        .request(
-            "thread/read",
-            json!({"threadId": thread_id, "includeTurns": false}),
-        )
-        .await?;
-    let currently_pinned = pin_state_from_native(&read, &thread_id)?;
-    if currently_pinned == input.pinned {
-        return Ok(ThreadPinSetResult {
-            thread_id,
-            pinned: currently_pinned,
-        });
-    }
-
-    let section_id = if input.pinned {
-        json!(PINNED_THREAD_SECTION_ID)
-    } else {
-        Value::Null
-    };
-    let response = mutation_request(
-        client,
-        connection,
-        "thread_pin_set",
-        "thread/section/move",
-        json!({"threadId": thread_id, "sectionId": section_id}),
-        Some(&thread_id),
-        None,
-        Reconciliation::CompactThreadRead {
-            thread_id: thread_id.clone(),
-        },
-    )
-    .await?;
-    if !response.is_object() {
-        return Err(malformed_result("thread_pin_set", "thread/section/move"));
-    }
-    Ok(ThreadPinSetResult {
-        thread_id,
-        pinned: input.pinned,
-    })
-}
-
-fn pin_state_from_native(
-    response: &Value,
-    expected_thread_id: &str,
-) -> Result<bool, ToolErrorData> {
-    let thread = response
-        .get("thread")
-        .filter(|thread| thread.is_object())
-        .ok_or_else(|| malformed_result("thread_pin_set", "thread/read"))?;
-    let returned_thread_id = native_required_string(thread, "id", "thread_pin_set", "thread/read")?;
-    if returned_thread_id != expected_thread_id {
-        return Err(malformed_result("thread_pin_set", "thread/read"));
-    }
-    match thread.get("section") {
-        None | Some(Value::Null) => Ok(false),
-        Some(Value::Object(section)) => section
-            .get("id")
-            .and_then(Value::as_str)
-            .map(|section_id| section_id == PINNED_THREAD_SECTION_ID)
-            .ok_or_else(|| malformed_result("thread_pin_set", "thread/read")),
-        _ => Err(malformed_result("thread_pin_set", "thread/read")),
-    }
 }
 
 pub(super) async fn set_goal(

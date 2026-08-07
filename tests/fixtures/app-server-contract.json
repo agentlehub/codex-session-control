@@ -91,26 +91,6 @@
         "updatedAt": 0
       }
     },
-    "threadReadPinned": {
-      "thread": {
-        "createdAt": 0,
-        "cwd": "/tmp/codex-session-control-fixture/workspace",
-        "forkedFromId": null,
-        "id": "thread_session_control_1",
-        "name": null,
-        "preview": "",
-        "section": {
-          "id": "01984de2-8f74-7c91-a3b2-5c5e937cf318",
-          "name": "Pinned"
-        },
-        "sectionEnteredAt": 0,
-        "status": {
-          "type": "idle"
-        },
-        "updatedAt": 0
-      }
-    },
-    "threadSectionMove": {},
     "threadStart": {
       "thread": {
         "createdAt": 0,
