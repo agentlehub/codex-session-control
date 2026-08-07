@@ -28,8 +28,8 @@ pub(super) async fn live_schema_digest_matches_committed_fixture() -> Result<(),
     Ok(())
 }
 
-pub(super) async fn live_read_list_fork_title_pin_goal_interrupt_mappings()
--> Result<(), Box<dyn Error>> {
+pub(super) async fn live_read_list_fork_title_goal_interrupt_mappings() -> Result<(), Box<dyn Error>>
+{
     let live = LiveHarness::start().await?;
     let mut native = live.connect().await?;
     let thread_id = live.start_thread(&mut native).await?;
@@ -79,43 +79,6 @@ pub(super) async fn live_read_list_fork_title_pin_goal_interrupt_mappings()
             )
             .await?["thread"]["name"],
         "Live mapping title"
-    );
-
-    let pinned: Value = native
-        .request(
-            "thread/section/move",
-            json!({
-                "threadId": thread_id,
-                "sectionId": "01984de2-8f74-7c91-a3b2-5c5e937cf318",
-            }),
-        )
-        .await?;
-    assert!(pinned.is_object());
-    assert_eq!(
-        native
-            .request(
-                "thread/read",
-                json!({"threadId": thread_id, "includeTurns": false}),
-            )
-            .await?["thread"]["section"]["id"],
-        "01984de2-8f74-7c91-a3b2-5c5e937cf318"
-    );
-
-    let unpinned: Value = native
-        .request(
-            "thread/section/move",
-            json!({"threadId": thread_id, "sectionId": null}),
-        )
-        .await?;
-    assert!(unpinned.is_object());
-    assert!(
-        native
-            .request(
-                "thread/read",
-                json!({"threadId": thread_id, "includeTurns": false}),
-            )
-            .await?["thread"]["section"]
-            .is_null()
     );
 
     let goal = native

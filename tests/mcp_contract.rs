@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 const INSTRUCTIONS: &str = "These tools inspect and control Codex threads through the shared app-server used by connected Codex clients.";
 
-const TOOL_EFFECTS: [(&str, bool, bool); 14] = [
+const TOOL_EFFECTS: [(&str, bool, bool); 13] = [
     ("thread_create", false, false),
     ("thread_fork", false, false),
     ("threads_list", true, false),
@@ -17,7 +17,6 @@ const TOOL_EFFECTS: [(&str, bool, bool); 14] = [
     ("threads_wait", true, false),
     ("thread_message_send", false, false),
     ("thread_title_set", false, false),
-    ("thread_pin_set", false, false),
     ("thread_goal_get", true, false),
     ("thread_goal_set", false, false),
     ("thread_goal_pause", false, false),
@@ -263,14 +262,6 @@ fn description_contracts() -> BTreeMap<&'static str, Value> {
             }),
         ),
         (
-            "thread_pin_set",
-            json!({
-                "tool": "Set whether a thread is pinned.",
-                "input": {"threadId": "Omit to target the current thread."},
-                "output": {}
-            }),
-        ),
-        (
             "thread_goal_get",
             json!({
                 "tool": "Read another thread's goal.",
@@ -408,16 +399,6 @@ fn schema_contracts() -> BTreeMap<&'static str, SchemaContract> {
                 input_required: &["title"],
                 output_properties: &[],
                 output_required: &[],
-                nullable_output: &[],
-            },
-        ),
-        (
-            "thread_pin_set",
-            SchemaContract {
-                input_properties: &["pinned", "threadId"],
-                input_required: &["pinned"],
-                output_properties: &["pinned", "threadId"],
-                output_required: &["pinned", "threadId"],
                 nullable_output: &[],
             },
         ),

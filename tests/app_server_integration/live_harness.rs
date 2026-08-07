@@ -26,7 +26,7 @@ pub(super) const EXPECTED_CODEX_VERSION: &str = concat!(
     "codex-cli ",
     env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION")
 );
-pub(super) const SESSION_CONTROL_TOOLS: [&str; 14] = [
+pub(super) const SESSION_CONTROL_TOOLS: [&str; 13] = [
     "thread_create",
     "thread_fork",
     "threads_list",
@@ -34,7 +34,6 @@ pub(super) const SESSION_CONTROL_TOOLS: [&str; 14] = [
     "threads_wait",
     "thread_message_send",
     "thread_title_set",
-    "thread_pin_set",
     "thread_goal_get",
     "thread_goal_set",
     "thread_goal_pause",
