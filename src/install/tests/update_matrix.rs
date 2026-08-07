@@ -22,6 +22,16 @@ fn candidate(fixture: &Fixture, name: &str, product: &str, version: &str, target
     path
 }
 
+fn higher_candidate(fixture: &Fixture, name: &str) -> PathBuf {
+    candidate(
+        fixture,
+        name,
+        "codex-session-control",
+        &higher_test_release_version(),
+        product_target(),
+    )
+}
+
 fn context(
     fixture: &Fixture,
     candidate: PathBuf,
@@ -181,13 +191,7 @@ async fn higher_candidate_preserves_all_three_desired_service_states() {
         if !enabled {
             fs::remove_file(&fixture.enabled).unwrap();
         }
-        let candidate = candidate(
-            &fixture,
-            "candidate-higher",
-            "codex-session-control",
-            "0.3.0",
-            product_target(),
-        );
+        let candidate = higher_candidate(&fixture, "candidate-higher");
         fixture.clear_logs();
 
         let starter = if enabled && !active {
@@ -212,10 +216,16 @@ async fn higher_candidate_preserves_all_three_desired_service_states() {
         };
 
         assert!(
-            report.stdout.starts_with("Installed release: 0.3.0\n"),
+            report.stdout.starts_with(&format!(
+                "Installed release: {}\n",
+                higher_test_release_version()
+            )),
             "{name}"
         );
-        assert_eq!(manifest(&fixture.paths).product_version, "0.3.0");
+        assert_eq!(
+            manifest(&fixture.paths).product_version,
+            higher_test_release_version()
+        );
         assert_eq!(
             fs::read(&fixture.paths.binary).unwrap(),
             fs::read(candidate).unwrap()
@@ -592,13 +602,7 @@ async fn running_changed_authority_inspects_then_restarts_exactly_once() {
     let mut path = vec![new_bin];
     path.extend(std::env::split_paths(&setup.path_environment));
     let path = std::env::join_paths(path).unwrap();
-    let candidate = candidate(
-        &fixture,
-        "candidate-changed",
-        "codex-session-control",
-        "0.3.0",
-        product_target(),
-    );
+    let candidate = higher_candidate(&fixture, "candidate-changed");
     fs::write(&fixture.wait_for_socket, b"wait").unwrap();
     fixture.clear_logs();
     let paths = fixture.paths.clone();
@@ -615,7 +619,10 @@ async fn running_changed_authority_inspects_then_restarts_exactly_once() {
         .unwrap();
     let new_authority = starter.await.unwrap();
 
-    assert!(report.stdout.starts_with("Installed release: 0.3.0\n"));
+    assert!(report.stdout.starts_with(&format!(
+        "Installed release: {}\n",
+        higher_test_release_version()
+    )));
     assert_eq!(manifest(&fixture.paths).codex_executable, new_codex);
     assert_eq!(fixture.systemctl_log().matches(" restart ").count(), 1);
     assert!(!fixture.codex_log().contains("thread/interrupt"));
@@ -628,13 +635,7 @@ async fn retry_uses_last_manifest_after_partial_candidate_files() {
     let fixture = Fixture::new();
     let _authority = FakeAuthority::start(&fixture.paths, "0.146.0").await;
     setup_with_context(fixture.context(true)).await.unwrap();
-    let candidate = candidate(
-        &fixture,
-        "candidate-retry",
-        "codex-session-control",
-        "0.3.0",
-        product_target(),
-    );
+    let candidate = higher_candidate(&fixture, "candidate-retry");
     fs::write(&fixture.systemctl_fail, "--user daemon-reload").unwrap();
 
     let error = staged_update_with_context(context(&fixture, candidate.clone(), None))
@@ -655,8 +656,14 @@ async fn retry_uses_last_manifest_after_partial_candidate_files() {
     let report = staged_update_with_context(context(&fixture, candidate, None))
         .await
         .unwrap();
-    assert!(report.stdout.starts_with("Installed release: 0.3.0\n"));
-    assert_eq!(manifest(&fixture.paths).product_version, "0.3.0");
+    assert!(report.stdout.starts_with(&format!(
+        "Installed release: {}\n",
+        higher_test_release_version()
+    )));
+    assert_eq!(
+        manifest(&fixture.paths).product_version,
+        higher_test_release_version()
+    );
 }
 
 #[tokio::test]
@@ -670,20 +677,17 @@ async fn tested_untested_and_unparseable_versions_only_change_update_advisory() 
         fs::write(&fixture.codex_version, version_output).unwrap();
         let _authority = FakeAuthority::start(&fixture.paths, authority_version).await;
         setup_with_context(fixture.context(true)).await.unwrap();
-        let candidate = candidate(
-            &fixture,
-            "candidate-advisory",
-            "codex-session-control",
-            "0.3.0",
-            product_target(),
-        );
+        let candidate = higher_candidate(&fixture, "candidate-advisory");
         fixture.clear_logs();
 
         let report = staged_update_with_context(context(&fixture, candidate, None))
             .await
             .unwrap();
 
-        assert!(report.stdout.starts_with("Installed release: 0.3.0\n"));
+        assert!(report.stdout.starts_with(&format!(
+            "Installed release: {}\n",
+            higher_test_release_version()
+        )));
         assert_eq!(
             report.stderr.contains("Compatibility warning:"),
             warning.is_some(),

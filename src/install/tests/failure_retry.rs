@@ -58,7 +58,8 @@ fn candidate(fixture: &Fixture, name: &str) -> PathBuf {
     super::write_executable_fixture(
         &path,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'codex-session-control 0.3.0 ({})\\n'; exit 0; fi\nexit 64\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'codex-session-control {} ({})\\n'; exit 0; fi\nexit 64\n",
+            higher_test_release_version(),
             product_target()
         ),
     );
@@ -187,10 +188,12 @@ async fn immutable_release_server(
     fixture: &Fixture,
 ) -> (ReleaseEndpoints, tokio::task::JoinHandle<()>, PathBuf) {
     let candidate_log = fixture.paths.home.join("outer-candidate.log");
+    let version = higher_test_release_version();
     let binary = Arc::<[u8]>::from(
                 format!(
-                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"--version\" ]; then printf 'codex-session-control 0.3.0 ({})\\n'; exit 0; fi\nif [ \"$1\" = update ]; then exit 0; fi\nexit 64\n",
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1\" = \"--version\" ]; then printf 'codex-session-control {} ({})\\n'; exit 0; fi\nif [ \"$1\" = update ]; then exit 0; fi\nexit 64\n",
                     candidate_log.display(),
+                    version,
                     product_target()
                 )
                 .into_bytes(),
@@ -202,14 +205,14 @@ async fn immutable_release_server(
     let base = format!("http://{}", listener.local_addr().unwrap());
     let metadata = Arc::<[u8]>::from(
         json!({
-            "tag_name": "v0.3.0",
+            "tag_name": format!("v{version}"),
             "assets": [{
                 "name": binary_name,
-                "browser_download_url": format!("{base}/releases/download/v0.3.0/{binary_name}"),
+                "browser_download_url": format!("{base}/releases/download/v{version}/{binary_name}"),
                 "size": binary.len()
             }, {
                 "name": "SHA256SUMS",
-                "browser_download_url": format!("{base}/releases/download/v0.3.0/SHA256SUMS"),
+                "browser_download_url": format!("{base}/releases/download/v{version}/SHA256SUMS"),
                 "size": checksums.len()
             }]
         })
@@ -413,10 +416,11 @@ async fn staged_update_retries_every_stage_for_running_and_stopped_services() {
             .unwrap_err();
 
             assert_injected(&error, stage, "retry: codex-session-control update");
+            let higher_version = higher_test_release_version();
             assert_eq!(
                 installed(&fixture.paths).product_version,
                 if stage == "manifest" {
-                    "0.3.0"
+                    higher_version.as_str()
                 } else {
                     env!("CARGO_PKG_VERSION")
                 },
@@ -428,12 +432,16 @@ async fn staged_update_retries_every_stage_for_running_and_stopped_services() {
                     .await
                     .unwrap();
             assert!(
-                report.stdout.starts_with("Installed release: 0.3.0\n")
-                    || report.stdout.starts_with("Already current: 0.3.0\n"),
+                report
+                    .stdout
+                    .starts_with(&format!("Installed release: {higher_version}\n"))
+                    || report
+                        .stdout
+                        .starts_with(&format!("Already current: {higher_version}\n")),
                 "{stage}: {}",
                 report.stdout
             );
-            assert_eq!(installed(&fixture.paths).product_version, "0.3.0");
+            assert_eq!(installed(&fixture.paths).product_version, higher_version);
             assert_eq!(fixture.enabled.exists(), running);
             assert_eq!(fixture.active.exists(), running);
             assert_eq!(fixture.paths.socket.exists(), running);
@@ -495,7 +503,10 @@ async fn active_turn_gate_failure_retries_without_a_process_handoff() {
         .unwrap();
     let restarted_authority = starter.await.unwrap();
 
-    assert!(report.stdout.starts_with("Installed release: 0.3.0\n"));
+    assert!(report.stdout.starts_with(&format!(
+        "Installed release: {}\n",
+        higher_test_release_version()
+    )));
     assert_eq!(installed(&fixture.paths).codex_executable, new_codex);
     assert_eq!(fixture.systemctl_log().matches(" restart ").count(), 1);
     drop(restarted_authority);

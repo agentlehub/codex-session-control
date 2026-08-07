@@ -69,6 +69,24 @@ fn write_executable_fixture(path: &std::path::Path, contents: impl AsRef<[u8]>) 
     std::fs::rename(stage, path).unwrap();
 }
 
+fn higher_test_release_version() -> String {
+    let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+    let next_minor = current
+        .minor
+        .checked_add(1)
+        .expect("package minor version must permit a higher test release");
+
+    semver::Version::new(current.major, next_minor, 0).to_string()
+}
+
+#[test]
+fn synthetic_release_version_is_strictly_higher_than_package_version() {
+    let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+    let synthetic = semver::Version::parse(&higher_test_release_version()).unwrap();
+
+    assert!(synthetic > current);
+}
+
 fn assert_disposable_systemd_fixture_path(path: &std::path::Path, expected: FileKind, euid: u32) {
     validate_existing(path, expected, euid).unwrap_or_else(|error| {
         panic!(
