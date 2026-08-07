@@ -267,7 +267,7 @@ pub(super) struct ThreadInterruptInput {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(untagged)]
+#[serde(untagged, rename_all_fields = "camelCase")]
 pub(super) enum ThreadInterruptResult {
     Interrupted { interrupted: bool, turn_id: String },
     NotInterrupted { interrupted: bool },

@@ -15,6 +15,7 @@ use crate::{
 use super::contract::*;
 
 const PINNED_THREAD_SECTION_ID: &str = "01984de2-8f74-7c91-a3b2-5c5e937cf318";
+const THREAD_HISTORY_NOT_MATERIALIZED: &str = "Codex has not materialized this thread's history yet. No message was sent. Wait a few seconds, then retry `thread_message_send`.";
 
 #[derive(Debug)]
 pub(super) enum Reconciliation {
@@ -134,7 +135,10 @@ pub(super) async fn send_message(
     connection: &mut AppServerConnection,
     input: ThreadMessageSendInput,
 ) -> Result<ThreadMessageSendResult, ToolErrorData> {
-    let snapshot = connection.compact_snapshot(&input.thread_id).await?;
+    let snapshot = connection
+        .compact_snapshot(&input.thread_id)
+        .await
+        .map_err(|error| message_snapshot_error(error, &input.thread_id))?;
     let text_input = json!([{"type": "text", "text": input.prompt}]);
     match snapshot.status {
         ThreadStatus::Active { .. } => {
@@ -221,6 +225,21 @@ pub(super) async fn send_message(
             })
         }
     }
+}
+
+fn message_snapshot_error(mut error: ToolErrorData, thread_id: &str) -> ToolErrorData {
+    let rollout_is_empty = error.category == ToolErrorCategory::NativeError
+        && matches!(error.stage.as_str(), "thread/read" | "thread/turns/list")
+        && error.native.as_ref().is_some_and(|native| {
+            native.code == Some(-32603)
+                && native.message.contains(": rollout at ")
+                && native.message.ends_with(" is empty")
+        });
+    if rollout_is_empty {
+        error.message = THREAD_HISTORY_NOT_MATERIALIZED.to_owned();
+        error.thread_id = Some(thread_id.to_owned());
+    }
+    error
 }
 
 pub(super) async fn set_title(

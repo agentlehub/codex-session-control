@@ -175,6 +175,86 @@ async fn fork_defaults_and_explicit_values_map_without_extra_reads() {
 }
 
 #[tokio::test]
+async fn message_send_reports_empty_rollout_as_safe_to_retry_without_dispatching() {
+    let native_message = "failed to read thread: thread-store internal error: failed to read session metadata /home/operator/.codex/sessions/rollout.jsonl: rollout at /home/operator/.codex/sessions/rollout.jsonl is empty";
+
+    for _ in 0..2 {
+        let harness = FakeAppServer::start(vec![FakeStep::error(
+            "thread/read",
+            json!({"threadId": "target", "includeTurns": false}),
+            json!({"code": -32603, "message": native_message}),
+        )])
+        .await;
+        let client = AppServerClient::from_config(&harness.config);
+        let mut connection = client.connect_initialized().await.unwrap();
+
+        let error = send_message(
+            &client,
+            &mut connection,
+            ThreadMessageSendInput {
+                thread_id: "target".to_owned(),
+                prompt: "message".to_owned(),
+                model: None,
+                reasoning_effort: None,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.category, ToolErrorCategory::NativeError);
+        assert_eq!(error.stage, "thread/read");
+        assert_eq!(error.thread_id.as_deref(), Some("target"));
+        assert_eq!(
+            error.message,
+            "Codex has not materialized this thread's history yet. No message was sent. Wait a few seconds, then retry `thread_message_send`."
+        );
+        assert_eq!(error.native.as_ref().unwrap().code, Some(-32603));
+        assert_eq!(error.native.as_ref().unwrap().message, native_message);
+        assert_eq!(harness.connection_count(), 1);
+        assert_eq!(
+            harness.log(),
+            [json!({
+                "method": "thread/read",
+                "params": {"threadId": "target", "includeTurns": false},
+            })]
+        );
+    }
+}
+
+#[tokio::test]
+async fn message_send_preserves_other_pre_read_failures() {
+    let harness = FakeAppServer::start(vec![FakeStep::error(
+        "thread/read",
+        json!({"threadId": "target", "includeTurns": false}),
+        native_error(),
+    )])
+    .await;
+    let client = AppServerClient::from_config(&harness.config);
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let error = send_message(
+        &client,
+        &mut connection,
+        ThreadMessageSendInput {
+            thread_id: "target".to_owned(),
+            prompt: "message".to_owned(),
+            model: None,
+            reasoning_effort: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.category, ToolErrorCategory::NativeError);
+    assert_eq!(error.message, "native app-server request failed");
+    assert!(error.thread_id.is_none());
+    let native = error.native.unwrap();
+    assert_eq!(native.code, Some(-32090));
+    assert_eq!(native.message, "native mutation rejected");
+    assert_eq!(harness.log().len(), 1);
+}
+
+#[tokio::test]
 async fn idle_message_reads_once_then_starts_with_overrides() {
     let mut steps = snapshot_steps(
         "target",
@@ -834,6 +914,22 @@ async fn interrupt_targets_only_the_fresh_exact_active_turn() {
         ["thread/read", "thread/turns/list", "turn/interrupt"]
     );
     assert!(!methods.iter().any(|method| method.contains("goal")));
+}
+
+#[test]
+fn interrupt_result_serializes_with_the_public_camel_case_field_name() {
+    assert_eq!(
+        serde_json::to_value(ThreadInterruptResult::Interrupted {
+            interrupted: true,
+            turn_id: "active-turn".to_owned(),
+        })
+        .unwrap(),
+        json!({"interrupted": true, "turnId": "active-turn"})
+    );
+    assert_eq!(
+        serde_json::to_value(ThreadInterruptResult::NotInterrupted { interrupted: false }).unwrap(),
+        json!({"interrupted": false})
+    );
 }
 
 #[tokio::test]
