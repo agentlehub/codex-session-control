@@ -1,10 +1,15 @@
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsStr,
+    path::{Component, Path, PathBuf},
+};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::Error as _};
 use serde_json::Value;
 
 use crate::error::ControllerError;
+
+pub(crate) const DESKTOP_ATTACHMENT_DESCRIPTOR_FILE_NAME: &str = "app-server-attachment.json";
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(
@@ -239,7 +244,7 @@ impl<'de> Deserialize<'de> for InstalledReleaseWire {
             type Value = InstalledReleaseWire;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("an installed-release schema-2 object")
+                formatter.write_str("an installed-release schema 2 or 3 object")
             }
 
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -453,9 +458,19 @@ fn require_release_target(value: &str) -> Result<(), ControllerError> {
 }
 
 impl DesktopAttachmentIdentity {
-    fn validate(&self) -> Result<(), ControllerError> {
+    pub(crate) fn validate(&self) -> Result<(), ControllerError> {
         require_absolute("desktop_attachment.launcher_path", &self.launcher_path)?;
         require_absolute("desktop_attachment.descriptor_path", &self.descriptor_path)?;
+        if self
+            .descriptor_path
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+        {
+            return Err(ControllerError::InvalidData {
+                field: "desktop_attachment.descriptor_path",
+                reason: "path must be lexically normalized",
+            });
+        }
         if self.app_id.is_empty()
             || self.app_id == "."
             || self.app_id == ".."
@@ -465,6 +480,23 @@ impl DesktopAttachmentIdentity {
             return Err(ControllerError::InvalidData {
                 field: "desktop_attachment.app_id",
                 reason: "must be one safe path component",
+            });
+        }
+        let descriptor_parent =
+            self.descriptor_path
+                .parent()
+                .ok_or(ControllerError::InvalidData {
+                    field: "desktop_attachment.descriptor_path",
+                    reason: "must have an app-specific parent",
+                })?;
+        if descriptor_parent.file_name() != Some(OsStr::new(&self.app_id))
+            || descriptor_parent.parent().is_none()
+            || self.descriptor_path.file_name()
+                != Some(OsStr::new(DESKTOP_ATTACHMENT_DESCRIPTOR_FILE_NAME))
+        {
+            return Err(ControllerError::InvalidData {
+                field: "desktop_attachment.descriptor_path",
+                reason: "must match the app ID and descriptor filename",
             });
         }
         Ok(())
@@ -940,6 +972,18 @@ unknown = true
         }
 
         #[test]
+        fn installed_release_type_error_names_both_supported_wire_schemas() {
+            let error = serde_json::from_value::<InstalledRelease>(json!([])).unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("an installed-release schema 2 or 3 object"),
+                "{error}"
+            );
+        }
+
+        #[test]
         fn desktop_attachment_is_strict_and_path_safe() {
             let valid = json!({
                 "schemaVersion": 3,
@@ -963,10 +1007,44 @@ unknown = true
                 .validate(Path::new(SELECTED_HOME), Path::new(SOCKET_PATH))
                 .unwrap();
 
-            for (field, value) in [
-                ("launcherPath", json!("relative/launcher")),
-                ("appId", json!("../other-app")),
-                ("descriptorPath", json!("relative/descriptor.json")),
+            for (case, field, value) in [
+                (
+                    "relative launcher path",
+                    "launcherPath",
+                    json!("relative/launcher"),
+                ),
+                ("empty app ID", "appId", json!("")),
+                ("current-directory app ID", "appId", json!(".")),
+                ("parent-directory app ID", "appId", json!("..")),
+                ("slash in app ID", "appId", json!("codex/desktop")),
+                ("backslash in app ID", "appId", json!("codex\\desktop")),
+                (
+                    "control character in app ID",
+                    "appId",
+                    json!("codex\0desktop"),
+                ),
+                (
+                    "relative descriptor path",
+                    "descriptorPath",
+                    json!("relative/app-server-attachment.json"),
+                ),
+                (
+                    "non-normalized descriptor path",
+                    "descriptorPath",
+                    json!(
+                        "/home/test/.config/codex-desktop/../codex-desktop/app-server-attachment.json"
+                    ),
+                ),
+                (
+                    "descriptor parent that disagrees with the app ID",
+                    "descriptorPath",
+                    json!("/home/test/.config/other-app/app-server-attachment.json"),
+                ),
+                (
+                    "unexpected descriptor filename",
+                    "descriptorPath",
+                    json!("/home/test/.config/codex-desktop/other.json"),
+                ),
             ] {
                 let mut invalid = valid.clone();
                 invalid["desktopAttachment"][field] = value;
@@ -975,7 +1053,7 @@ unknown = true
                     parsed
                         .validate(Path::new(SELECTED_HOME), Path::new(SOCKET_PATH))
                         .is_err(),
-                    "{field} must be rejected"
+                    "{case} must be rejected"
                 );
             }
 

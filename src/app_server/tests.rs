@@ -461,6 +461,7 @@ fn classify_fixture_error(
     )
 }
 
+mod compact_snapshot;
 mod live_capture;
 mod native_error;
 mod transport;

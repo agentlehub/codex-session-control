@@ -220,6 +220,10 @@ if [ "$1" = "--user" ] && [ "$2" = "is-active" ]; then
     [ "$3" = "--quiet" ] || printf 'active\n'
     exit 0
   fi
+  if [ ! -f '{unit}' ]; then
+    [ "$3" = "--quiet" ] || printf 'inactive\n'
+    exit 4
+  fi
   [ "$3" = "--quiet" ] || printf 'inactive\n'
   exit 3
 fi

@@ -87,6 +87,22 @@ pub(super) struct DownloadedRelease {
     pub(super) sha256: String,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ReleaseDownloadError {
+    #[error(transparent)]
+    Download(ControllerError),
+    #[error(transparent)]
+    Integrity(ControllerError),
+}
+
+impl ReleaseDownloadError {
+    pub(super) fn into_controller_error(self) -> ControllerError {
+        match self {
+            Self::Download(error) | Self::Integrity(error) => error,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct GithubReleaseMetadata {
     tag_name: String,
@@ -221,7 +237,7 @@ pub(super) async fn download_verified_release(
     client: &reqwest::Client,
     release: &VerifiedRelease,
     directory: &Path,
-) -> Result<DownloadedRelease, ControllerError> {
+) -> Result<DownloadedRelease, ReleaseDownloadError> {
     let binary_path = directory.join(&release.binary.name);
     let checksums_path = directory.join(&release.checksums.name);
     let sha256 = stream_release_asset(
@@ -230,7 +246,8 @@ pub(super) async fn download_verified_release(
         &binary_path,
         ReleaseStage::Download,
     )
-    .await?;
+    .await
+    .map_err(ReleaseDownloadError::Download)?;
     if let Err(error) = stream_release_asset(
         client,
         &release.checksums,
@@ -240,14 +257,12 @@ pub(super) async fn download_verified_release(
     .await
     {
         let _ = fs::remove_file(&binary_path);
-        return Err(error);
+        return Err(ReleaseDownloadError::Download(error));
     }
-    let checksums = fs::read(&checksums_path)
-        .map_err(|_| ControllerError::Operational("checksum file cannot be read".to_owned()))?;
-    if let Err(error) = validate_checksum_entry(&checksums, &release.binary.name, &sha256) {
+    if let Err(error) = verify_release_integrity(&checksums_path, &release.binary.name, &sha256) {
         let _ = fs::remove_file(&binary_path);
         let _ = fs::remove_file(&checksums_path);
-        return Err(error);
+        return Err(ReleaseDownloadError::Integrity(error));
     }
     Ok(DownloadedRelease {
         binary_path,
@@ -256,6 +271,16 @@ pub(super) async fn download_verified_release(
         #[cfg(test)]
         sha256,
     })
+}
+
+pub(super) fn verify_release_integrity(
+    checksums_path: &Path,
+    binary_name: &str,
+    sha256: &str,
+) -> Result<(), ControllerError> {
+    fs::read(checksums_path)
+        .map_err(|_| ControllerError::Operational("checksum file cannot be read".to_owned()))
+        .and_then(|checksums| validate_checksum_entry(&checksums, binary_name, sha256))
 }
 
 pub(super) async fn stream_release_asset(
