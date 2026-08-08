@@ -4,7 +4,7 @@ mod entry;
 
 pub(crate) const DESKTOP_ENTRY_NAME: &str = "codex-desktop.desktop";
 pub(crate) const DESKTOP_CAPABILITY: &str = "external-app-server-attachment-descriptor-v1";
-pub(crate) const DESCRIPTOR_FILE_NAME: &str = "app-server-attachment.json";
+pub(crate) use crate::model::DESKTOP_ATTACHMENT_DESCRIPTOR_FILE_NAME as DESCRIPTOR_FILE_NAME;
 
 #[cfg(test)]
 pub(crate) use descriptor::prepare_descriptor_parent;

@@ -6,6 +6,23 @@ use super::support::{FakeAuthority, Fixture, assert_installed_modes};
 use super::*;
 use crate::model::InstalledRelease;
 
+type MutationFileSnapshot = (PathBuf, Option<(Vec<u8>, u32)>);
+
+fn snapshot_mutation_files(paths: impl IntoIterator<Item = PathBuf>) -> Vec<MutationFileSnapshot> {
+    paths
+        .into_iter()
+        .map(|path| {
+            let state = fs::symlink_metadata(&path).ok().map(|metadata| {
+                (
+                    fs::read(&path).unwrap(),
+                    metadata.permissions().mode() & 0o7777,
+                )
+            });
+            (path, state)
+        })
+        .collect()
+}
+
 #[tokio::test]
 async fn first_install_writes_manifest_last_and_exact_receipt() {
     let fixture = Fixture::new();
@@ -327,6 +344,76 @@ async fn different_manifest_and_ambiguous_partial_fail_before_mutation() {
             .contains(&fixture.paths.unit.display().to_string())
     );
     assert!(fixture.systemctl_log().is_empty());
+}
+
+#[tokio::test]
+async fn invalid_persisted_desktop_identity_rejects_setup_before_every_mutation() {
+    let fixture = Fixture::new();
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+    let launcher = fixture._root.path().join("desktop-launcher");
+    write_executable_fixture(
+        &launcher,
+        "#!/bin/sh\nif [ \"$1\" = \"--print-build-info\" ]; then printf '%s\\n' '{\"appIdentity\":{\"id\":\"codex-desktop\"},\"linuxCapabilities\":[\"external-app-server-attachment-descriptor-v1\"]}'; exit 0; fi\nexit 64\n",
+    );
+    let mut initial_setup = fixture.context(true);
+    initial_setup.desktop_launcher = Some(launcher);
+    setup_with_context(initial_setup).await.unwrap();
+    let valid_manifest_bytes = fs::read(&fixture.paths.manifest).unwrap();
+    let valid_manifest: Value = serde_json::from_slice(&valid_manifest_bytes).unwrap();
+    let valid_attachment = valid_manifest["desktopAttachment"].clone();
+    let valid_descriptor = PathBuf::from(valid_attachment["descriptorPath"].as_str().unwrap());
+
+    for (case, invalid_attachment) in invalid_desktop_attachment_shapes(&valid_attachment) {
+        let invalid_descriptor =
+            PathBuf::from(invalid_attachment["descriptorPath"].as_str().unwrap());
+        let mut invalid_manifest = valid_manifest.clone();
+        invalid_manifest["desktopAttachment"] = invalid_attachment;
+        let mut invalid_manifest_bytes = serde_json::to_vec_pretty(&invalid_manifest).unwrap();
+        invalid_manifest_bytes.push(b'\n');
+        fs::write(&fixture.paths.manifest, invalid_manifest_bytes).unwrap();
+        let mutation_paths = [
+            fixture.paths.binary.clone(),
+            fixture.paths.config.clone(),
+            fixture
+                .paths
+                .marketplace
+                .join("plugins/codex-session-control/.mcp.json"),
+            fixture
+                .paths
+                .marketplace
+                .join(".agents/plugins/marketplace.json"),
+            fixture
+                .paths
+                .marketplace
+                .join("plugins/codex-session-control/.codex-plugin/plugin.json"),
+            fixture.paths.unit.clone(),
+            fixture.paths.manifest.clone(),
+            valid_descriptor.clone(),
+            invalid_descriptor,
+            fixture.marketplace_state.clone(),
+            fixture.plugin_state.clone(),
+            fixture.plugin_version_state.clone(),
+            fixture.enabled.clone(),
+            fixture.active.clone(),
+            fixture.restart_requested.clone(),
+        ];
+        let before = snapshot_mutation_files(mutation_paths.clone());
+        fixture.clear_logs();
+
+        let error = setup_with_context(fixture.context(true)).await.unwrap_err();
+
+        assert!(
+            error.to_string().contains("failed at preflight:"),
+            "{case}: {error}"
+        );
+        assert_eq!(snapshot_mutation_files(mutation_paths), before, "{case}");
+        assert!(fixture.systemctl_log().is_empty(), "{case}");
+        assert!(fixture.codex_log().is_empty(), "{case}");
+        assert!(fixture.paths.socket.exists(), "{case}");
+    }
+
+    fs::write(&fixture.paths.manifest, valid_manifest_bytes).unwrap();
+    drop(authority);
 }
 
 #[tokio::test]

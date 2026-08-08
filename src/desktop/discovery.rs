@@ -15,7 +15,7 @@ use crate::{
 
 use super::{
     DESCRIPTOR_FILE_NAME, DESKTOP_CAPABILITY, DESKTOP_ENTRY_NAME, DiscoveryFailure,
-    descriptor::{prepare_descriptor_parent, validate_identity_shape},
+    descriptor::prepare_descriptor_parent,
     entry::{ParsedDesktopExec, parse_desktop_entry},
 };
 
@@ -112,7 +112,7 @@ async fn discover_and_verify_desktop_inner(
     if prepare_parent {
         prepare_descriptor_parent(&identity)?;
     } else {
-        validate_identity_shape(&identity)?;
+        identity.validate()?;
     }
     Ok(DesktopAvailability::Verified(DesktopTarget {
         identity,
@@ -129,7 +129,7 @@ pub(crate) async fn verify_persisted_desktop(
     identity: &DesktopAttachmentIdentity,
     environment: &BTreeMap<OsString, OsString>,
 ) -> Result<DesktopAvailability, ControllerError> {
-    if let Err(error) = validate_identity_shape(identity) {
+    if let Err(error) = identity.validate() {
         return Ok(unavailable(error.to_string()));
     }
     let launcher_path = match resolve_launcher(&identity.launcher_path, environment) {
