@@ -201,15 +201,21 @@ fi
 
 sudo -u "$user" test ! -e "$codex_home"
 sudo -u "$user" test ! -L "$codex_home"
+contract_unit="codex-session-control-contract-$uid"
 sudo -u "$user" env \
   HOME="$home" \
   XDG_RUNTIME_DIR="$runtime" \
   DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus" \
-  CI=1 \
-  CODEX_SESSION_CONTROL_DISPOSABLE_SYSTEMD_USER=1 \
-  "$test_harness" \
-    --exact install::tests::disposable_systemd_user \
-    --ignored --nocapture
+  systemd-run --user --wait --pipe --collect \
+    --unit="$contract_unit" \
+    --setenv="HOME=$home" \
+    --setenv="XDG_RUNTIME_DIR=$runtime" \
+    --setenv="DBUS_SESSION_BUS_ADDRESS=unix:path=$runtime/bus" \
+    --setenv=CI=1 \
+    --setenv=CODEX_SESSION_CONTROL_DISPOSABLE_SYSTEMD_USER=1 \
+    "$test_harness" \
+      --exact install::tests::disposable_systemd_user \
+      --ignored --nocapture
 
 runtime_dir="$runtime/codex-session-control"
 for path in "$runtime_dir" "$data_root" "$config_dir"; do
@@ -233,6 +239,7 @@ live_count="$(
     grep -Ec '^live_normal_home_.*: test$'
 )"
 test "$live_count" -eq 4
+normal_home_unit="codex-session-control-normal-home-$uid-$$"
 sudo -u "$user" env \
   HOME="$home" \
   XDG_RUNTIME_DIR="$runtime" \
@@ -242,9 +249,20 @@ sudo -u "$user" env \
   CODEX_SESSION_CONTROL_DISPOSABLE_CLI_CANARY=1 \
   CODEX_SESSION_CONTROL_CODEX_BIN="$native_codex_binary" \
   CODEX_SESSION_CONTROL_CONTROLLER_BIN="$controller_binary" \
-  "$app_server_harness" live_normal_home_ \
+  systemd-run --user --wait --pipe --collect \
+    --unit="$normal_home_unit" \
+    --setenv="HOME=$home" \
+    --setenv="XDG_RUNTIME_DIR=$runtime" \
+    --setenv="DBUS_SESSION_BUS_ADDRESS=unix:path=$runtime/bus" \
+    --setenv=CI=1 \
+    --setenv=CODEX_SESSION_CONTROL_DISPOSABLE_SYSTEMD_USER=1 \
+    --setenv=CODEX_SESSION_CONTROL_DISPOSABLE_CLI_CANARY=1 \
+    --setenv="CODEX_SESSION_CONTROL_CODEX_BIN=$native_codex_binary" \
+    --setenv="CODEX_SESSION_CONTROL_CONTROLLER_BIN=$controller_binary" \
+    "$app_server_harness" live_normal_home_ \
     --ignored --nocapture --test-threads=1
 sudo -u "$user" test ! -e "$codex_home"
+regression_unit="codex-session-control-regression-$uid-$$"
 sudo -u "$user" env \
   HOME="$home" \
   XDG_RUNTIME_DIR="$runtime" \
@@ -254,7 +272,17 @@ sudo -u "$user" env \
   CODEX_SESSION_CONTROL_DISPOSABLE_CLI_CANARY=1 \
   CODEX_SESSION_CONTROL_CODEX_BIN="$native_codex_binary" \
   CODEX_SESSION_CONTROL_CONTROLLER_BIN="$controller_binary" \
-  "$app_server_harness" --ignored \
+  systemd-run --user --wait --pipe --collect \
+    --unit="$regression_unit" \
+    --setenv="HOME=$home" \
+    --setenv="XDG_RUNTIME_DIR=$runtime" \
+    --setenv="DBUS_SESSION_BUS_ADDRESS=unix:path=$runtime/bus" \
+    --setenv=CI=1 \
+    --setenv=CODEX_SESSION_CONTROL_DISPOSABLE_SYSTEMD_USER=1 \
+    --setenv=CODEX_SESSION_CONTROL_DISPOSABLE_CLI_CANARY=1 \
+    --setenv="CODEX_SESSION_CONTROL_CODEX_BIN=$native_codex_binary" \
+    --setenv="CODEX_SESSION_CONTROL_CONTROLLER_BIN=$controller_binary" \
+    "$app_server_harness" --ignored \
     --nocapture --test-threads=1 --skip live_normal_home_
 sudo -u "$user" test ! -e "$codex_home"
 sudo -u "$user" test ! -e "$home/.local/bin/codex-session-control"
