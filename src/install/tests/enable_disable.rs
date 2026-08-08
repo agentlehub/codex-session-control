@@ -104,6 +104,47 @@ Run codex-session-control setup to attach Desktop.\n",
 }
 
 #[tokio::test]
+async fn enable_verification_reports_untrustworthy_systemctl_state_as_operational_failure() {
+    for operation in ["is-enabled", "is-active"] {
+        let fixture = Fixture::new();
+        let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+        setup_with_context(fixture.context(true)).await.unwrap();
+        fs::write(
+            &fixture.systemctl_fail,
+            format!("--user {operation} codex-session-control-test-Setup1.service"),
+        )
+        .unwrap();
+        fixture.clear_logs();
+
+        let error = enable_with_context(context(&fixture)).await.unwrap_err();
+
+        assert_eq!(error.exit_code(), 1, "{operation}");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "completed: service-enable\n\
+failed at service-verify: systemctl {operation} could not provide trustworthy service state\n\
+retry: codex-session-control enable\n"
+            ),
+            "{operation}"
+        );
+        let active_query = if operation == "is-active" {
+            "--user is-active codex-session-control-test-Setup1.service\n"
+        } else {
+            ""
+        };
+        assert_eq!(
+            fixture.systemctl_log(),
+            format!(
+                "--user enable --now codex-session-control-test-Setup1.service\n\
+--user is-enabled codex-session-control-test-Setup1.service\n{active_query}"
+            ),
+            "{operation}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn enable_with_null_attachment_does_not_auto_select_desktop() {
     let fixture = Fixture::new();
     let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;

@@ -35,6 +35,7 @@ fn enablement_and_activity_accept_only_exact_systemctl_evidence() {
     for (code, stdout, expected) in [
         (Some(0), b"active\n".as_slice(), ServiceActivity::Active),
         (Some(3), b"inactive\n".as_slice(), ServiceActivity::Inactive),
+        (Some(4), b"inactive\n".as_slice(), ServiceActivity::Inactive),
         (
             Some(3),
             b"activating\n".as_slice(),
@@ -46,6 +47,13 @@ fn enablement_and_activity_accept_only_exact_systemctl_evidence() {
             ServiceActivity::Unproven,
         ),
         (Some(0), b"active".as_slice(), ServiceActivity::Unproven),
+        (Some(4), b"unknown\n".as_slice(), ServiceActivity::Unproven),
+        (
+            Some(4),
+            b"inactive\nextra\n".as_slice(),
+            ServiceActivity::Unproven,
+        ),
+        (Some(4), b"".as_slice(), ServiceActivity::Unproven),
         (None, b"inactive\n".as_slice(), ServiceActivity::Unproven),
     ] {
         assert_eq!(classify_service_activity(code, stdout), expected);
