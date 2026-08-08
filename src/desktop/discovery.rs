@@ -15,7 +15,6 @@ use crate::{
 
 use super::{
     DESCRIPTOR_FILE_NAME, DESKTOP_CAPABILITY, DESKTOP_ENTRY_NAME, DiscoveryFailure,
-    descriptor::{prepare_descriptor_parent, validate_identity_shape},
     entry::{ParsedDesktopExec, parse_desktop_entry},
 };
 
@@ -39,29 +38,69 @@ pub(crate) struct DesktopLaunchCommand {
     pub effective_config_root: PathBuf,
 }
 
-pub(crate) async fn discover_and_verify_desktop(
-    override_path: Option<&Path>,
-    environment: &BTreeMap<OsString, OsString>,
-) -> Result<DesktopAvailability, ControllerError> {
-    discover_and_verify_desktop_inner(override_path, environment, true).await
+struct DiscoveredDesktop {
+    command: DesktopLaunchCommand,
+    probe_environment: BTreeMap<OsString, OsString>,
 }
 
-pub(crate) async fn inspect_desktop_availability(
-    override_path: Option<&Path>,
-    environment: &BTreeMap<OsString, OsString>,
-) -> Result<DesktopAvailability, ControllerError> {
-    discover_and_verify_desktop_inner(override_path, environment, false).await
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum DesktopStructure {
+    Detected,
+    Unavailable,
 }
 
-async fn discover_and_verify_desktop_inner(
+pub(crate) fn inspect_desktop_structure(
     override_path: Option<&Path>,
     environment: &BTreeMap<OsString, OsString>,
-    prepare_parent: bool,
+) -> DesktopStructure {
+    match discover_desktop_command(override_path, environment) {
+        Ok(_) => DesktopStructure::Detected,
+        Err(_) => DesktopStructure::Unavailable,
+    }
+}
+
+pub(crate) async fn probe_desktop_capability(
+    override_path: Option<&Path>,
+    environment: &BTreeMap<OsString, OsString>,
 ) -> Result<DesktopAvailability, ControllerError> {
+    let discovered = match discover_desktop_command(override_path, environment) {
+        Ok(discovered) => discovered,
+        Err(error) => return Ok(unavailable_failure(error)),
+    };
+    let app_id = match inspect_build_info(
+        &discovered.command.launcher_path,
+        &discovered.command.fixed_args,
+        &discovered.probe_environment,
+    )
+    .await
+    {
+        Ok(app_id) => app_id,
+        Err(error) => return Ok(unavailable_failure(error)),
+    };
+    let identity = DesktopAttachmentIdentity {
+        launcher_path: discovered.command.launcher_path.clone(),
+        app_id: app_id.clone(),
+        descriptor_path: discovered
+            .command
+            .effective_config_root
+            .join(&app_id)
+            .join(DESCRIPTOR_FILE_NAME),
+    };
+    identity.validate()?;
+    Ok(DesktopAvailability::Verified(DesktopTarget {
+        identity,
+        command: discovered.command,
+    }))
+}
+
+fn discover_desktop_command(
+    override_path: Option<&Path>,
+    environment: &BTreeMap<OsString, OsString>,
+) -> Result<DiscoveredDesktop, DiscoveryFailure> {
     let parsed = match override_path {
         Some(path) => {
             if !path.is_absolute() || is_desktop_entry_path(path) {
-                return Ok(unavailable(
+                return Err(DiscoveryFailure::unavailable(
                     "the Desktop launcher override is not one absolute executable path",
                 ));
             }
@@ -73,63 +112,42 @@ async fn discover_and_verify_desktop_inner(
         }
         None => match desktop_entry_path(environment) {
             Ok(Some(path)) => match fs::read(&path) {
-                Ok(bytes) => match parse_desktop_entry(&bytes) {
-                    Ok(parsed) => parsed,
-                    Err(error) => return Ok(unavailable_failure(error)),
-                },
-                Err(_) => return Ok(unavailable("the selected Desktop entry cannot be read")),
+                Ok(bytes) => parse_desktop_entry(&bytes)?,
+                Err(_) => {
+                    return Err(DiscoveryFailure::unavailable(
+                        "the selected Desktop entry cannot be read",
+                    ));
+                }
             },
-            Ok(None) => return Ok(unavailable("codex-desktop.desktop was not found")),
-            Err(error) => return Ok(unavailable_failure(error)),
+            Ok(None) => {
+                return Err(DiscoveryFailure::unavailable(
+                    "codex-desktop.desktop was not found",
+                ));
+            }
+            Err(error) => return Err(error),
         },
     };
 
     let mut child_environment = environment.clone();
     child_environment.extend(parsed.environment.clone());
-    let launcher_path = match resolve_launcher(&parsed.executable, &child_environment) {
-        Ok(path) => path,
-        Err(error) => return Ok(unavailable_failure(error)),
-    };
-    let app_id =
-        match inspect_build_info(&launcher_path, &parsed.fixed_args, &child_environment).await {
-            Ok(app_id) => app_id,
-            Err(error) => return Ok(unavailable_failure(error)),
-        };
-    let effective_config_root = match effective_config_root(&child_environment) {
-        Ok(root) => root,
-        Err(error) => return Ok(unavailable_failure(error)),
-    };
-    if let Err(error) = validate_app_id(&app_id) {
-        return Ok(unavailable_failure(error));
-    }
-    let identity = DesktopAttachmentIdentity {
-        launcher_path: launcher_path.clone(),
-        app_id: app_id.clone(),
-        descriptor_path: effective_config_root
-            .join(&app_id)
-            .join(DESCRIPTOR_FILE_NAME),
-    };
-    if prepare_parent {
-        prepare_descriptor_parent(&identity)?;
-    } else {
-        validate_identity_shape(&identity)?;
-    }
-    Ok(DesktopAvailability::Verified(DesktopTarget {
-        identity,
+    let launcher_path = resolve_launcher(&parsed.executable, &child_environment)?;
+    let effective_config_root = effective_config_root(&child_environment)?;
+    Ok(DiscoveredDesktop {
         command: DesktopLaunchCommand {
             launcher_path,
             fixed_args: parsed.fixed_args,
             environment: parsed.environment,
             effective_config_root,
         },
-    }))
+        probe_environment: child_environment,
+    })
 }
 
-pub(crate) async fn verify_persisted_desktop(
+pub(crate) async fn probe_persisted_desktop_capability(
     identity: &DesktopAttachmentIdentity,
     environment: &BTreeMap<OsString, OsString>,
 ) -> Result<DesktopAvailability, ControllerError> {
-    if let Err(error) = validate_identity_shape(identity) {
+    if let Err(error) = identity.validate() {
         return Ok(unavailable(error.to_string()));
     }
     let launcher_path = match resolve_launcher(&identity.launcher_path, environment) {
@@ -166,8 +184,12 @@ pub(crate) async fn verify_persisted_desktop(
 
 fn unavailable(reason: impl Into<String>) -> DesktopAvailability {
     DesktopAvailability::Unavailable {
-        warning: format!("Desktop attachment unavailable: {}", reason.into()),
+        warning: unavailable_warning(reason),
     }
+}
+
+fn unavailable_warning(reason: impl Into<String>) -> String {
+    format!("Desktop attachment unavailable: {}", reason.into())
 }
 
 fn unavailable_failure(error: DiscoveryFailure) -> DesktopAvailability {
