@@ -30,8 +30,8 @@ use super::{
     },
     product_target,
     release::{
-        ReleaseEndpoints, build_release_client, discover_latest_release, download_verified_release,
-        production_release_endpoints, release_target_for_arch,
+        ReleaseDownloadError, ReleaseEndpoints, build_release_client, discover_latest_release,
+        download_verified_release, production_release_endpoints, release_target_for_arch,
     },
     render::{reconcile_projection, render_projection, render_unit},
     service::{
@@ -98,6 +98,13 @@ pub(super) enum UpdateStage {
     ServiceApply,
     ServiceVerify,
     Manifest,
+}
+
+pub(super) fn release_failure_stage(error: &ReleaseDownloadError) -> UpdateStage {
+    match error {
+        ReleaseDownloadError::Download(_) => UpdateStage::ReleaseDownload,
+        ReleaseDownloadError::Integrity(_) => UpdateStage::Checksum,
+    }
 }
 
 impl UpdateStage {
@@ -356,12 +363,8 @@ pub(super) async fn outer_update_with_endpoints(
     let downloaded = download_verified_release(&client, &release, directory.path())
         .await
         .map_err(|error| {
-            let stage = if error.to_string().contains("checksum") {
-                UpdateStage::Checksum
-            } else {
-                UpdateStage::ReleaseDownload
-            };
-            progress.fail(stage, error, &retry)
+            let stage = release_failure_stage(&error);
+            progress.fail(stage, error.into_controller_error(), &retry)
         })?;
     complete_lifecycle_stage!(
         progress,
