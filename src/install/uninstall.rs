@@ -18,7 +18,11 @@ use super::{
     },
     paths::{remove_owned_empty_dir, remove_owned_file, remove_owned_tree},
     remove_persisted_desktop_descriptor,
-    service::{run_systemctl, verify_absent_managed_unit_stop, verify_disabled_service},
+    service::{
+        CallerUnitEvidence, CallerUnitInspection, ServiceActivity, inspect_caller_unit,
+        query_service_activity, run_systemctl, verify_absent_managed_unit_stop,
+        verify_disabled_service,
+    },
 };
 
 #[derive(Debug)]
@@ -104,6 +108,49 @@ pub(super) async fn uninstall_with_context(
     let retry = format!("retry: {display_command} uninstall\n");
     let systemctl = resolve_named_executable(&context.path_environment, &context.cwd, "systemctl")
         .map_err(|error| progress.fail(UninstallStage::ServiceStop, error, &retry))?;
+
+    match query_service_activity(&systemctl, &context.target.unit_name) {
+        ServiceActivity::Inactive => {}
+        ServiceActivity::Active => match inspect_caller_unit(&systemctl, &context.target) {
+            CallerUnitInspection::Independent => {}
+            CallerUnitInspection::SelfHosted(CallerUnitEvidence::WhoAmI) => {
+                let recovery =
+                    format!("run from an independent terminal:\n{display_command} uninstall\n");
+                return Err(progress.fail(
+                    UninstallStage::ServiceStop,
+                    "refusing uninstall: this command is running inside the managed app-server",
+                    &recovery,
+                ));
+            }
+            CallerUnitInspection::SelfHosted(CallerUnitEvidence::ControlGroup)
+            | CallerUnitInspection::Unknown { .. } => {
+                let recovery = format!(
+                    "caller independence could not be proven; from an independent terminal:\n\
+                     systemctl --user stop {}\n\
+                     {display_command} uninstall\n",
+                    context.target.unit_name,
+                );
+                return Err(progress.fail(
+                    UninstallStage::ServiceStop,
+                    "refusing uninstall: caller independence cannot be proven",
+                    &recovery,
+                ));
+            }
+        },
+        ServiceActivity::Unproven => {
+            let recovery = format!(
+                "service activity could not be proven; from an independent terminal:\n\
+                 systemctl --user stop {}\n\
+                 {display_command} uninstall\n",
+                context.target.unit_name,
+            );
+            return Err(progress.fail(
+                UninstallStage::ServiceStop,
+                "refusing uninstall: service activity cannot be proven",
+                &recovery,
+            ));
+        }
+    }
 
     let stopped_as_absent_unit = match run_systemctl(
         &systemctl,

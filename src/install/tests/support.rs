@@ -20,6 +20,7 @@ pub(super) struct Fixture {
     pub(super) plugin_version_state: PathBuf,
     pub(super) codex_fail: PathBuf,
     pub(super) systemctl_fail: PathBuf,
+    pub(super) fail_service_verify_after_stop: PathBuf,
     pub(super) whoami_unit: PathBuf,
     pub(super) control_group: PathBuf,
     pub(super) preserve_service_state: PathBuf,
@@ -63,6 +64,7 @@ impl Fixture {
         let plugin_version_state = root.path().join("plugin-version-state");
         let codex_fail = root.path().join("codex-fail");
         let systemctl_fail = root.path().join("systemctl-fail");
+        let fail_service_verify_after_stop = root.path().join("fail-service-verify-after-stop");
         let whoami_unit = root.path().join("whoami-unit");
         let control_group = root.path().join("control-group");
         let preserve_service_state = root.path().join("preserve-service-state");
@@ -184,6 +186,9 @@ if [ "$1" = "--user" ] && [ "$2" = "disable" ] && [ "$3" = "--now" ]; then
   if [ ! -f '{preserve_service_state}' ]; then
     rm -f '{enabled}' '{active}' '{socket}'
   fi
+  if [ -f '{fail_service_verify_after_stop}' ]; then
+    printf '%s' "--user is-active $4" > '{systemctl_fail}'
+  fi
   exit 0
 fi
 if [ "$1" = "--user" ] && [ "$2" = "restart" ]; then
@@ -231,6 +236,7 @@ exit 64
 "#,
             systemctl_log = systemctl_log.display(),
             systemctl_fail = systemctl_fail.display(),
+            fail_service_verify_after_stop = fail_service_verify_after_stop.display(),
             whoami_unit = whoami_unit.display(),
             control_group = control_group.display(),
             preserve_service_state = preserve_service_state.display(),
@@ -261,6 +267,7 @@ exit 64
             plugin_version_state,
             codex_fail,
             systemctl_fail,
+            fail_service_verify_after_stop,
             whoami_unit,
             control_group,
             preserve_service_state,

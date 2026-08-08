@@ -613,6 +613,43 @@ async fn enable_and_disable_retry_after_each_completed_service_stage() {
 }
 
 #[tokio::test]
+async fn self_hosted_stop_refusal_has_no_completed_stage_and_preserves_retry_state() {
+    for operation in ["disable", "uninstall"] {
+        let fixture = Fixture::new();
+        let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+        setup_with_context(fixture.context(true)).await.unwrap();
+        fs::write(
+            &fixture.whoami_unit,
+            b"codex-session-control-test-Setup1.service\n",
+        )
+        .unwrap();
+        fixture.clear_logs();
+
+        let error = match operation {
+            "disable" => disable_with_context(lifecycle_context_with_stage(&fixture, None))
+                .await
+                .unwrap_err(),
+            "uninstall" => uninstall_with_context(lifecycle_context_with_stage(&fixture, None))
+                .await
+                .unwrap_err(),
+            _ => unreachable!(),
+        };
+
+        let error = error.to_string();
+        assert!(
+            error.contains("running inside the managed app-server"),
+            "{operation}: {error}"
+        );
+        assert!(!error.contains("completed:"), "{operation}: {error}");
+        assert!(fixture.enabled.exists(), "{operation}");
+        assert!(fixture.active.exists(), "{operation}");
+        assert!(fixture.paths.socket.exists(), "{operation}");
+        assert!(!fixture.systemctl_log().contains("disable --now"));
+        assert_no_backups(&fixture.paths.home);
+    }
+}
+
+#[tokio::test]
 async fn uninstall_retries_while_a_valid_identity_survives() {
     for stage in UNINSTALL_STAGES {
         let fixture = Fixture::new();
