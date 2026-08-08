@@ -358,11 +358,15 @@ failed at descriptor-remove: Desktop descriptor cleanup is incomplete:"
         assert!(!fixture.enabled.exists(), "{name}");
         assert!(!fixture.active.exists(), "{name}");
         assert!(!fixture.paths.socket.exists(), "{name}");
+        let preflight = if active {
+            "--user is-active codex-session-control-test-Setup1.service\n--user whoami\n"
+        } else {
+            "--user is-active codex-session-control-test-Setup1.service\n"
+        };
         assert_eq!(
             fixture.systemctl_log(),
-            " --user disable --now codex-session-control-test-Setup1.service\n"
-                .trim_start()
-                .to_owned()
+            preflight.to_owned()
+                + "--user disable --now codex-session-control-test-Setup1.service\n"
                 + "--user is-enabled codex-session-control-test-Setup1.service\n"
                 + "--user is-active codex-session-control-test-Setup1.service\n",
             "{name}"

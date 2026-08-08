@@ -1,5 +1,10 @@
-use std::{ffi::OsString, fs, os::unix::fs::MetadataExt};
+use std::{
+    ffi::OsString,
+    fs,
+    os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
+};
 
+use crate::install::sha256_bytes;
 use serde_json::Value;
 
 use super::support::{FakeAuthority, Fixture};
@@ -54,8 +59,190 @@ fn context(
     }
 }
 
+fn context_with_snapshot_systemctl(
+    fixture: &Fixture,
+    candidate: PathBuf,
+    name: &str,
+    enablement: &str,
+    activity: &str,
+) -> (UpdateContext, PathBuf) {
+    let systemctl_bin = fixture._root.path().join(name);
+    let systemctl_log = fixture._root.path().join(format!("{name}.log"));
+    fs::create_dir(&systemctl_bin).unwrap();
+    super::write_executable_fixture(
+        &systemctl_bin.join("systemctl"),
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{systemctl_log}'\nif [ \"$1\" = \"--user\" ] && [ \"$2\" = \"is-enabled\" ]; then\n{enablement}\nfi\nif [ \"$1\" = \"--user\" ] && [ \"$2\" = \"is-active\" ]; then\n{activity}\nfi\nexit 64\n",
+            systemctl_log = systemctl_log.display(),
+        ),
+    );
+    let setup = fixture.context(true);
+    let path = std::env::join_paths(
+        std::iter::once(systemctl_bin).chain(std::env::split_paths(&setup.path_environment)),
+    )
+    .unwrap();
+    (context(fixture, candidate, Some(path)), systemctl_log)
+}
+
 fn manifest(paths: &ResolvedUserPaths) -> InstalledRelease {
     serde_json::from_slice(&fs::read(&paths.manifest).unwrap()).unwrap()
+}
+
+type FileSnapshot = (PathBuf, Option<(Vec<u8>, u32)>);
+
+#[derive(Debug, Eq, PartialEq)]
+enum SocketFileType {
+    Socket,
+    Directory,
+    RegularFile,
+    Symlink,
+    Other,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct SocketIdentity {
+    file_type: SocketFileType,
+    mode: u32,
+    inode: u64,
+    uid: u32,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ProtectedStateSnapshot {
+    codex_home_sentinels: Vec<FileSnapshot>,
+    enabled: FileSnapshot,
+    active: FileSnapshot,
+    socket: Option<SocketIdentity>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct GuardedStateSnapshot {
+    product_files: Vec<FileSnapshot>,
+    restart_requested: FileSnapshot,
+    protected: ProtectedStateSnapshot,
+}
+
+fn snapshot_file(path: PathBuf) -> FileSnapshot {
+    let state = fs::symlink_metadata(&path)
+        .ok()
+        .map(|metadata| (fs::read(&path).unwrap(), metadata.mode() & 0o7777));
+    (path, state)
+}
+
+fn snapshot_socket(path: &Path) -> Option<SocketIdentity> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => panic!("cannot snapshot control socket {}: {error}", path.display()),
+    };
+    let file_type = metadata.file_type();
+    let file_type = if file_type.is_socket() {
+        SocketFileType::Socket
+    } else if file_type.is_dir() {
+        SocketFileType::Directory
+    } else if file_type.is_file() {
+        SocketFileType::RegularFile
+    } else if file_type.is_symlink() {
+        SocketFileType::Symlink
+    } else {
+        SocketFileType::Other
+    };
+    Some(SocketIdentity {
+        file_type,
+        mode: metadata.mode() & 0o7777,
+        inode: metadata.ino(),
+        uid: metadata.uid(),
+    })
+}
+
+fn protected_codex_home_sentinel_paths(fixture: &Fixture) -> [PathBuf; 5] {
+    [
+        fixture.paths.codex_home.join("auth.json"),
+        fixture.paths.codex_home.join("tasks/tasks.db"),
+        fixture.paths.codex_home.join("rollouts/rollout.jsonl"),
+        fixture.paths.codex_home.join("config.toml"),
+        fixture
+            .paths
+            .codex_home
+            .join("plugins/unrelated/plugin.json"),
+    ]
+}
+
+fn seed_protected_codex_home_state(fixture: &Fixture) {
+    for (path, bytes, mode) in [
+        (
+            fixture.paths.codex_home.join("auth.json"),
+            b"{\"access_token\":\"protected\"}\n".as_slice(),
+            0o600,
+        ),
+        (
+            fixture.paths.codex_home.join("tasks/tasks.db"),
+            b"protected-task-state\n".as_slice(),
+            0o640,
+        ),
+        (
+            fixture.paths.codex_home.join("rollouts/rollout.jsonl"),
+            b"{\"rollout\":\"protected\"}\n".as_slice(),
+            0o600,
+        ),
+        (
+            fixture.paths.codex_home.join("config.toml"),
+            b"model = \"protected\"\n".as_slice(),
+            0o600,
+        ),
+        (
+            fixture
+                .paths
+                .codex_home
+                .join("plugins/unrelated/plugin.json"),
+            b"{\"plugin\":\"protected\"}\n".as_slice(),
+            0o644,
+        ),
+    ] {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+}
+
+fn snapshot_protected_state(fixture: &Fixture) -> ProtectedStateSnapshot {
+    ProtectedStateSnapshot {
+        codex_home_sentinels: protected_codex_home_sentinel_paths(fixture)
+            .into_iter()
+            .map(snapshot_file)
+            .collect(),
+        enabled: snapshot_file(fixture.enabled.clone()),
+        active: snapshot_file(fixture.active.clone()),
+        socket: snapshot_socket(&fixture.paths.socket),
+    }
+}
+
+fn snapshot_guarded_state(fixture: &Fixture) -> GuardedStateSnapshot {
+    GuardedStateSnapshot {
+        product_files: [
+            fixture.paths.binary.clone(),
+            fixture.paths.config.clone(),
+            fixture
+                .paths
+                .marketplace
+                .join("plugins/codex-session-control/.mcp.json"),
+            fixture
+                .paths
+                .marketplace
+                .join("plugins/codex-session-control/.codex-plugin/plugin.json"),
+            fixture
+                .paths
+                .home
+                .join(".config/codex-desktop/app-server-attachment.json"),
+            fixture.paths.unit.clone(),
+            fixture.paths.manifest.clone(),
+        ]
+        .into_iter()
+        .map(snapshot_file)
+        .collect(),
+        restart_requested: snapshot_file(fixture.restart_requested.clone()),
+        protected: snapshot_protected_state(fixture),
+    }
 }
 
 fn write_compatible_launcher(path: &Path) {
@@ -174,6 +361,183 @@ async fn coherent_equal_candidate_reports_current_only_after_state_proof() {
     assert!(!fixture.systemctl_log().contains("daemon-reload"));
 }
 
+#[tokio::test]
+async fn self_hosted_restart_required_update_refuses_with_every_reason_before_mutation() {
+    let fixture = Fixture::new();
+    let running = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(fixture.context(true)).await.unwrap();
+    seed_protected_codex_home_state(&fixture);
+    fs::write(
+        &fixture.whoami_unit,
+        b"codex-session-control-test-Setup1.service\n",
+    )
+    .unwrap();
+    let old_unit = b"coherent old unit\n";
+    fs::write(&fixture.paths.unit, old_unit).unwrap();
+    let mut receipt = manifest(&fixture.paths);
+    receipt.service_unit_sha256 = sha256_bytes(old_unit);
+    let mut receipt_bytes = serde_json::to_vec_pretty(&receipt).unwrap();
+    receipt_bytes.push(b'\n');
+    fs::write(&fixture.paths.manifest, receipt_bytes).unwrap();
+    let changed_version = crate::test_support::different_stable_version(TESTED_CODEX_VERSION);
+    fs::write(
+        &fixture.codex_version,
+        format!("codex-cli {changed_version}\n"),
+    )
+    .unwrap();
+    let new_bin = fixture.paths.home.join("new-codex-bin");
+    fs::create_dir(&new_bin).unwrap();
+    fs::copy(fixture.fake_bin.join("codex"), new_bin.join("codex")).unwrap();
+    let setup = fixture.context(true);
+    let path = std::env::join_paths(
+        std::iter::once(new_bin).chain(std::env::split_paths(&setup.path_environment)),
+    )
+    .unwrap();
+    let before = snapshot_guarded_state(&fixture);
+    fixture.clear_logs();
+
+    let error = staged_update_with_context(context(
+        &fixture,
+        higher_candidate(&fixture, "candidate-all-reasons"),
+        Some(path),
+    ))
+    .await
+    .unwrap_err();
+
+    let message = error.to_string();
+    assert!(message.contains("running Codex version differs"));
+    assert!(message.contains("resolved Codex executable path differs"));
+    assert!(message.contains("rendered systemd unit differs"));
+    assert!(
+        message.find("running Codex version").unwrap()
+            < message.find("resolved Codex executable path").unwrap()
+    );
+    assert!(
+        message.find("resolved Codex executable path").unwrap()
+            < message.find("rendered systemd unit").unwrap()
+    );
+    assert!(message.contains("run from an independent terminal"));
+    assert!(message.contains("running inside the managed app-server"));
+    assert_eq!(snapshot_guarded_state(&fixture), before);
+    assert!(!fixture.systemctl_log().contains("daemon-reload"));
+    assert!(!fixture.systemctl_log().contains(" restart "));
+    drop(running);
+}
+
+#[tokio::test]
+async fn unproven_self_hosted_restart_refuses_without_stop_recovery() {
+    let fixture = Fixture::new();
+    let running = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(fixture.context(true)).await.unwrap();
+    seed_protected_codex_home_state(&fixture);
+    let new_bin = fixture.paths.home.join("new-codex-bin");
+    fs::create_dir(&new_bin).unwrap();
+    fs::copy(fixture.fake_bin.join("codex"), new_bin.join("codex")).unwrap();
+    let setup = fixture.context(true);
+    let path = std::env::join_paths(
+        std::iter::once(new_bin).chain(std::env::split_paths(&setup.path_environment)),
+    )
+    .unwrap();
+    fs::write(&fixture.systemctl_fail, "--user whoami").unwrap();
+    let before = snapshot_guarded_state(&fixture);
+    fixture.clear_logs();
+
+    let error = staged_update_with_context(context(
+        &fixture,
+        higher_candidate(&fixture, "candidate-unproven-caller"),
+        Some(path),
+    ))
+    .await
+    .unwrap_err();
+
+    let message = error.to_string();
+    assert!(message.contains("failed at restart-inspection:"));
+    assert!(message.contains("repair or upgrade the systemd user environment"));
+    assert!(!message.contains("systemctl --user stop"));
+    assert!(!message.contains("codex-session-control disable\ncodex-session-control update"));
+    assert_eq!(snapshot_guarded_state(&fixture), before);
+    assert!(!fixture.systemctl_log().contains("daemon-reload"));
+    assert!(!fixture.systemctl_log().contains(" restart "));
+    drop(running);
+}
+
+#[tokio::test]
+async fn service_snapshot_rejects_unproven_and_contradictory_state_before_caller_inspection() {
+    for (name, enablement, activity, expected) in [
+        (
+            "snapshot-command-failure",
+            "exit 1",
+            "printf 'inactive\\n'; exit 3",
+            "service enablement cannot be proven",
+        ),
+        (
+            "snapshot-activating",
+            "printf 'enabled\\n'; exit 0",
+            "printf 'activating\\n'; exit 0",
+            "service activity cannot be proven",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+        setup_with_context(fixture.context(true)).await.unwrap();
+        seed_protected_codex_home_state(&fixture);
+        let before = snapshot_guarded_state(&fixture);
+        fixture.clear_logs();
+
+        let (context, systemctl_log) = context_with_snapshot_systemctl(
+            &fixture,
+            higher_candidate(&fixture, &format!("candidate-{name}")),
+            name,
+            enablement,
+            activity,
+        );
+        let error = staged_update_with_context(context).await.unwrap_err();
+
+        assert!(
+            error.to_string().contains("failed at service-snapshot:"),
+            "{name}"
+        );
+        assert!(error.to_string().contains(expected), "{name}: {error}");
+        assert_eq!(snapshot_guarded_state(&fixture), before, "{name}");
+        let log = fs::read_to_string(systemctl_log).unwrap();
+        assert!(!log.contains("--user whoami"), "{name}");
+        assert!(!log.contains("daemon-reload"), "{name}");
+    }
+}
+
+#[tokio::test]
+async fn absent_inactive_service_update_repairs_files_without_starting_the_service() {
+    let fixture = Fixture::new();
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(fixture.context(true)).await.unwrap();
+    drop(authority);
+    fs::remove_file(&fixture.enabled).unwrap();
+    fs::remove_file(&fixture.active).unwrap();
+    fs::remove_file(&fixture.paths.socket).unwrap();
+    fs::remove_file(&fixture.paths.unit).unwrap();
+    fixture.clear_logs();
+
+    let report = staged_update_with_context(context(
+        &fixture,
+        higher_candidate(&fixture, "candidate-absent-inactive"),
+        None,
+    ))
+    .await
+    .unwrap();
+
+    assert!(report.stdout.starts_with(&format!(
+        "Installed release: {}\n",
+        higher_test_release_version()
+    )));
+    assert!(fixture.paths.unit.exists());
+    assert!(!fixture.enabled.exists());
+    assert!(!fixture.active.exists());
+    assert!(!fixture.paths.socket.exists());
+    assert!(!fixture.systemctl_log().contains("--user whoami"));
+    assert!(!fixture.systemctl_log().contains(" restart "));
+    assert!(!fixture.systemctl_log().contains(" enable --now "));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn higher_candidate_preserves_all_three_desired_service_states() {
     for (name, enabled, active) in DESIRED_STATES {
@@ -246,7 +610,14 @@ async fn higher_candidate_preserves_all_three_desired_service_states() {
 async fn equal_projection_drift_preserves_desktop_and_running_authority() {
     let fixture = Fixture::new();
     let (authority, attachment) = setup_attached(&fixture).await;
+    seed_protected_codex_home_state(&fixture);
+    fs::write(
+        &fixture.whoami_unit,
+        b"codex-session-control-test-Setup1.service\n",
+    )
+    .unwrap();
     let descriptor = fs::read(&attachment.descriptor_path).unwrap();
+    let before = snapshot_protected_state(&fixture);
     let socket_inode = fs::symlink_metadata(&fixture.paths.socket).unwrap().ino();
     drift_projection(&fixture);
     let candidate = equal_candidate(&fixture, "candidate-equal-drift");
@@ -265,10 +636,12 @@ async fn equal_projection_drift_preserves_desktop_and_running_authority() {
         Some(attachment.clone())
     );
     assert_eq!(fs::read(&attachment.descriptor_path).unwrap(), descriptor);
+    assert_eq!(snapshot_protected_state(&fixture), before);
     assert_eq!(
         fs::symlink_metadata(&fixture.paths.socket).unwrap().ino(),
         socket_inode
     );
+    assert!(!fixture.systemctl_log().contains("--user whoami"));
     assert!(!fixture.systemctl_log().contains(" restart "));
     assert!(report.stdout.contains("Desktop attachment: available\n"));
     assert!(report.stdout.contains("Desktop restart required: no\n"));
@@ -285,6 +658,14 @@ async fn equal_projection_drift_preserves_desktop_and_running_authority() {
         stages.find("completed: descriptor\n").unwrap()
             < stages.find("completed: service-unit\n").unwrap()
     );
+    assert!(
+        stages.trim_end().ends_with("completed: manifest"),
+        "{stages}"
+    );
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(&fixture.paths.manifest).unwrap()).unwrap();
+    assert_eq!(receipt["schemaVersion"], 3);
+    assert!(receipt.get("codexVersion").is_none());
     assert!(
         serde_json::from_slice::<Value>(
             &fs::read(
@@ -542,12 +923,13 @@ async fn disabled_active_and_unknown_restart_evidence_fail_before_mutation() {
         let fixture = Fixture::new();
         let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
+        seed_protected_codex_home_state(&fixture);
         if case == "disabled-active" {
             fs::remove_file(&fixture.enabled).unwrap();
         } else {
             fs::write(&fixture.paths.unit, b"contradictory unit").unwrap();
         }
-        let before_binary = fs::read(&fixture.paths.binary).unwrap();
+        let before = snapshot_guarded_state(&fixture);
         let candidate = candidate(
             &fixture,
             "candidate-unknown",
@@ -577,7 +959,10 @@ async fn disabled_active_and_unknown_restart_evidence_fail_before_mutation() {
                         "codex-session-control disable\ncodex-session-control update\ncodex-session-control enable"
                     ));
         }
-        assert_eq!(fs::read(&fixture.paths.binary).unwrap(), before_binary);
+        assert_eq!(snapshot_guarded_state(&fixture), before, "{case}");
+        if case == "disabled-active" {
+            assert!(!fixture.systemctl_log().contains("--user whoami"));
+        }
         assert!(!fixture.systemctl_log().contains("daemon-reload"));
     }
 }

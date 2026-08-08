@@ -514,6 +514,8 @@ async fn active_turn_gate_failure_retries_without_a_process_handoff() {
     path.extend(std::env::split_paths(&setup.path_environment));
     let path = std::env::join_paths(path).unwrap();
     let before_binary = fs::read(&fixture.paths.binary).unwrap();
+    let before_manifest = fs::read(&fixture.paths.manifest).unwrap();
+    fixture.clear_logs();
 
     let error = staged_update_with_context(update_context(
         &fixture,
@@ -530,6 +532,7 @@ async fn active_turn_gate_failure_retries_without_a_process_handoff() {
         "retry: codex-session-control update",
     );
     assert_eq!(fs::read(&fixture.paths.binary).unwrap(), before_binary);
+    assert_eq!(fs::read(&fixture.paths.manifest).unwrap(), before_manifest);
     fs::write(&fixture.wait_for_socket, b"wait").unwrap();
     let paths = fixture.paths.clone();
     let restart_requested = fixture.restart_requested.clone();
@@ -550,6 +553,7 @@ async fn active_turn_gate_failure_retries_without_a_process_handoff() {
         higher_test_release_version()
     )));
     assert_eq!(installed(&fixture.paths).codex_executable, new_codex);
+    assert_eq!(fixture.systemctl_log().matches("--user whoami").count(), 2);
     assert_eq!(fixture.systemctl_log().matches(" restart ").count(), 1);
     drop(restarted_authority);
     drop(old_authority);

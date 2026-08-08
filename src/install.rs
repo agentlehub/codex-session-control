@@ -25,9 +25,7 @@ pub(crate) use status::status;
 pub(crate) use wrapper::codex_wrapper;
 
 use evidence::SelectedHomeEvidence;
-use service::{
-    CleanupServiceActivity, query_cleanup_service_activity, verify_absent_control_socket,
-};
+use service::{ServiceActivity, query_service_activity, verify_absent_control_socket};
 
 const DESKTOP_DETACH_GUIDANCE: &str =
     "Desktop: fully exit and restart Desktop to return to ordinary mode.\n";
@@ -156,19 +154,19 @@ fn cleanup_changed_descriptor_after_start_failure(
             "changed Desktop descriptor cleanup has no exact descriptor identity".to_owned(),
         )
     })?;
-    match query_cleanup_service_activity(systemctl, &target.unit_name) {
-        CleanupServiceActivity::Active => {
+    match query_service_activity(systemctl, &target.unit_name) {
+        ServiceActivity::Active => {
             return Err(ControllerError::Operational(
                 "service is active; exact Desktop descriptor was retained".to_owned(),
             ));
         }
-        CleanupServiceActivity::Unproven => {
+        ServiceActivity::Unproven => {
             return Err(ControllerError::Operational(
                 "service activity could not be proven; exact Desktop descriptor was retained"
                     .to_owned(),
             ));
         }
-        CleanupServiceActivity::Inactive => {}
+        ServiceActivity::Inactive => {}
     }
     verify_absent_control_socket(target)?;
     remove_expected_descriptor(&desktop.identity, descriptor)?;

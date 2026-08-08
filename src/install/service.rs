@@ -20,6 +20,7 @@ pub(crate) struct LifecycleTarget {
     pub(super) paths: ResolvedUserPaths,
     pub(super) unit_name: String,
     pub(super) client_process_source: ClientProcessSource,
+    pub(super) caller_cgroup_source: CallerCgroupSource,
     #[cfg(test)]
     pub(super) test_hooks: LifecycleTestHooks,
 }
@@ -29,6 +30,13 @@ pub(super) enum ClientProcessSource {
     ProcRoot(PathBuf),
     #[cfg(test)]
     Snapshot(Vec<(u32, Vec<u8>)>),
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum CallerCgroupSource {
+    ProcSelf,
+    #[cfg(test)]
+    Snapshot(Vec<u8>),
 }
 
 #[cfg(test)]
@@ -45,6 +53,7 @@ impl LifecycleTarget {
             paths,
             unit_name: "codex-session-control.service".to_owned(),
             client_process_source: ClientProcessSource::ProcRoot(PathBuf::from("/proc")),
+            caller_cgroup_source: CallerCgroupSource::ProcSelf,
             #[cfg(test)]
             test_hooks: LifecycleTestHooks::default(),
         }
@@ -63,6 +72,7 @@ impl LifecycleTarget {
             paths,
             unit_name,
             client_process_source: ClientProcessSource::Snapshot(Vec::new()),
+            caller_cgroup_source: CallerCgroupSource::ProcSelf,
             test_hooks: LifecycleTestHooks::default(),
         }
     }
@@ -90,6 +100,12 @@ impl LifecycleTarget {
         self.client_process_source = ClientProcessSource::Snapshot(snapshot);
         self
     }
+
+    #[cfg(test)]
+    pub(super) fn with_caller_cgroup_snapshot(mut self, snapshot: Vec<u8>) -> Self {
+        self.caller_cgroup_source = CallerCgroupSource::Snapshot(snapshot);
+        self
+    }
 }
 
 pub(super) fn query_systemctl_state(
@@ -108,31 +124,179 @@ pub(super) fn query_systemctl_state(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum CleanupServiceActivity {
+pub(super) enum ServiceEnablement {
+    Enabled,
+    Disabled,
+    Absent,
+    Unproven,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ServiceActivity {
     Active,
     Inactive,
     Unproven,
 }
 
-pub(super) fn query_cleanup_service_activity(
-    systemctl: &Path,
-    unit_name: &str,
-) -> CleanupServiceActivity {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CallerUnitEvidence {
+    WhoAmI,
+    ControlGroup,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum CallerUnitInspection {
+    SelfHosted(CallerUnitEvidence),
+    Independent,
+    Unknown { evidence: String },
+}
+
+pub(super) fn classify_service_enablement(code: Option<i32>, stdout: &[u8]) -> ServiceEnablement {
+    match (code, stdout) {
+        (Some(0), b"enabled\n") => ServiceEnablement::Enabled,
+        (Some(1), b"disabled\n") => ServiceEnablement::Disabled,
+        (Some(4), b"not-found\n") => ServiceEnablement::Absent,
+        _ => ServiceEnablement::Unproven,
+    }
+}
+
+pub(super) fn classify_service_activity(code: Option<i32>, stdout: &[u8]) -> ServiceActivity {
+    match (code, stdout) {
+        (Some(0), b"active\n") => ServiceActivity::Active,
+        (Some(3), b"inactive\n") => ServiceActivity::Inactive,
+        _ => ServiceActivity::Unproven,
+    }
+}
+
+pub(super) fn query_service_enablement(systemctl: &Path, unit_name: &str) -> ServiceEnablement {
+    let Ok(output) = Command::new(systemctl)
+        .args(["--user", "is-enabled", unit_name])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return ServiceEnablement::Unproven;
+    };
+    classify_service_enablement(output.status.code(), &output.stdout)
+}
+
+pub(super) fn query_service_activity(systemctl: &Path, unit_name: &str) -> ServiceActivity {
     let Ok(output) = Command::new(systemctl)
         .args(["--user", "is-active", unit_name])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
     else {
-        return CleanupServiceActivity::Unproven;
+        return ServiceActivity::Unproven;
     };
-    match (
-        output.status.code(),
-        std::str::from_utf8(&output.stdout).ok(),
-    ) {
-        (Some(0), Some("active\n")) => CleanupServiceActivity::Active,
-        (Some(3), Some("inactive\n")) => CleanupServiceActivity::Inactive,
-        _ => CleanupServiceActivity::Unproven,
+    classify_service_activity(output.status.code(), &output.stdout)
+}
+
+fn exact_unit_name(stdout: &[u8]) -> Option<&str> {
+    let unit_name = std::str::from_utf8(stdout).ok()?.strip_suffix('\n')?;
+    if unit_name.is_empty()
+        || unit_name.contains(['\n', '\r', '\0', '/'])
+        || unit_name.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    Some(unit_name)
+}
+
+fn exact_non_root_absolute_cgroup_path(bytes: &[u8]) -> Option<&str> {
+    let path = std::str::from_utf8(bytes).ok()?.strip_suffix('\n')?;
+    if !path.starts_with('/') || path == "/" || path.contains(['\n', '\r', '\0']) {
+        return None;
+    }
+    let mut components = path.split('/');
+    if components.next() != Some("")
+        || components.any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return None;
+    }
+    Some(path)
+}
+
+fn exact_unified_cgroup_path(proc_self_cgroup: &[u8]) -> Option<&str> {
+    let cgroup = std::str::from_utf8(proc_self_cgroup).ok()?;
+    let path = cgroup.strip_prefix("0::")?;
+    exact_non_root_absolute_cgroup_path(path.as_bytes())
+}
+
+pub(super) fn cgroup_proves_self_hosted(control_group: &[u8], proc_self_cgroup: &[u8]) -> bool {
+    let Some(control_group) = exact_non_root_absolute_cgroup_path(control_group) else {
+        return false;
+    };
+    let Some(caller_group) = exact_unified_cgroup_path(proc_self_cgroup) else {
+        return false;
+    };
+    caller_group == control_group
+        || caller_group
+            .strip_prefix(control_group)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn caller_cgroup_snapshot(source: &CallerCgroupSource) -> Result<Vec<u8>, String> {
+    match source {
+        CallerCgroupSource::ProcSelf => {
+            fs::read("/proc/self/cgroup").map_err(|_| "cannot read /proc/self/cgroup".to_owned())
+        }
+        #[cfg(test)]
+        CallerCgroupSource::Snapshot(snapshot) => Ok(snapshot.clone()),
+    }
+}
+
+pub(super) fn inspect_caller_unit(
+    systemctl: &Path,
+    target: &LifecycleTarget,
+) -> CallerUnitInspection {
+    let whoami = Command::new(systemctl)
+        .args(["--user", "whoami"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+    if let Ok(output) = whoami
+        && output.status.code() == Some(0)
+        && let Some(unit_name) = exact_unit_name(&output.stdout)
+    {
+        return if unit_name == target.unit_name {
+            CallerUnitInspection::SelfHosted(CallerUnitEvidence::WhoAmI)
+        } else {
+            CallerUnitInspection::Independent
+        };
+    }
+
+    let control_group = Command::new(systemctl)
+        .args([
+            "--user",
+            "show",
+            "--property=ControlGroup",
+            "--value",
+            target.unit_name.as_str(),
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+    let Ok(control_group) = control_group else {
+        return CallerUnitInspection::Unknown {
+            evidence: "target ControlGroup cannot be queried".to_owned(),
+        };
+    };
+    if control_group.status.code() != Some(0) {
+        return CallerUnitInspection::Unknown {
+            evidence: "target ControlGroup cannot be proven".to_owned(),
+        };
+    }
+    let caller_cgroup = match caller_cgroup_snapshot(&target.caller_cgroup_source) {
+        Ok(caller_cgroup) => caller_cgroup,
+        Err(evidence) => return CallerUnitInspection::Unknown { evidence },
+    };
+    if cgroup_proves_self_hosted(&control_group.stdout, &caller_cgroup) {
+        CallerUnitInspection::SelfHosted(CallerUnitEvidence::ControlGroup)
+    } else {
+        CallerUnitInspection::Unknown {
+            evidence: "caller cgroup does not prove self-hosting".to_owned(),
+        }
     }
 }
 
@@ -203,38 +367,27 @@ pub(super) fn verify_disabled_service(
     systemctl: &Path,
     target: &LifecycleTarget,
 ) -> Result<(), ControllerError> {
-    let enabled = Command::new(systemctl)
-        .args(["--user", "is-enabled", &target.unit_name])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|_| {
-            ControllerError::Operational("service enabled state cannot be proven".to_owned())
-        })?;
-    match (
-        enabled.status.code(),
-        std::str::from_utf8(&enabled.stdout).ok(),
-    ) {
-        (Some(1), Some("disabled\n")) => {}
-        (Some(0), Some("enabled\n")) => {
+    match query_service_enablement(systemctl, &target.unit_name) {
+        ServiceEnablement::Disabled => {}
+        ServiceEnablement::Enabled => {
             return Err(ControllerError::Operational(
                 "service remains enabled".to_owned(),
             ));
         }
-        _ => {
+        ServiceEnablement::Absent | ServiceEnablement::Unproven => {
             return Err(ControllerError::Operational(
                 "service enabled state cannot be proven".to_owned(),
             ));
         }
     }
-    match query_cleanup_service_activity(systemctl, &target.unit_name) {
-        CleanupServiceActivity::Inactive => {}
-        CleanupServiceActivity::Active => {
+    match query_service_activity(systemctl, &target.unit_name) {
+        ServiceActivity::Inactive => {}
+        ServiceActivity::Active => {
             return Err(ControllerError::Operational(
                 "service remains active".to_owned(),
             ));
         }
-        CleanupServiceActivity::Unproven => {
+        ServiceActivity::Unproven => {
             return Err(ControllerError::Operational(
                 "service activity cannot be proven".to_owned(),
             ));
@@ -260,35 +413,19 @@ pub(super) fn verify_absent_managed_unit_stop(
             ));
         }
     }
-    let enabled = Command::new(systemctl)
-        .args(["--user", "is-enabled", &target.unit_name])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|_| {
-            ControllerError::Operational(
-                "missing service enabled state cannot be proven".to_owned(),
-            )
-        })?;
-    if !matches!(
-        (
-            enabled.status.code(),
-            std::str::from_utf8(&enabled.stdout).ok()
-        ),
-        (Some(4), Some("not-found\n"))
-    ) {
+    if query_service_enablement(systemctl, &target.unit_name) != ServiceEnablement::Absent {
         return Err(ControllerError::Operational(
             "missing service enabled state cannot be proven".to_owned(),
         ));
     }
-    match query_cleanup_service_activity(systemctl, &target.unit_name) {
-        CleanupServiceActivity::Inactive => {}
-        CleanupServiceActivity::Active => {
+    match query_service_activity(systemctl, &target.unit_name) {
+        ServiceActivity::Inactive => {}
+        ServiceActivity::Active => {
             return Err(ControllerError::Operational(
                 "missing service remains active".to_owned(),
             ));
         }
-        CleanupServiceActivity::Unproven => {
+        ServiceActivity::Unproven => {
             return Err(ControllerError::Operational(
                 "missing service activity cannot be proven".to_owned(),
             ));

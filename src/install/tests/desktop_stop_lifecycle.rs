@@ -49,6 +49,154 @@ fn assert_later_product_state_is_retained(fixture: &Fixture) {
     assert!(fixture.codex_log().is_empty());
 }
 
+fn service_log_prefix(fixture: &Fixture) -> String {
+    format!(
+        "--user is-active {}\n",
+        fixture.context(true).target.unit_name
+    )
+}
+
+fn assert_active_stop_was_not_attempted(fixture: &Fixture) {
+    let log = fixture.systemctl_log();
+    assert!(!log.contains("disable --now"), "{log}");
+    assert!(!log.contains("daemon-reload"), "{log}");
+    assert!(fixture.enabled.exists());
+    assert!(fixture.active.exists());
+    assert!(fixture.paths.socket.exists());
+}
+
+#[tokio::test]
+async fn active_self_hosted_disable_refuses_before_stop_and_descriptor_removal() {
+    let fixture = Fixture::new();
+    let _authority = setup_attached(&fixture).await;
+    fs::write(
+        &fixture.whoami_unit,
+        b"codex-session-control-test-Setup1.service\n",
+    )
+    .unwrap();
+    let auth = fixture.paths.codex_home.join("auth.json");
+    fs::write(&auth, b"auth sentinel").unwrap();
+    let descriptor = descriptor(&fixture);
+    let before = [
+        fs::read(&fixture.paths.manifest).unwrap(),
+        fs::read(&descriptor).unwrap(),
+        fs::read(&auth).unwrap(),
+    ];
+    fixture.clear_logs();
+
+    let error = disable_with_context(context(&fixture)).await.unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("running inside the managed app-server")
+    );
+    assert!(error.to_string().contains("codex-session-control disable"));
+    assert!(!error.to_string().contains("completed:"));
+    assert_eq!(
+        fixture.systemctl_log(),
+        service_log_prefix(&fixture) + "--user whoami\n"
+    );
+    assert_active_stop_was_not_attempted(&fixture);
+    assert_eq!(fs::read(&fixture.paths.manifest).unwrap(), before[0]);
+    assert_eq!(fs::read(&descriptor).unwrap(), before[1]);
+    assert_eq!(fs::read(auth).unwrap(), before[2]);
+}
+
+#[tokio::test]
+async fn disable_stop_preflight_is_fail_closed_and_preserves_independent_or_inactive_success() {
+    for case in [
+        "self-hosted-control-group",
+        "unknown-caller",
+        "unproven-activity",
+        "proven-inactive",
+    ] {
+        let fixture = Fixture::new();
+        let authority = setup_attached(&fixture).await;
+        let mut lifecycle = context(&fixture);
+        let expected_log = match case {
+            "self-hosted-control-group" => {
+                fs::write(&fixture.systemctl_fail, b"--user whoami").unwrap();
+                fs::write(
+                    &fixture.control_group,
+                    b"/user.slice/app.slice/codex-session-control-test-Setup1.service\n",
+                )
+                .unwrap();
+                lifecycle.target = lifecycle.target.with_caller_cgroup_snapshot(
+                    b"0::/user.slice/app.slice/codex-session-control-test-Setup1.service/child.scope\n"
+                        .to_vec(),
+                );
+                None
+            }
+            "unknown-caller" => {
+                fs::write(&fixture.systemctl_fail, b"--user whoami").unwrap();
+                None
+            }
+            "unproven-activity" => {
+                fs::write(
+                    &fixture.systemctl_fail,
+                    b"--user is-active codex-session-control-test-Setup1.service",
+                )
+                .unwrap();
+                None
+            }
+            "proven-inactive" => {
+                drop(authority);
+                fs::remove_file(&fixture.active).unwrap();
+                fs::remove_file(&fixture.paths.socket).unwrap();
+                Some(
+                    service_log_prefix(&fixture)
+                        + "--user disable --now codex-session-control-test-Setup1.service\n"
+                        + "--user is-enabled codex-session-control-test-Setup1.service\n"
+                        + "--user is-active codex-session-control-test-Setup1.service\n",
+                )
+            }
+            _ => unreachable!(),
+        };
+        fixture.clear_logs();
+
+        let result = disable_with_context(lifecycle).await;
+
+        match case {
+            "self-hosted-control-group" | "unknown-caller" => {
+                let error = result.unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("caller independence cannot be proven"),
+                    "{case}: {error}"
+                );
+                assert!(error.to_string().contains(&format!(
+                    "systemctl --user stop {}\ncodex-session-control disable",
+                    fixture.context(true).target.unit_name
+                )));
+                assert_active_stop_was_not_attempted(&fixture);
+            }
+            "unproven-activity" => {
+                let error = result.unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("service activity cannot be proven"),
+                    "{error}"
+                );
+                assert!(error.to_string().contains(&format!(
+                    "systemctl --user stop {}\ncodex-session-control disable",
+                    fixture.context(true).target.unit_name
+                )));
+                assert!(!fixture.systemctl_log().contains("--user whoami"));
+                assert!(!fixture.systemctl_log().contains("disable --now"));
+            }
+            "proven-inactive" => {
+                result.unwrap();
+                assert_eq!(fixture.systemctl_log(), expected_log.unwrap());
+                assert!(!fixture.systemctl_log().contains("--user whoami"));
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
 #[tokio::test]
 async fn disable_removes_only_the_exact_descriptor_after_service_proof() {
     let fixture = Fixture::new();
@@ -61,6 +209,14 @@ async fn disable_removes_only_the_exact_descriptor_after_service_proof() {
     assert!(!fixture.active.exists());
     assert!(!fixture.paths.socket.exists());
     assert!(!descriptor(&fixture).exists());
+    assert_eq!(
+        fixture.systemctl_log(),
+        service_log_prefix(&fixture)
+            + "--user whoami\n"
+            + "--user disable --now codex-session-control-test-Setup1.service\n"
+            + "--user is-enabled codex-session-control-test-Setup1.service\n"
+            + "--user is-active codex-session-control-test-Setup1.service\n"
+    );
     assert_eq!(
         report.stderr,
         "completed: service-disable\n\
@@ -75,11 +231,7 @@ completed: descriptor-remove\n"
 async fn unproven_service_stop_retains_descriptor_and_every_later_product_stage() {
     let fixture = Fixture::new();
     let _authority = setup_attached(&fixture).await;
-    fs::write(
-        &fixture.systemctl_fail,
-        "--user is-active codex-session-control-test-Setup1.service",
-    )
-    .unwrap();
+    fs::write(&fixture.fail_service_verify_after_stop, b"fail").unwrap();
     fixture.clear_logs();
 
     let error = uninstall_with_context(context(&fixture)).await.unwrap_err();

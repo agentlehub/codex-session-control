@@ -46,6 +46,21 @@ A change to the Codex executable or systemd service may require a restart. Revie
 
 A service restart interrupts active Codex turns. They do not resume automatically. Active goals are not paused or cleared and may continue when a client resumes the session. Pause any goal that must not continue before approving the restart.
 
+## A lifecycle command refuses to avoid disconnecting this task
+
+If a restart-required `update`, active `disable`, or active `uninstall` reports that it is running through the managed app-server, rerun the printed command from an independent terminal that is not attached through Codex Session Control.
+
+If a restart-required update cannot prove caller identity, repair or upgrade the systemd user environment so that `systemctl --user whoami` works, then rerun the printed update command from an independent terminal. Do not stop the service first to work around an update refusal.
+
+For `disable` and `uninstall` only, an error may print an independent stop-then-rerun sequence. Run that exact sequence from an independent terminal:
+
+```bash
+systemctl --user stop codex-session-control.service
+codex-session-control disable # or uninstall
+```
+
+An external socket or socket-parent error means the Desktop backend connection is unavailable. It does not show that `auth.json` was deleted; Codex Session Control does not manage Codex credentials.
+
 ## An MCP mutation reports `outcome_unknown`
 
 The request may have reached Codex. Do not retry blindly because that could repeat the action. Inspect the session with `thread_read` or `threads_list`, then decide what to do from its current state.

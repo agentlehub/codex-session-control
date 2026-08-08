@@ -26,8 +26,9 @@ use super::{
     remove_persisted_desktop_descriptor,
     render::render_unit,
     service::{
-        append_unattached_client_guidance, detect_running_unattached_clients, run_systemctl,
-        verify_disabled_service, verify_enabled_service,
+        CallerUnitEvidence, CallerUnitInspection, ServiceActivity,
+        append_unattached_client_guidance, detect_running_unattached_clients, inspect_caller_unit,
+        query_service_activity, run_systemctl, verify_disabled_service, verify_enabled_service,
     },
 };
 
@@ -296,6 +297,48 @@ pub(super) async fn disable_with_context(
     let retry = format!("{display_command} disable");
     let systemctl = resolve_named_executable(&context.path_environment, &context.cwd, "systemctl")
         .map_err(|error| progress.fail(LifecycleStage::ServiceDisable, error, &retry))?;
+    match query_service_activity(&systemctl, &context.target.unit_name) {
+        ServiceActivity::Inactive => {}
+        ServiceActivity::Active => match inspect_caller_unit(&systemctl, &context.target) {
+            CallerUnitInspection::Independent => {}
+            CallerUnitInspection::SelfHosted(CallerUnitEvidence::WhoAmI) => {
+                let recovery =
+                    format!("run from an independent terminal:\n{display_command} disable\n");
+                return Err(progress.fail(
+                    LifecycleStage::ServiceDisable,
+                    "refusing disable: this command is running inside the managed app-server",
+                    &recovery,
+                ));
+            }
+            CallerUnitInspection::SelfHosted(CallerUnitEvidence::ControlGroup)
+            | CallerUnitInspection::Unknown { .. } => {
+                let recovery = format!(
+                    "caller independence could not be proven; from an independent terminal:\n\
+                     systemctl --user stop {}\n\
+                     {display_command} disable\n",
+                    context.target.unit_name,
+                );
+                return Err(progress.fail(
+                    LifecycleStage::ServiceDisable,
+                    "refusing disable: caller independence cannot be proven",
+                    &recovery,
+                ));
+            }
+        },
+        ServiceActivity::Unproven => {
+            let recovery = format!(
+                "service activity could not be proven; from an independent terminal:\n\
+                 systemctl --user stop {}\n\
+                 {display_command} disable\n",
+                context.target.unit_name,
+            );
+            return Err(progress.fail(
+                LifecycleStage::ServiceDisable,
+                "refusing disable: service activity cannot be proven",
+                &recovery,
+            ));
+        }
+    }
     run_systemctl(
         &systemctl,
         [

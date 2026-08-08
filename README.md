@@ -98,9 +98,11 @@ Update to the latest release with:
 codex-session-control update
 ```
 
-Most updates do not interrupt running work. If a service restart is required, Codex Session Control lists the active sessions and asks before continuing. The default answer is no.
+Most updates do not interrupt running work. An attached task may complete an update that does not require a service restart. If an attached task would need a restart, Codex Session Control refuses before disrupting its managed app-server and prints the command to rerun from an independent terminal. From an independent terminal, a restart-required update lists the active sessions and asks before continuing. The default answer is no.
 
 Running responses interrupted by a restart remain marked as interrupted. Active goals are not paused automatically and may continue when their sessions resume. Pause any goal you do not want to continue before approving the restart. If an update stops partway through, follow the retry command shown in the error message.
+
+When the managed service is active, `disable` and `uninstall` likewise refuse if the command is running from an attached task. Rerun the printed command from an independent terminal to intentionally disconnect the service.
 
 Remove Codex Session Control with:
 

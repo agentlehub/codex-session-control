@@ -1,4 +1,8 @@
-use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+use std::{
+    fs,
+    os::unix::fs::{MetadataExt, PermissionsExt},
+    path::{Path, PathBuf},
+};
 
 use super::support::{FakeAuthority, Fixture};
 use super::*;
@@ -39,6 +43,191 @@ completed: projection-remove\n\
 completed: configuration-remove\n\
 completed: manifest-remove\n\
 completed: binary-remove\n"
+}
+
+async fn setup_attached(fixture: &Fixture) -> FakeAuthority {
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+    let launcher = fixture._root.path().join("desktop-launcher");
+    super::write_executable_fixture(
+        &launcher,
+        "#!/bin/sh\nif [ \"$1\" = \"--print-build-info\" ]; then printf '%s\\n' '{\"appIdentity\":{\"id\":\"codex-desktop\"},\"linuxCapabilities\":[\"external-app-server-attachment-descriptor-v1\"]}'; exit 0; fi\nexit 64\n",
+    );
+    let mut setup = fixture.context(true);
+    setup.desktop_launcher = Some(launcher);
+    setup_with_context(setup).await.unwrap();
+    authority
+}
+
+fn snapshot_tree(path: &Path, root: &Path, snapshot: &mut Vec<(PathBuf, u32, Option<Vec<u8>>)>) {
+    let metadata = fs::symlink_metadata(path).unwrap();
+    let relative = path.strip_prefix(root).unwrap().to_path_buf();
+    let mode = metadata.permissions().mode() & 0o777;
+    if metadata.is_dir() {
+        snapshot.push((relative, mode, None));
+        let mut children: Vec<_> = fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        children.sort();
+        for child in children {
+            snapshot_tree(&child, root, snapshot);
+        }
+    } else {
+        snapshot.push((relative, mode, Some(fs::read(path).unwrap())));
+    }
+}
+
+fn tree_snapshot(path: &Path) -> Vec<(PathBuf, u32, Option<Vec<u8>>)> {
+    let mut snapshot = Vec::new();
+    snapshot_tree(path, path, &mut snapshot);
+    snapshot
+}
+
+fn protected_paths(fixture: &Fixture) -> Vec<(PathBuf, Vec<u8>, u32)> {
+    [
+        ("auth.json", b"auth".as_slice()),
+        ("tasks/tasks.db", b"tasks".as_slice()),
+        ("rollouts/rollout.jsonl", b"rollout".as_slice()),
+        ("config.toml", b"unrelated config".as_slice()),
+        (
+            "plugins/unrelated/plugin.json",
+            b"unrelated plugin".as_slice(),
+        ),
+    ]
+    .into_iter()
+    .map(|(relative, bytes)| {
+        let path = fixture.paths.codex_home.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, bytes).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        (path, bytes.to_vec(), mode)
+    })
+    .collect()
+}
+
+fn file_snapshot(path: &Path) -> (Vec<u8>, u32) {
+    (
+        fs::read(path).unwrap(),
+        fs::metadata(path).unwrap().permissions().mode() & 0o777,
+    )
+}
+
+fn assert_file_snapshot(path: &Path, expected: &(Vec<u8>, u32)) {
+    assert_eq!(file_snapshot(path), *expected, "{}", path.display());
+}
+
+struct StopRefusalSnapshot {
+    descriptor: (Vec<u8>, u32),
+    unit: (Vec<u8>, u32),
+    marketplace: Vec<(PathBuf, u32, Option<Vec<u8>>)>,
+    configuration: (Vec<u8>, u32),
+    manifest: (Vec<u8>, u32),
+    binary: (Vec<u8>, u32),
+    plugin_state: (Vec<u8>, u32),
+    socket: (u32, u64),
+    protected: Vec<(PathBuf, Vec<u8>, u32)>,
+}
+
+fn snapshot_stop_refusal_state(fixture: &Fixture, descriptor: &Path) -> StopRefusalSnapshot {
+    let socket = fs::symlink_metadata(&fixture.paths.socket).unwrap();
+    StopRefusalSnapshot {
+        descriptor: file_snapshot(descriptor),
+        unit: file_snapshot(&fixture.paths.unit),
+        marketplace: tree_snapshot(&fixture.paths.marketplace),
+        configuration: file_snapshot(&fixture.paths.config),
+        manifest: file_snapshot(&fixture.paths.manifest),
+        binary: file_snapshot(&fixture.paths.binary),
+        plugin_state: file_snapshot(&fixture.plugin_state),
+        socket: (socket.permissions().mode(), socket.ino()),
+        protected: protected_paths(fixture),
+    }
+}
+
+fn assert_stop_refusal_state(fixture: &Fixture, descriptor: &Path, expected: StopRefusalSnapshot) {
+    assert_file_snapshot(descriptor, &expected.descriptor);
+    assert_file_snapshot(&fixture.paths.unit, &expected.unit);
+    assert_eq!(
+        tree_snapshot(&fixture.paths.marketplace),
+        expected.marketplace
+    );
+    assert_file_snapshot(&fixture.paths.config, &expected.configuration);
+    assert_file_snapshot(&fixture.paths.manifest, &expected.manifest);
+    assert_file_snapshot(&fixture.paths.binary, &expected.binary);
+    assert_file_snapshot(&fixture.plugin_state, &expected.plugin_state);
+    let socket = fs::symlink_metadata(&fixture.paths.socket).unwrap();
+    assert_eq!((socket.permissions().mode(), socket.ino()), expected.socket);
+    for (path, bytes, mode) in expected.protected {
+        assert_eq!(fs::read(&path).unwrap(), bytes, "{}", path.display());
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            mode
+        );
+    }
+}
+
+#[tokio::test]
+async fn active_self_hosted_uninstall_refuses_before_every_removal() {
+    let fixture = Fixture::new();
+    let _authority = setup_attached(&fixture).await;
+    fs::write(
+        &fixture.whoami_unit,
+        b"codex-session-control-test-Setup1.service\n",
+    )
+    .unwrap();
+    let descriptor = fixture
+        .paths
+        .home
+        .join(".config/codex-desktop/app-server-attachment.json");
+    let before = snapshot_stop_refusal_state(&fixture, &descriptor);
+    fixture.clear_logs();
+
+    let error = uninstall_with_context(context(&fixture)).await.unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("running inside the managed app-server")
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("codex-session-control uninstall")
+    );
+    assert!(!error.to_string().contains("completed:"));
+    assert_eq!(
+        fixture.systemctl_log(),
+        "--user is-active codex-session-control-test-Setup1.service\n--user whoami\n"
+    );
+    assert!(!fixture.systemctl_log().contains("disable --now"));
+    assert!(!fixture.systemctl_log().contains("daemon-reload"));
+    assert_stop_refusal_state(&fixture, &descriptor, before);
+}
+
+#[tokio::test]
+async fn unproven_active_uninstall_refuses_before_every_removal() {
+    let fixture = Fixture::new();
+    let _authority = setup_attached(&fixture).await;
+    fs::write(&fixture.systemctl_fail, b"--user whoami").unwrap();
+    let descriptor = fixture
+        .paths
+        .home
+        .join(".config/codex-desktop/app-server-attachment.json");
+    let before = snapshot_stop_refusal_state(&fixture, &descriptor);
+    fixture.clear_logs();
+
+    let error = uninstall_with_context(context(&fixture)).await.unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("caller independence cannot be proven")
+    );
+    assert!(error.to_string().contains(
+        "systemctl --user stop codex-session-control-test-Setup1.service\ncodex-session-control uninstall"
+    ));
+    assert!(!fixture.systemctl_log().contains("disable --now"));
+    assert!(!fixture.systemctl_log().contains("daemon-reload"));
+    assert_stop_refusal_state(&fixture, &descriptor, before);
 }
 
 #[tokio::test]
@@ -102,9 +291,9 @@ async fn uninstall_is_service_first_uses_exact_order_and_preserves_native_home()
     );
     assert_eq!(
         fixture.systemctl_log(),
-        " --user disable --now codex-session-control-test-Setup1.service\n"
-            .trim_start()
-            .to_owned()
+        "--user is-active codex-session-control-test-Setup1.service\n".to_owned()
+            + "--user whoami\n"
+            + "--user disable --now codex-session-control-test-Setup1.service\n"
             + "--user is-enabled codex-session-control-test-Setup1.service\n"
             + "--user is-active codex-session-control-test-Setup1.service\n"
             + "--user daemon-reload\n"
@@ -301,7 +490,7 @@ async fn stop_or_verification_failure_removes_nothing_after_service_boundary() {
         let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
         if verification_failure {
-            fs::write(&fixture.preserve_service_state, b"preserve").unwrap();
+            fs::write(&fixture.fail_service_verify_after_stop, b"fail").unwrap();
         } else {
             fs::write(
                 &fixture.systemctl_fail,
