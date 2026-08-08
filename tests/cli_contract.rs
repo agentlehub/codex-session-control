@@ -4,12 +4,11 @@ mod command_surface;
 mod installer;
 #[path = "cli_contract/release_bundle.rs"]
 mod release_bundle;
-#[path = "cli_contract/systemd_ci.rs"]
-mod systemd_ci;
 #[path = "support/private_tempdir.rs"]
 mod test_support;
 
 #[test]
+#[ignore = "requires CODEX_SESSION_CONTROL_RELEASE_DIR"]
 fn release_assets() {
     release_bundle::assert_release_assets();
 }

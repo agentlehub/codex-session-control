@@ -161,13 +161,12 @@ jobs:
           chmod 0644 release/SHA256SUMS release/install.sh
           (cd release && sha256sum --check SHA256SUMS)
 
-          cargo test --test cli_contract --locked -- --list |
+          cargo test --test cli_contract --locked -- --ignored --list |
             grep -q '^release_assets: test$'
           CODEX_SESSION_CONTROL_RELEASE_DIR="$PWD/release" \
-            cargo test --test cli_contract release_assets --locked -- --nocapture \
+            cargo test --test cli_contract release_assets --locked -- --exact --ignored --nocapture \
             2>&1 | tee "$RUNNER_TEMP/release-assets.log"
           grep -q 'validated release bundle:' "$RUNNER_TEMP/release-assets.log"
-          ! grep -q 'skipped release bundle:' "$RUNNER_TEMP/release-assets.log"
 
       - name: Prove the release does not exist
         shell: bash

@@ -421,6 +421,8 @@ fn release_workflow_is_tag_triggered_assembly_only() {
     );
 
     let assemble = job_block(&release, "assemble");
+    let bundle_validation =
+        named_step_block(assemble, "Assemble and validate exactly four release files");
     assert_required(
         assemble,
         &[
@@ -432,6 +434,16 @@ fn release_workflow_is_tag_triggered_assembly_only() {
             "install.sh",
         ],
         "release assemble job",
+    );
+    assert_required(
+        bundle_validation,
+        &[
+            "cargo test --test cli_contract --locked -- --ignored --list",
+            r#"CODEX_SESSION_CONTROL_RELEASE_DIR="$PWD/release""#,
+            "cargo test --test cli_contract release_assets --locked -- --exact --ignored --nocapture",
+            "grep -q 'validated release bundle:'",
+        ],
+        "required release bundle validation",
     );
 
     for forbidden in [
@@ -602,12 +614,11 @@ fn verify_job_is_read_only_and_binds_the_source() {
             "chmod 0755",
             "chmod 0644",
             "(cd release && sha256sum --check SHA256SUMS)",
-            "cargo test --test cli_contract --locked -- --list",
+            "cargo test --test cli_contract --locked -- --ignored --list",
             "grep -q '^release_assets: test$'",
             r#"CODEX_SESSION_CONTROL_RELEASE_DIR="$PWD/release""#,
-            "cargo test --test cli_contract release_assets --locked -- --nocapture",
+            "cargo test --test cli_contract release_assets --locked -- --exact --ignored --nocapture",
             "grep -q 'validated release bundle:'",
-            "! grep -q 'skipped release bundle:'",
         ],
         "read-only candidate release_assets validation",
     );
@@ -1044,7 +1055,7 @@ fn native_ci_and_release_binaries_expose_exactly_eight_commands() {
 }
 
 #[test]
-fn disposable_ci_owns_complete_normal_home_composition() {
+fn systemd_integration_owns_complete_disposable_user_contract() {
     let ci = workflow("ci.yml");
     let integration = job_block(&ci, "systemd-integration");
     let transaction = fs::read_to_string(
@@ -1052,6 +1063,56 @@ fn disposable_ci_owns_complete_normal_home_composition() {
             .join("scripts/ci/disposable-systemd-user-contract.sh"),
     )
     .unwrap();
+
+    assert!(
+        transaction.starts_with("#!/usr/bin/env bash\nset -euo pipefail\n"),
+        "disposable systemd transaction must use the strict Bash header"
+    );
+    let transaction_lines = transaction.lines().collect::<Vec<_>>();
+    let exact_line = |expected: &str| {
+        let matches = transaction_lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| (*line == expected).then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matches.len(),
+            1,
+            "disposable systemd transaction must contain exactly one `{expected}` line"
+        );
+        matches[0]
+    };
+    let cleanup_definition = exact_line("cleanup() {");
+    let cleanup_end = transaction_lines
+        .iter()
+        .enumerate()
+        .skip(cleanup_definition + 1)
+        .find_map(|(index, line)| (*line == "}").then_some(index))
+        .expect("cleanup function closing brace is missing");
+    let trap_installation = exact_line("trap cleanup EXIT");
+    let first_privileged_mutation =
+        exact_line("sudo useradd --create-home --home-dir \"$home\" --shell /bin/bash \"$user\"");
+    let explicit_cleanup = exact_line("cleanup");
+    let trap_clearing = exact_line("trap - EXIT");
+    let runtime_absence = exact_line("test ! -e \"$runtime\"");
+    let home_absence = exact_line("test ! -e \"$home\"");
+    let linger_absence = exact_line("test ! -e \"/var/lib/systemd/linger/$user\"");
+    let manager_absence = exact_line("if sudo systemctl is-active --quiet \"$manager\"; then");
+    assert!(
+        cleanup_definition < cleanup_end
+            && cleanup_end < trap_installation
+            && trap_installation < first_privileged_mutation,
+        "cleanup must be defined and trapped before the first privileged mutation"
+    );
+    assert!(
+        first_privileged_mutation < explicit_cleanup
+            && explicit_cleanup < trap_clearing
+            && trap_clearing < runtime_absence
+            && runtime_absence < home_absence
+            && home_absence < linger_absence
+            && linger_absence < manager_absence,
+        "explicit cleanup and trap clearing must precede final disposable-state absence checks"
+    );
 
     let checkout = integration.find(CHECKOUT_REFERENCE).unwrap();
     let prerequisites = integration
@@ -1065,6 +1126,17 @@ fn disposable_ci_owns_complete_normal_home_composition() {
     assert!(
         checkout < prerequisites && prerequisites < invocation,
         "checkout, prerequisites, and the repository-pinned transaction must remain ordered"
+    );
+    assert_eq!(
+        integration
+            .matches("bash scripts/ci/disposable-systemd-user-contract.sh")
+            .count(),
+        1,
+        "systemd integration must invoke exactly one repository-owned transaction"
+    );
+    assert!(
+        !integration.contains("user=codex-session-control-ci"),
+        "the script, not the workflow, must own the disposable-user transaction"
     );
     assert_required(
         integration,
@@ -1107,6 +1179,35 @@ fn disposable_ci_owns_complete_normal_home_composition() {
         ],
         "disposable controller version contract",
     );
+    assert_required(
+        &transaction,
+        &[
+            "sudo loginctl enable-linger \"$user\" || return",
+            "sudo systemctl start \"$manager\" || return",
+            "runtime=\"$(sudo loginctl show-user \"$user\" --property=RuntimePath --value)\"",
+            "sudo test -S \"$runtime/bus\" || return",
+            "systemctl --user list-units >/dev/null || return",
+        ],
+        "native disposable user-manager bootstrap",
+    );
+    for forbidden in [
+        "dbus-run-session",
+        "/usr/lib/systemd/systemd --user",
+        "GITHUB_WORKSPACE",
+        "WORKSPACE=",
+        "CARGO_PATH=",
+        "RUSTUP_HOME=",
+        "CARGO_HOME=",
+        "CARGO_TARGET_DIR=",
+        "cd \"$WORKSPACE\"",
+        "setfacl",
+        "rustup toolchain install",
+    ] {
+        assert!(
+            !transaction.contains(forbidden),
+            "disposable integration depends on forbidden runner bootstrap state: {forbidden}"
+        );
+    }
     assert!(
         !transaction
             .lines()
@@ -1148,6 +1249,9 @@ test "$(
         "before the suffixed test, selected .codex references must be limited to assignment and read-only absence checks"
     );
 
+    let lifecycle_run = transaction
+        .find("--exact install::tests::disposable_systemd_user")
+        .expect("disposable lifecycle run is missing");
     let normal_home_run = transaction
         .find("\"$app_server_harness\" live_normal_home_")
         .expect("normal-home namespace run is missing");
@@ -1155,8 +1259,8 @@ test "$(
         .find("\"$app_server_harness\" --ignored")
         .expect("broad ignored regression is missing");
     assert!(
-        normal_home_run < broad_regression,
-        "the four normal-home cases must pass before the broad ignored regression"
+        lifecycle_run < normal_home_run && normal_home_run < broad_regression,
+        "the lifecycle proof, four normal-home cases, and broad ignored regression must remain ordered"
     );
 
     assert!(
@@ -1168,7 +1272,7 @@ test ! -e "$home"
 test ! -e "/var/lib/systemd/linger/$user"
 if sudo systemctl is-active --quiet "$manager"; then"#,
         ),
-        "cleanup must precede final runtime, home, linger, and manager absence verification"
+        "cleanup must precede contiguous final runtime, home, linger, and manager absence verification"
     );
     assert!(
         transaction
