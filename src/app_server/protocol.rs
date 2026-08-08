@@ -16,23 +16,35 @@ pub(super) fn compact_snapshot_from_native(
     let thread = metadata
         .get("thread")
         .ok_or_else(|| malformed_native("thread/read"))?;
+    let returned_thread_id = required_string(thread, "id", "thread/read")?;
+    if returned_thread_id != thread_id {
+        return Err(malformed_native("thread/read"));
+    }
     let status = required_value::<ThreadStatus>(thread, "status", "thread/read")?;
-    let latest_turn = latest
+    let latest_turns = latest
         .get("data")
         .and_then(Value::as_array)
-        .and_then(|turns| turns.first());
-    let active_turn =
-        latest_turn.filter(|turn| turn.get("status").and_then(Value::as_str) == Some("inProgress"));
+        .ok_or_else(|| malformed_native("thread/turns/list"))?;
+    let (active_turn_id, active_turn_status) = match latest_turns.first() {
+        Some(turn) => {
+            let turn_status = required_value::<TurnStatus>(turn, "status", "thread/turns/list")?;
+            if turn_status == TurnStatus::InProgress {
+                (
+                    Some(required_string(turn, "id", "thread/turns/list")?),
+                    Some(turn_status),
+                )
+            } else {
+                (None, None)
+            }
+        }
+        None => (None, None),
+    };
     Ok(ThreadSnapshot {
-        thread_id: optional_string(thread, "id", "thread/read")?
-            .unwrap_or_else(|| thread_id.to_owned()),
+        thread_id: returned_thread_id,
         name: optional_string(thread, "name", "thread/read")?,
         status,
-        active_turn_id: active_turn
-            .and_then(|turn| turn.get("id"))
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        active_turn_status: active_turn.map(|_| TurnStatus::InProgress),
+        active_turn_id,
+        active_turn_status,
         updated_at: required_i64(thread, "updatedAt", "thread/read")?,
     })
 }

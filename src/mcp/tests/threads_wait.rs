@@ -170,6 +170,37 @@ async fn target_error_returns_complete_decisive_pass() {
 }
 
 #[tokio::test]
+async fn malformed_snapshot_is_an_error_instead_of_false_readiness() {
+    let steps = vec![
+        FakeStep::result(
+            "thread/read",
+            json!({"threadId": "target", "includeTurns": false}),
+            json!({"thread": native_thread("target", json!({"type": "idle"}), 10)}),
+        ),
+        FakeStep::result(
+            "thread/turns/list",
+            json!({
+                "threadId": "target",
+                "limit": 1,
+                "itemsView": "notLoaded",
+            }),
+            json!({"data": null}),
+        ),
+    ];
+    let (result, harness) = run_wait(steps, &["target"], Duration::from_secs(30)).await;
+    let result = result.unwrap();
+
+    assert!(matches!(result.reason, ThreadsWaitReason::Error));
+    assert!(result.trigger_thread_ids.is_empty());
+    assert!(result.threads.is_empty());
+    assert_eq!(result.errors.len(), 1);
+    assert_eq!(result.errors[0].category, ToolErrorCategory::NativeError);
+    assert_eq!(result.errors[0].stage, "thread/turns/list");
+    assert_eq!(result.errors[0].thread_id.as_deref(), Some("target"));
+    assert_eq!(harness.log().len(), 2);
+}
+
+#[tokio::test]
 async fn shared_transport_failure_is_request_wide_error() {
     let harness = FakeAppServer::start(vec![FakeStep {
         method: "thread/read",
