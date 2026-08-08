@@ -13,6 +13,8 @@ use serde_json::{Value, json};
 const INSTRUCTIONS: &str = "These tools inspect and control Codex threads through the shared app-server used by connected Codex clients.";
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const CATALOG_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+const PIPE_CAPTURE_LIMIT: usize = 64 * 1024;
+const CONTINUOUS_OUTPUT_FIXTURE: &str = "CSC_MCP_CONTRACT_CONTINUOUS_OUTPUT";
 
 const TOOL_EFFECTS: [(&str, bool, bool); 13] = [
     ("thread_create", false, false),
@@ -102,8 +104,7 @@ impl ChildGuard {
                             io::ErrorKind::TimedOut,
                             format!(
                                 "child did not exit within {timeout:?}; stdout: {}; stderr: {}",
-                                String::from_utf8_lossy(&stdout),
-                                String::from_utf8_lossy(&stderr)
+                                stdout, stderr
                             ),
                         ));
                     }
@@ -184,15 +185,75 @@ impl Drop for ChildGuard {
     }
 }
 
-fn read_pipe(mut pipe: impl Read + Send + 'static) -> JoinHandle<io::Result<Vec<u8>>> {
+struct PipeCapture {
+    bytes: Vec<u8>,
+    total_bytes: usize,
+}
+
+fn write_lossy_bytes(
+    formatter: &mut std::fmt::Formatter<'_>,
+    mut bytes: &[u8],
+) -> std::fmt::Result {
+    while !bytes.is_empty() {
+        match std::str::from_utf8(bytes) {
+            Ok(text) => return formatter.write_str(text),
+            Err(error) => {
+                let valid_len = error.valid_up_to();
+                if valid_len > 0 {
+                    let valid = std::str::from_utf8(&bytes[..valid_len])
+                        .expect("valid_up_to must delimit valid UTF-8");
+                    formatter.write_str(valid)?;
+                }
+                formatter.write_str("?")?;
+                let invalid_len = error.error_len().unwrap_or(bytes.len() - valid_len);
+                bytes = &bytes[valid_len + invalid_len..];
+            }
+        }
+    }
+    Ok(())
+}
+
+impl std::fmt::Display for PipeCapture {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write_lossy_bytes(formatter, &self.bytes)?;
+        if self.total_bytes > self.bytes.len() {
+            write!(
+                formatter,
+                " [truncated: captured first {} of {} bytes]",
+                self.bytes.len(),
+                self.total_bytes
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn read_pipe(mut pipe: impl Read + Send + 'static) -> JoinHandle<io::Result<PipeCapture>> {
     thread::spawn(move || {
-        let mut bytes = Vec::new();
-        pipe.read_to_end(&mut bytes)?;
-        Ok(bytes)
+        let mut captured = Vec::with_capacity(PIPE_CAPTURE_LIMIT);
+        let mut total_bytes = 0usize;
+        let mut buffer = [0u8; 8 * 1024];
+        loop {
+            let bytes_read = match pipe.read(&mut buffer) {
+                Ok(bytes_read) => bytes_read,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            };
+            if bytes_read == 0 {
+                break;
+            }
+            total_bytes = total_bytes.saturating_add(bytes_read);
+            let retained = bytes_read.min(PIPE_CAPTURE_LIMIT - captured.len());
+            captured.extend_from_slice(&buffer[..retained]);
+        }
+        Ok(PipeCapture {
+            bytes: captured,
+            total_bytes,
+        })
     })
 }
 
-fn join_pipe(reader: JoinHandle<io::Result<Vec<u8>>>, stream: &str) -> io::Result<Vec<u8>> {
+fn join_pipe(reader: JoinHandle<io::Result<PipeCapture>>, stream: &str) -> io::Result<PipeCapture> {
     reader
         .join()
         .map_err(|_| io::Error::other(format!("{stream} reader panicked")))?
@@ -200,15 +261,15 @@ fn join_pipe(reader: JoinHandle<io::Result<Vec<u8>>>, stream: &str) -> io::Resul
 
 fn collect_output(
     status: ExitStatus,
-    stdout_reader: JoinHandle<io::Result<Vec<u8>>>,
-    stderr_reader: JoinHandle<io::Result<Vec<u8>>>,
+    stdout_reader: JoinHandle<io::Result<PipeCapture>>,
+    stderr_reader: JoinHandle<io::Result<PipeCapture>>,
 ) -> io::Result<Output> {
     let stdout = join_pipe(stdout_reader, "stdout");
     let stderr = join_pipe(stderr_reader, "stderr");
     Ok(Output {
         status,
-        stdout: stdout?,
-        stderr: stderr?,
+        stdout: stdout?.bytes,
+        stderr: stderr?.bytes,
     })
 }
 
@@ -233,6 +294,58 @@ fn terminate_test_child(child: &mut Child) {
     if child.kill().is_ok() {
         let _ = child.wait();
     }
+}
+
+#[test]
+fn pipe_capture_bounds_invalid_utf8_diagnostics() {
+    let capture = PipeCapture {
+        bytes: vec![0xff; PIPE_CAPTURE_LIMIT],
+        total_bytes: PIPE_CAPTURE_LIMIT * 2,
+    };
+
+    let diagnostic = format!("stdout: {capture}; stderr: {capture}");
+
+    assert!(
+        diagnostic.len() <= PIPE_CAPTURE_LIMIT * 2 + 256,
+        "invalid UTF-8 expanded diagnostic to {} bytes",
+        diagnostic.len()
+    );
+    assert!(
+        diagnostic.contains('?'),
+        "invalid bytes must remain visible"
+    );
+    assert_eq!(diagnostic.matches("[truncated:").count(), 2);
+}
+
+#[test]
+fn read_pipe_retries_interrupted_reads() {
+    struct InterruptedOnce<R> {
+        inner: R,
+        interrupted: bool,
+    }
+
+    impl<R: Read> Read for InterruptedOnce<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if !self.interrupted {
+                self.interrupted = true;
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            self.inner.read(buffer)
+        }
+    }
+
+    let expected = b"captured after an interrupted read".to_vec();
+    let capture = join_pipe(
+        read_pipe(InterruptedOnce {
+            inner: io::Cursor::new(expected.clone()),
+            interrupted: false,
+        }),
+        "test",
+    )
+    .unwrap();
+
+    assert_eq!(capture.bytes, expected);
+    assert_eq!(capture.total_bytes, expected.len());
 }
 
 #[test]
@@ -276,6 +389,77 @@ fn child_guard_terminates_and_reaps_on_timeout() {
         !std::path::Path::new(&format!("/proc/{child_pid}")).exists(),
         "timed-out child was not reaped"
     );
+}
+
+#[test]
+fn child_guard_bounds_continuously_logged_timeout_output() {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "child_guard_continuous_output_fixture",
+            "--nocapture",
+        ])
+        .env(CONTINUOUS_OUTPUT_FIXTURE, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let child = ChildGuard::spawn(&mut command).unwrap();
+    let child_pid = child.id();
+    let error = child.wait_with_output(Duration::from_secs(1)).unwrap_err();
+    let diagnostic = error.to_string();
+
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert!(
+        !std::path::Path::new(&format!("/proc/{child_pid}")).exists(),
+        "continuously logging child was not reaped"
+    );
+    assert!(
+        diagnostic.len() <= PIPE_CAPTURE_LIMIT * 2 + 1024,
+        "timeout diagnostic retained {} bytes",
+        diagnostic.len()
+    );
+    assert!(diagnostic.contains("stdout diagnostic"));
+    assert!(diagnostic.contains("stderr diagnostic"));
+    let capture_prefix = format!("captured first {PIPE_CAPTURE_LIMIT} of ");
+    let totals = diagnostic
+        .match_indices(&capture_prefix)
+        .map(|(index, _)| {
+            diagnostic[index + capture_prefix.len()..]
+                .split_once(" bytes]")
+                .unwrap()
+                .0
+                .parse::<usize>()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        totals.len(),
+        2,
+        "both streams must report the capture bound"
+    );
+    assert!(
+        totals.iter().all(|total| *total > PIPE_CAPTURE_LIMIT * 2),
+        "both readers must drain beyond the retained prefix: {totals:?}"
+    );
+}
+
+#[test]
+fn child_guard_continuous_output_fixture() {
+    if std::env::var_os(CONTINUOUS_OUTPUT_FIXTURE).is_none() {
+        return;
+    }
+
+    let stdout_chunk = "stdout diagnostic\n".repeat(4096);
+    let stderr_chunk = "stderr diagnostic\n".repeat(4096);
+    let mut stdout = io::stdout().lock();
+    let mut stderr = io::stderr().lock();
+    loop {
+        stdout.write_all(stdout_chunk.as_bytes()).unwrap();
+        stderr.write_all(stderr_chunk.as_bytes()).unwrap();
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
