@@ -353,12 +353,11 @@ async fn tested_version_has_no_warning() {
         .unwrap();
 
     assert_eq!(connection.compatibility_warning(), None);
-    assert_eq!(connection.prefix_text("ready"), "ready");
     assert_eq!(harness.connection_count(), 1);
 }
 
 #[tokio::test]
-async fn untested_version_preserves_structured_result_and_prefixes_text() {
+async fn untested_version_exposes_connection_warning() {
     let untested_version = crate::test_support::different_stable_version(TESTED_CODEX_VERSION);
     let harness =
         FakeAppServer::start(FakeScript::happy().with_codex_version(&untested_version)).await;
@@ -367,17 +366,10 @@ async fn untested_version_preserves_structured_result_and_prefixes_text() {
         .connect_initialized()
         .await
         .unwrap();
-    let structured = json!({"threadId": "thread-1", "status": {"type": "idle"}});
+    let expected = format!(
+        "WARNING: Target Codex {untested_version} is untested. Codex session control was validated against Codex {TESTED_CODEX_VERSION}. Report this warning to the operator. The accompanying structured data remains authoritative."
+    );
 
-    assert_eq!(
-        structured,
-        json!({"threadId": "thread-1", "status": {"type": "idle"}})
-    );
-    assert_eq!(
-        connection.prefix_text("ready"),
-        format!(
-            "WARNING: Target Codex {untested_version} is untested. Codex session control was validated against Codex {TESTED_CODEX_VERSION}. Report this warning to the operator. The accompanying structured data remains authoritative.\n\nready"
-        )
-    );
+    assert_eq!(connection.compatibility_warning(), Some(expected.as_str()));
     assert_eq!(harness.connection_count(), 1);
 }

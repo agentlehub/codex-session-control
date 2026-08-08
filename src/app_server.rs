@@ -358,14 +358,6 @@ impl AppServerConnection {
         self.compatibility_warning.as_deref()
     }
 
-    #[cfg(test)]
-    pub fn prefix_text(&self, text: &str) -> String {
-        match &self.compatibility_warning {
-            Some(warning) => format!("{warning}\n\n{text}"),
-            None => text.to_owned(),
-        }
-    }
-
     async fn request_with_timeout<R: DeserializeOwned>(
         &mut self,
         tool: &'static str,
