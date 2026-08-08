@@ -125,22 +125,30 @@ pub(crate) fn turn_from_native(value: &Value, stage: &'static str) -> Result<Tur
     })
 }
 
-pub(crate) fn goal_from_native(response: &Value) -> Result<Option<ThreadGoal>, ToolErrorData> {
+pub(crate) fn goal_from_native(
+    response: &Value,
+    expected_thread_id: &str,
+    stage: &'static str,
+) -> Result<Option<ThreadGoal>, ToolErrorData> {
     let Some(goal) = response.get("goal") else {
-        return Err(malformed_native("thread/goal/get"));
+        return Err(malformed_native(stage));
     };
     if goal.is_null() {
         return Ok(None);
     }
+    let thread_id = required_string(goal, "threadId", stage)?;
+    if thread_id != expected_thread_id {
+        return Err(malformed_native(stage));
+    }
     Ok(Some(ThreadGoal {
-        thread_id: required_string(goal, "threadId", "thread/goal/get")?,
-        objective: required_string(goal, "objective", "thread/goal/get")?,
-        status: required_value::<ThreadGoalStatus>(goal, "status", "thread/goal/get")?,
-        token_budget: optional_u64(goal, "tokenBudget", "thread/goal/get")?,
-        tokens_used: required_u64(goal, "tokensUsed", "thread/goal/get")?,
-        time_used_seconds: required_u64(goal, "timeUsedSeconds", "thread/goal/get")?,
-        created_at: required_i64(goal, "createdAt", "thread/goal/get")?,
-        updated_at: required_i64(goal, "updatedAt", "thread/goal/get")?,
+        thread_id,
+        objective: required_string(goal, "objective", stage)?,
+        status: required_value::<ThreadGoalStatus>(goal, "status", stage)?,
+        token_budget: optional_u64(goal, "tokenBudget", stage)?,
+        tokens_used: required_u64(goal, "tokensUsed", stage)?,
+        time_used_seconds: required_u64(goal, "timeUsedSeconds", stage)?,
+        created_at: required_i64(goal, "createdAt", stage)?,
+        updated_at: required_i64(goal, "updatedAt", stage)?,
     }))
 }
 
