@@ -148,7 +148,7 @@ fn inspect_installed_artifacts(
 ) -> InstalledStatusState {
     let evidence = classify_selected_home_evidence(paths);
     match evidence.case {
-        InstalledEvidenceCase::ContradictoryV2 => failures.push(StatusFailure {
+        InstalledEvidenceCase::Contradictory => failures.push(StatusFailure {
             check: "configuration",
             detail: "stored identity differs from installed manifest".to_owned(),
             action: update_action.to_owned(),
@@ -158,9 +158,9 @@ fn inspect_installed_artifacts(
             detail: "partial product artifacts have no selected-home identity".to_owned(),
             action: setup_action.to_owned(),
         }),
-        InstalledEvidenceCase::CoherentV2
-        | InstalledEvidenceCase::ConfigurationOnlyV2
-        | InstalledEvidenceCase::ManifestOnlyV2
+        InstalledEvidenceCase::Coherent
+        | InstalledEvidenceCase::ConfigurationOnly
+        | InstalledEvidenceCase::ManifestOnly
         | InstalledEvidenceCase::FirstInstall
         | InstalledEvidenceCase::InvalidConfiguration
         | InstalledEvidenceCase::InvalidManifest => {}

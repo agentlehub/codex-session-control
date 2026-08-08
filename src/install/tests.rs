@@ -23,7 +23,7 @@ use super::{
     enable_disable::{disable_with_context, enable_with_context},
     evidence::{
         InstalledEvidenceCase, InvalidEvidence, NativeProductResidue, ResolvedUserPaths,
-        StoredEvidence, classify_selected_home_evidence,
+        SelectedHomeOperation, StoredEvidence, classify_selected_home_evidence,
         classify_selected_home_evidence_with_native_product_artifact, load_config_from_paths,
         read_configuration_evidence, read_manifest_evidence, require_selected_home_evidence,
         select_first_install_codex_home, selected_codex_home,

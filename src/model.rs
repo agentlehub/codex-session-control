@@ -244,7 +244,7 @@ impl<'de> Deserialize<'de> for InstalledReleaseWire {
             type Value = InstalledReleaseWire;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("an installed-release schema-2 object")
+                formatter.write_str("an installed-release schema 2 or 3 object")
             }
 
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
@@ -969,6 +969,18 @@ unknown = true
             let mut missing = manifest;
             missing.as_object_mut().unwrap().remove("desktopAttachment");
             assert!(serde_json::from_value::<InstalledRelease>(missing).is_err());
+        }
+
+        #[test]
+        fn installed_release_type_error_names_both_supported_wire_schemas() {
+            let error = serde_json::from_value::<InstalledRelease>(json!([])).unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("an installed-release schema 2 or 3 object"),
+                "{error}"
+            );
         }
 
         #[test]

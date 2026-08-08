@@ -25,7 +25,7 @@ use super::{
     CandidateRelease, DesktopAttachmentStatus, cleanup_changed_descriptor_after_start_failure,
     evidence::{
         InstalledEvidenceCase, NativeProductState, ResolvedUserPaths, SelectedHomeEvidence,
-        classify_selected_home_evidence, require_selected_home_evidence,
+        SelectedHomeOperation, classify_selected_home_evidence, require_selected_home_evidence,
         resolve_setup_selected_home,
     },
     native::{
@@ -567,25 +567,9 @@ pub(super) async fn setup_preflight(
         None => format!("retry: {} setup\n", context.candidate.executable.display()),
     };
     let evidence = classify_selected_home_evidence(&context.target.paths);
-    if matches!(
-        evidence.case,
-        InstalledEvidenceCase::InvalidConfiguration
-            | InstalledEvidenceCase::InvalidManifest
-            | InstalledEvidenceCase::ContradictoryV2
-    ) {
-        require_selected_home_evidence(
-            &context.target.paths,
-            &[
-                InstalledEvidenceCase::CoherentV2,
-                InstalledEvidenceCase::ConfigurationOnlyV2,
-                InstalledEvidenceCase::ManifestOnlyV2,
-                InstalledEvidenceCase::FirstInstall,
-                InstalledEvidenceCase::PartialArtifactsWithoutIdentity,
-            ],
-            "setup",
-        )
+    SelectedHomeOperation::Setup
+        .require_permitted_case(evidence.case)
         .map_err(|error| fail(error.to_string(), candidate_retry.clone()))?;
-    }
     let codex = evidence
         .configuration
         .as_ref()
@@ -604,18 +588,8 @@ pub(super) async fn setup_preflight(
     let native = resolve_setup_selected_home(&mut context.target.paths, &codex)
         .map_err(|error| fail(error.to_string(), candidate_retry.clone()))?;
     let paths = &context.target.paths;
-    require_selected_home_evidence(
-        paths,
-        &[
-            InstalledEvidenceCase::CoherentV2,
-            InstalledEvidenceCase::ConfigurationOnlyV2,
-            InstalledEvidenceCase::ManifestOnlyV2,
-            InstalledEvidenceCase::FirstInstall,
-            InstalledEvidenceCase::PartialArtifactsWithoutIdentity,
-        ],
-        "setup",
-    )
-    .map_err(|error| fail(error.to_string(), candidate_retry.clone()))?;
+    require_selected_home_evidence(paths, SelectedHomeOperation::Setup)
+        .map_err(|error| fail(error.to_string(), candidate_retry.clone()))?;
     if !context.candidate.executable.is_absolute()
         || !context.cwd.is_absolute()
         || context.candidate.product_version.is_empty()
