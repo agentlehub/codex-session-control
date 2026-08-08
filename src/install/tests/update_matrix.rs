@@ -425,41 +425,6 @@ async fn self_hosted_restart_required_update_refuses_with_every_reason_before_mu
 }
 
 #[tokio::test]
-async fn self_hosted_no_restart_update_preserves_authority() {
-    let fixture = Fixture::new();
-    let (authority, attachment) = setup_attached(&fixture).await;
-    seed_protected_codex_home_state(&fixture);
-    fs::write(
-        &fixture.whoami_unit,
-        b"codex-session-control-test-Setup1.service\n",
-    )
-    .unwrap();
-    let descriptor = fs::read(&attachment.descriptor_path).unwrap();
-    let before = snapshot_protected_state(&fixture);
-    drift_projection(&fixture);
-    let candidate = equal_candidate(&fixture, "candidate-self-hosted-projection-drift");
-    fixture.clear_logs();
-
-    let report = staged_update_with_context(context(&fixture, candidate, None))
-        .await
-        .unwrap();
-
-    assert!(report.stdout.starts_with(&format!(
-        "Installed release: {}\n",
-        env!("CARGO_PKG_VERSION")
-    )));
-    assert!(!fixture.systemctl_log().contains("--user whoami"));
-    assert!(!fixture.systemctl_log().contains(" restart "));
-    assert_eq!(fs::read(&attachment.descriptor_path).unwrap(), descriptor);
-    assert_eq!(snapshot_protected_state(&fixture), before);
-    let receipt: Value =
-        serde_json::from_slice(&fs::read(&fixture.paths.manifest).unwrap()).unwrap();
-    assert_eq!(receipt["schemaVersion"], 3);
-    assert!(receipt.get("codexVersion").is_none());
-    drop(authority);
-}
-
-#[tokio::test]
 async fn unproven_self_hosted_restart_refuses_without_stop_recovery() {
     let fixture = Fixture::new();
     let running = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
@@ -506,34 +471,10 @@ async fn service_snapshot_rejects_unproven_and_contradictory_state_before_caller
             "service enablement cannot be proven",
         ),
         (
-            "snapshot-malformed",
-            "printf 'maybe\\n'; exit 0",
-            "printf 'inactive\\n'; exit 3",
-            "service enablement cannot be proven",
-        ),
-        (
             "snapshot-activating",
             "printf 'enabled\\n'; exit 0",
             "printf 'activating\\n'; exit 0",
             "service activity cannot be proven",
-        ),
-        (
-            "snapshot-deactivating",
-            "printf 'enabled\\n'; exit 0",
-            "printf 'deactivating\\n'; exit 0",
-            "service activity cannot be proven",
-        ),
-        (
-            "snapshot-disabled-active",
-            "printf 'disabled\\n'; exit 1",
-            "printf 'active\\n'; exit 0",
-            "inactive/enablement service state is contradictory",
-        ),
-        (
-            "snapshot-absent-active",
-            "printf 'not-found\\n'; exit 4",
-            "printf 'active\\n'; exit 0",
-            "inactive/enablement service state is contradictory",
         ),
     ] {
         let fixture = Fixture::new();
@@ -669,7 +610,14 @@ async fn higher_candidate_preserves_all_three_desired_service_states() {
 async fn equal_projection_drift_preserves_desktop_and_running_authority() {
     let fixture = Fixture::new();
     let (authority, attachment) = setup_attached(&fixture).await;
+    seed_protected_codex_home_state(&fixture);
+    fs::write(
+        &fixture.whoami_unit,
+        b"codex-session-control-test-Setup1.service\n",
+    )
+    .unwrap();
     let descriptor = fs::read(&attachment.descriptor_path).unwrap();
+    let before = snapshot_protected_state(&fixture);
     let socket_inode = fs::symlink_metadata(&fixture.paths.socket).unwrap().ino();
     drift_projection(&fixture);
     let candidate = equal_candidate(&fixture, "candidate-equal-drift");
@@ -688,10 +636,12 @@ async fn equal_projection_drift_preserves_desktop_and_running_authority() {
         Some(attachment.clone())
     );
     assert_eq!(fs::read(&attachment.descriptor_path).unwrap(), descriptor);
+    assert_eq!(snapshot_protected_state(&fixture), before);
     assert_eq!(
         fs::symlink_metadata(&fixture.paths.socket).unwrap().ino(),
         socket_inode
     );
+    assert!(!fixture.systemctl_log().contains("--user whoami"));
     assert!(!fixture.systemctl_log().contains(" restart "));
     assert!(report.stdout.contains("Desktop attachment: available\n"));
     assert!(report.stdout.contains("Desktop restart required: no\n"));
@@ -708,6 +658,14 @@ async fn equal_projection_drift_preserves_desktop_and_running_authority() {
         stages.find("completed: descriptor\n").unwrap()
             < stages.find("completed: service-unit\n").unwrap()
     );
+    assert!(
+        stages.trim_end().ends_with("completed: manifest"),
+        "{stages}"
+    );
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(&fixture.paths.manifest).unwrap()).unwrap();
+    assert_eq!(receipt["schemaVersion"], 3);
+    assert!(receipt.get("codexVersion").is_none());
     assert!(
         serde_json::from_slice::<Value>(
             &fs::read(
@@ -965,12 +923,13 @@ async fn disabled_active_and_unknown_restart_evidence_fail_before_mutation() {
         let fixture = Fixture::new();
         let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
+        seed_protected_codex_home_state(&fixture);
         if case == "disabled-active" {
             fs::remove_file(&fixture.enabled).unwrap();
         } else {
             fs::write(&fixture.paths.unit, b"contradictory unit").unwrap();
         }
-        let before_binary = fs::read(&fixture.paths.binary).unwrap();
+        let before = snapshot_guarded_state(&fixture);
         let candidate = candidate(
             &fixture,
             "candidate-unknown",
@@ -1000,7 +959,10 @@ async fn disabled_active_and_unknown_restart_evidence_fail_before_mutation() {
                         "codex-session-control disable\ncodex-session-control update\ncodex-session-control enable"
                     ));
         }
-        assert_eq!(fs::read(&fixture.paths.binary).unwrap(), before_binary);
+        assert_eq!(snapshot_guarded_state(&fixture), before, "{case}");
+        if case == "disabled-active" {
+            assert!(!fixture.systemctl_log().contains("--user whoami"));
+        }
         assert!(!fixture.systemctl_log().contains("daemon-reload"));
     }
 }

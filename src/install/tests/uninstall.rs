@@ -193,6 +193,7 @@ async fn active_self_hosted_uninstall_refuses_before_every_removal() {
             .to_string()
             .contains("codex-session-control uninstall")
     );
+    assert!(!error.to_string().contains("completed:"));
     assert_eq!(
         fixture.systemctl_log(),
         "--user is-active codex-session-control-test-Setup1.service\n--user whoami\n"

@@ -92,6 +92,7 @@ async fn active_self_hosted_disable_refuses_before_stop_and_descriptor_removal()
             .contains("running inside the managed app-server")
     );
     assert!(error.to_string().contains("codex-session-control disable"));
+    assert!(!error.to_string().contains("completed:"));
     assert_eq!(
         fixture.systemctl_log(),
         service_log_prefix(&fixture) + "--user whoami\n"
@@ -108,7 +109,6 @@ async fn disable_stop_preflight_is_fail_closed_and_preserves_independent_or_inac
         "self-hosted-control-group",
         "unknown-caller",
         "unproven-activity",
-        "independent-active",
         "proven-inactive",
     ] {
         let fixture = Fixture::new();
@@ -140,7 +140,6 @@ async fn disable_stop_preflight_is_fail_closed_and_preserves_independent_or_inac
                 .unwrap();
                 None
             }
-            "independent-active" => None,
             "proven-inactive" => {
                 drop(authority);
                 fs::remove_file(&fixture.active).unwrap();
@@ -188,17 +187,6 @@ async fn disable_stop_preflight_is_fail_closed_and_preserves_independent_or_inac
                 assert!(!fixture.systemctl_log().contains("--user whoami"));
                 assert!(!fixture.systemctl_log().contains("disable --now"));
             }
-            "independent-active" => {
-                result.unwrap();
-                assert_eq!(
-                    fixture.systemctl_log(),
-                    service_log_prefix(&fixture)
-                        + "--user whoami\n"
-                        + "--user disable --now codex-session-control-test-Setup1.service\n"
-                        + "--user is-enabled codex-session-control-test-Setup1.service\n"
-                        + "--user is-active codex-session-control-test-Setup1.service\n"
-                );
-            }
             "proven-inactive" => {
                 result.unwrap();
                 assert_eq!(fixture.systemctl_log(), expected_log.unwrap());
@@ -221,6 +209,14 @@ async fn disable_removes_only_the_exact_descriptor_after_service_proof() {
     assert!(!fixture.active.exists());
     assert!(!fixture.paths.socket.exists());
     assert!(!descriptor(&fixture).exists());
+    assert_eq!(
+        fixture.systemctl_log(),
+        service_log_prefix(&fixture)
+            + "--user whoami\n"
+            + "--user disable --now codex-session-control-test-Setup1.service\n"
+            + "--user is-enabled codex-session-control-test-Setup1.service\n"
+            + "--user is-active codex-session-control-test-Setup1.service\n"
+    );
     assert_eq!(
         report.stderr,
         "completed: service-disable\n\
