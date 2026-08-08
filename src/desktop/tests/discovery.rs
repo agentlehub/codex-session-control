@@ -6,14 +6,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::error::ControllerError;
+
 use super::{
     super::{
-        DESCRIPTOR_FILE_NAME, DESKTOP_ENTRY_NAME, DesktopAvailability, discover_and_verify_desktop,
+        DESCRIPTOR_FILE_NAME, DESKTOP_ENTRY_NAME, DesktopAvailability,
         discovery::{
             application_search_roots, desktop_entry_path, effective_config_root,
             inspect_build_info, validate_launcher,
         },
-        verify_persisted_desktop,
+        probe_desktop_capability, probe_persisted_desktop_capability, publish_descriptor,
+        render_descriptor,
     },
     environment, write_environment_launcher, write_executable_fixture, write_file, write_launcher,
 };
@@ -82,7 +85,7 @@ async fn discovery_uses_direct_argv_and_requires_complete_capable_build_info() {
     );
     let mut env = environment(&home);
     env.insert("XDG_CONFIG_HOME".into(), config.as_os_str().to_owned());
-    let target = discover_and_verify_desktop(Some(&launcher), &env)
+    let target = probe_desktop_capability(Some(&launcher), &env)
         .await
         .unwrap();
     let DesktopAvailability::Verified(target) = target else {
@@ -95,7 +98,7 @@ async fn discovery_uses_direct_argv_and_requires_complete_capable_build_info() {
     );
     assert_eq!(target.command.environment, BTreeMap::new());
     assert!(matches!(
-        verify_persisted_desktop(&target.identity, &env)
+        probe_persisted_desktop_capability(&target.identity, &env)
             .await
             .unwrap(),
         DesktopAvailability::Verified(_)
@@ -108,20 +111,20 @@ async fn discovery_uses_direct_argv_and_requires_complete_capable_build_info() {
         r#"["external-app-server-attachment-descriptor-v1"]"#,
     );
     assert!(matches!(
-        discover_and_verify_desktop(Some(&launcher), &env)
+        probe_desktop_capability(Some(&launcher), &env)
             .await
             .unwrap(),
         DesktopAvailability::Unavailable { .. }
     ));
     write_launcher(&launcher, &log, "codex-desktop", "[]");
     assert!(matches!(
-        discover_and_verify_desktop(Some(&launcher), &env)
+        probe_desktop_capability(Some(&launcher), &env)
             .await
             .unwrap(),
         DesktopAvailability::Unavailable { .. }
     ));
     assert!(matches!(
-        discover_and_verify_desktop(Some(Path::new("relative-launcher")), &env)
+        probe_desktop_capability(Some(Path::new("relative-launcher")), &env)
             .await
             .unwrap(),
         DesktopAvailability::Unavailable { .. }
@@ -146,7 +149,7 @@ async fn discovery_uses_direct_argv_and_requires_complete_capable_build_info() {
         0o600,
     );
     env.insert("XDG_DATA_HOME".into(), data_home.as_os_str().to_owned());
-    let target = discover_and_verify_desktop(None, &env).await.unwrap();
+    let target = probe_desktop_capability(None, &env).await.unwrap();
     let DesktopAvailability::Verified(target) = target else {
         panic!("Desktop entry must verify");
     };
@@ -162,7 +165,7 @@ async fn discovery_uses_direct_argv_and_requires_complete_capable_build_info() {
             target.command.effective_config_root.as_os_str().to_owned()
         )])
     );
-    let persisted = verify_persisted_desktop(&target.identity, &env)
+    let persisted = probe_persisted_desktop_capability(&target.identity, &env)
         .await
         .unwrap();
     let DesktopAvailability::Verified(persisted) = persisted else {
@@ -257,6 +260,79 @@ fn xdg_empty_values_default_and_relative_roots_are_ignored_without_other_filenam
 }
 
 #[tokio::test]
+async fn capability_probe_leaves_descriptor_parent_for_publication() {
+    let root = crate::test_support::private_tempdir();
+    let home = root.path().join("home");
+    let config = root.path().join("config");
+    let launcher = root.path().join("codex-desktop");
+    let log = root.path().join("argv.log");
+    write_launcher(
+        &launcher,
+        &log,
+        "codex-desktop",
+        r#"["external-app-server-attachment-descriptor-v1"]"#,
+    );
+    let mut env = environment(&home);
+    env.insert("XDG_CONFIG_HOME".into(), config.as_os_str().to_owned());
+
+    let DesktopAvailability::Verified(target) = probe_desktop_capability(Some(&launcher), &env)
+        .await
+        .unwrap()
+    else {
+        panic!("capable launcher must probe successfully");
+    };
+    assert!(
+        !config.exists(),
+        "capability probing must not create the descriptor config root"
+    );
+    assert!(
+        !config.join("codex-desktop").exists(),
+        "capability probing must leave descriptor-parent creation to publication"
+    );
+    let descriptor = render_descriptor(Path::new("/run/user/1000/app-server.sock")).unwrap();
+    assert!(publish_descriptor(&target.identity, &descriptor).unwrap());
+    assert!(config.is_dir());
+    assert_eq!(
+        fs::read(&target.identity.descriptor_path).unwrap(),
+        descriptor
+    );
+}
+
+#[tokio::test]
+async fn capability_probe_rejects_lexically_unnormalized_config_root() {
+    let root = crate::test_support::private_tempdir();
+    let home = root.path().join("home");
+    let launcher = root.path().join("codex-desktop");
+    let log = root.path().join("argv.log");
+    write_launcher(
+        &launcher,
+        &log,
+        "codex-desktop",
+        r#"["external-app-server-attachment-descriptor-v1"]"#,
+    );
+    let mut env = environment(&home);
+    env.insert(
+        "XDG_CONFIG_HOME".into(),
+        root.path()
+            .join("safe")
+            .join("..")
+            .join("other")
+            .into_os_string(),
+    );
+
+    let error = probe_desktop_capability(Some(&launcher), &env)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ControllerError::InvalidData {
+            field: "desktop_attachment.descriptor_path",
+            reason: "path must be lexically normalized",
+        }
+    ));
+}
+
+#[tokio::test]
 async fn override_and_launcher_validation_require_a_direct_owner_executable_not_a_desktop_entry() {
     let root = crate::test_support::private_tempdir();
     let home = root.path().join("home");
@@ -274,7 +350,7 @@ async fn override_and_launcher_validation_require_a_direct_owner_executable_not_
         r#"["external-app-server-attachment-descriptor-v1"]"#,
     );
     assert!(matches!(
-        discover_and_verify_desktop(Some(&launcher), &env)
+        probe_desktop_capability(Some(&launcher), &env)
             .await
             .unwrap(),
         DesktopAvailability::Verified(_)
@@ -286,7 +362,7 @@ async fn override_and_launcher_validation_require_a_direct_owner_executable_not_
         r#"["external-app-server-attachment-descriptor-v1"]"#,
     );
     assert!(matches!(
-        discover_and_verify_desktop(Some(&spaced_launcher), &env)
+        probe_desktop_capability(Some(&spaced_launcher), &env)
             .await
             .unwrap(),
         DesktopAvailability::Verified(_)
@@ -300,7 +376,7 @@ async fn override_and_launcher_validation_require_a_direct_owner_executable_not_
         r#"["external-app-server-attachment-descriptor-v1"]"#,
     );
     assert!(matches!(
-        discover_and_verify_desktop(Some(&desktop_file), &env)
+        probe_desktop_capability(Some(&desktop_file), &env)
             .await
             .unwrap(),
         DesktopAvailability::Unavailable { .. }
@@ -360,7 +436,7 @@ async fn launcher_rejects_cross_uid_replaceable_ancestors_before_spawning_a_repl
     );
     let mut env = environment(&home);
     env.insert("XDG_CONFIG_HOME".into(), config.as_os_str().to_owned());
-    let availability = discover_and_verify_desktop(Some(&unsafe_launcher), &env)
+    let availability = probe_desktop_capability(Some(&unsafe_launcher), &env)
         .await
         .unwrap();
     assert!(
@@ -403,7 +479,7 @@ async fn discovery_classifies_absent_hidden_malformed_unreadable_and_unexecutabl
     ] {
         write_file(&entry, bytes, 0o600);
         assert!(matches!(
-            discover_and_verify_desktop(None, &env).await.unwrap(),
+            probe_desktop_capability(None, &env).await.unwrap(),
             DesktopAvailability::Unavailable { .. }
         ));
     }
@@ -413,12 +489,12 @@ async fn discovery_classifies_absent_hidden_malformed_unreadable_and_unexecutabl
         0o600,
     );
     assert!(matches!(
-        discover_and_verify_desktop(None, &env).await.unwrap(),
+        probe_desktop_capability(None, &env).await.unwrap(),
         DesktopAvailability::Unavailable { .. }
     ));
     fs::set_permissions(&entry, fs::Permissions::from_mode(0o000)).unwrap();
     assert!(matches!(
-        discover_and_verify_desktop(None, &env).await.unwrap(),
+        probe_desktop_capability(None, &env).await.unwrap(),
         DesktopAvailability::Unavailable { .. }
     ));
     write_launcher(
@@ -434,11 +510,13 @@ async fn discovery_classifies_absent_hidden_malformed_unreadable_and_unexecutabl
         "XDG_CONFIG_HOME".into(),
         unsafe_config.as_os_str().to_owned(),
     );
-    assert!(
-        discover_and_verify_desktop(Some(&launcher), &env)
+    assert!(matches!(
+        probe_desktop_capability(Some(&launcher), &env)
             .await
-            .is_err()
-    );
+            .unwrap(),
+        DesktopAvailability::Verified(_)
+    ));
+    assert!(!unsafe_config.join("codex-desktop").exists());
 }
 
 #[tokio::test]
@@ -465,7 +543,7 @@ async fn desktop_entry_environment_is_the_exact_child_environment_used_for_build
     );
     let mut env = environment(&home);
     env.insert("XDG_DATA_HOME".into(), data_home.as_os_str().to_owned());
-    let target = discover_and_verify_desktop(None, &env).await.unwrap();
+    let target = probe_desktop_capability(None, &env).await.unwrap();
     let DesktopAvailability::Verified(target) = target else {
         panic!("valid Desktop entry must verify");
     };

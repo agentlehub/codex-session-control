@@ -44,10 +44,34 @@ async fn write_response(stream: &mut TcpStream, content_length: u64, body: &[u8]
     stream.shutdown().await.unwrap();
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FailedAsset {
+    Binary,
+    Checksums,
+}
+
 async fn release_server(
     binary: Vec<u8>,
     checksum_body: Vec<u8>,
-) -> (ReleaseEndpoints, Arc<Mutex<Vec<String>>>) {
+    request_count: usize,
+) -> (
+    ReleaseEndpoints,
+    Arc<Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    release_server_with_failure(binary, checksum_body, None, request_count).await
+}
+
+async fn release_server_with_failure(
+    binary: Vec<u8>,
+    checksum_body: Vec<u8>,
+    failed_asset: Option<FailedAsset>,
+    request_count: usize,
+) -> (
+    ReleaseEndpoints,
+    Arc<Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -74,8 +98,8 @@ async fn release_server(
     .to_string()
     .into_bytes();
     let served_base = base.clone();
-    tokio::spawn(async move {
-        for _ in 0..3 {
+    let server = tokio::spawn(async move {
+        for _ in 0..request_count {
             let (mut stream, _) = listener.accept().await.unwrap();
             let request = read_request(&mut stream).await;
             let path = request
@@ -92,10 +116,31 @@ async fn release_server(
                     write_response(&mut stream, metadata.len() as u64, &metadata).await;
                 }
                 path if path.ends_with(&format!("/{binary_name}")) => {
-                    write_response(&mut stream, binary.len() as u64, &binary).await;
+                    if failed_asset == Some(FailedAsset::Binary) {
+                        stream
+                            .write_all(
+                                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await
+                            .unwrap();
+                        stream.shutdown().await.unwrap();
+                    } else {
+                        write_response(&mut stream, binary.len() as u64, &binary).await;
+                    }
                 }
                 path if path.ends_with("/SHA256SUMS") => {
-                    write_response(&mut stream, checksum_body.len() as u64, &checksum_body).await;
+                    if failed_asset == Some(FailedAsset::Checksums) {
+                        stream
+                            .write_all(
+                                b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            )
+                            .await
+                            .unwrap();
+                        stream.shutdown().await.unwrap();
+                    } else {
+                        write_response(&mut stream, checksum_body.len() as u64, &checksum_body)
+                            .await;
+                    }
                 }
                 _ => panic!("unexpected request: {path}"),
             }
@@ -107,6 +152,7 @@ async fn release_server(
             downloads: served_base,
         },
         requests,
+        server,
     )
 }
 
@@ -141,7 +187,7 @@ async fn latest_metadata_resolves_once_to_exact_immutable_assets() {
     let binary = b"release bytes".to_vec();
     let digest = hex::encode(Sha256::digest(&binary));
     let checksums = format!("{digest}  codex-session-control-{}\n", product_target());
-    let (endpoints, requests) = release_server(binary, checksums.into_bytes()).await;
+    let (endpoints, requests, server) = release_server(binary, checksums.into_bytes(), 1).await;
     let client = build_release_client().unwrap();
 
     let release = discover_latest_release(&client, &endpoints, product_target())
@@ -174,6 +220,7 @@ async fn latest_metadata_resolves_once_to_exact_immutable_assets() {
         requests.lock().unwrap().as_slice(),
         ["/repos/agentlehub/codex-session-control/releases/latest"]
     );
+    server.await.unwrap();
 }
 
 #[tokio::test]
@@ -181,7 +228,8 @@ async fn release_files_stream_privately_with_exact_sizes_and_checksum() {
     let binary = vec![0x5a; 17 * 1024 * 1024 + 3];
     let digest = hex::encode(Sha256::digest(&binary));
     let checksums = format!("{digest}  codex-session-control-{}\n", product_target());
-    let (endpoints, requests) = release_server(binary.clone(), checksums.into_bytes()).await;
+    let (endpoints, requests, server) =
+        release_server(binary.clone(), checksums.into_bytes(), 3).await;
     let client = build_release_client().unwrap();
     let release = discover_latest_release(&client, &endpoints, product_target())
         .await
@@ -211,6 +259,94 @@ async fn release_files_stream_privately_with_exact_sizes_and_checksum() {
         0o600
     );
     assert_eq!(requests.lock().unwrap().len(), 3);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn binary_and_checksum_transfer_failures_are_download_failures_with_cleanup() {
+    let binary = b"release-binary".to_vec();
+    let digest = hex::encode(Sha256::digest(&binary));
+    let checksums = format!("{digest}  codex-session-control-{}\n", product_target());
+
+    for failed_asset in [FailedAsset::Binary, FailedAsset::Checksums] {
+        let (endpoints, _, server) = release_server_with_failure(
+            binary.clone(),
+            checksums.clone().into_bytes(),
+            Some(failed_asset),
+            if failed_asset == FailedAsset::Binary {
+                2
+            } else {
+                3
+            },
+        )
+        .await;
+        let client = build_release_client().unwrap();
+        let release = discover_latest_release(&client, &endpoints, product_target())
+            .await
+            .unwrap();
+        let destination = crate::test_support::private_tempdir();
+        let binary_path = destination.path().join(&release.binary.name);
+        let checksums_path = destination.path().join(&release.checksums.name);
+
+        let error = download_verified_release(&client, &release, destination.path())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(&error, ReleaseDownloadError::Download(_)));
+        assert_eq!(error.to_string(), "release-download request failed");
+        assert!(!binary_path.exists(), "{failed_asset:?}");
+        assert!(!checksums_path.exists(), "{failed_asset:?}");
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn malformed_and_mismatched_checksums_are_integrity_failures_with_cleanup() {
+    let binary = b"release-binary".to_vec();
+    let binary_name = format!("codex-session-control-{}", product_target());
+
+    for (checksums, expected_message) in [
+        (
+            format!("malformed  {binary_name}\n"),
+            "checksum entry is malformed",
+        ),
+        (
+            format!("{}  {binary_name}\n", "0".repeat(64)),
+            "checksum does not match release asset",
+        ),
+    ] {
+        let (endpoints, _, server) =
+            release_server(binary.clone(), checksums.into_bytes(), 3).await;
+        let client = build_release_client().unwrap();
+        let release = discover_latest_release(&client, &endpoints, product_target())
+            .await
+            .unwrap();
+        let destination = crate::test_support::private_tempdir();
+        let binary_path = destination.path().join(&release.binary.name);
+        let checksums_path = destination.path().join(&release.checksums.name);
+
+        let error = download_verified_release(&client, &release, destination.path())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(&error, ReleaseDownloadError::Integrity(_)));
+        assert_eq!(error.to_string(), expected_message);
+        assert!(!binary_path.exists(), "{expected_message}");
+        assert!(!checksums_path.exists(), "{expected_message}");
+        server.await.unwrap();
+    }
+}
+
+#[test]
+fn checksum_file_read_failure_has_the_integrity_diagnostic() {
+    let directory = crate::test_support::private_tempdir();
+    let checksums_path = directory.path().join("missing-SHA256SUMS");
+
+    let error =
+        verify_release_integrity(&checksums_path, "release-binary", &"0".repeat(64)).unwrap_err();
+
+    assert_eq!(error.to_string(), "checksum file cannot be read");
+    assert!(!checksums_path.exists());
 }
 
 #[test]

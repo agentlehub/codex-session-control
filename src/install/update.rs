@@ -10,8 +10,8 @@ use std::{
 use crate::{
     app_server::{AppServerClient, TESTED_CODEX_VERSION},
     desktop::{
-        DescriptorState, DesktopAvailability, inspect_descriptor, publish_descriptor,
-        render_descriptor, verify_persisted_desktop,
+        DescriptorState, DesktopAvailability, inspect_descriptor,
+        probe_persisted_desktop_capability, publish_descriptor, render_descriptor,
     },
     error::ControllerError,
     model::{InstalledRelease, ProductConfig, Thread, ThreadStatus},
@@ -20,7 +20,7 @@ use crate::{
 use super::{
     CandidateRelease, DesktopAttachmentStatus, LifecycleContext, LifecycleReceipt,
     display_command_for_paths,
-    evidence::{InstalledEvidenceCase, ResolvedUserPaths, require_selected_home_evidence},
+    evidence::{ResolvedUserPaths, SelectedHomeOperation, require_selected_home_evidence},
     native::{
         read_codex_version, reconcile_marketplace, reconcile_plugin, resolve_named_executable,
     },
@@ -30,8 +30,8 @@ use super::{
     },
     product_target,
     release::{
-        ReleaseEndpoints, build_release_client, discover_latest_release, download_verified_release,
-        production_release_endpoints, release_target_for_arch,
+        ReleaseDownloadError, ReleaseEndpoints, build_release_client, discover_latest_release,
+        download_verified_release, production_release_endpoints, release_target_for_arch,
     },
     render::{reconcile_projection, render_projection, render_unit},
     service::{
@@ -98,6 +98,13 @@ pub(super) enum UpdateStage {
     ServiceApply,
     ServiceVerify,
     Manifest,
+}
+
+pub(super) fn release_failure_stage(error: &ReleaseDownloadError) -> UpdateStage {
+    match error {
+        ReleaseDownloadError::Download(_) => UpdateStage::ReleaseDownload,
+        ReleaseDownloadError::Integrity(_) => UpdateStage::Checksum,
+    }
 }
 
 impl UpdateStage {
@@ -356,12 +363,8 @@ pub(super) async fn outer_update_with_endpoints(
     let downloaded = download_verified_release(&client, &release, directory.path())
         .await
         .map_err(|error| {
-            let stage = if error.to_string().contains("checksum") {
-                UpdateStage::Checksum
-            } else {
-                UpdateStage::ReleaseDownload
-            };
-            progress.fail(stage, error, &retry)
+            let stage = release_failure_stage(&error);
+            progress.fail(stage, error.into_controller_error(), &retry)
         })?;
     complete_lifecycle_stage!(
         progress,
@@ -700,7 +703,7 @@ disable stops running turns; the final enable is needed only when the service sh
     let (desktop_status, desktop_warning) = match manifest.desktop_attachment.as_ref() {
         None => (DesktopAttachmentStatus::Unavailable, None),
         Some(identity) => {
-            match verify_persisted_desktop(identity, &lifecycle.desktop_environment)
+            match probe_persisted_desktop_capability(identity, &lifecycle.desktop_environment)
                 .await
                 .map_err(|error| progress.fail(UpdateStage::DesktopDiscovery, error, &retry))?
             {
@@ -947,14 +950,7 @@ fn inspect_candidate(path: &Path) -> Result<CandidateRelease, ControllerError> {
 }
 
 fn load_update_manifest(paths: &ResolvedUserPaths) -> Result<InstalledRelease, ControllerError> {
-    let evidence = require_selected_home_evidence(
-        paths,
-        &[
-            InstalledEvidenceCase::CoherentV2,
-            InstalledEvidenceCase::ManifestOnlyV2,
-        ],
-        "update",
-    )?;
+    let evidence = require_selected_home_evidence(paths, SelectedHomeOperation::Update)?;
     let expected = evidence
         .manifest
         .ok_or_else(|| ControllerError::Operational("installed manifest is invalid".to_owned()))?;

@@ -166,3 +166,29 @@ async fn explicit_goal_target_never_loads_cross_authority_caller() {
             .contains(caller)
     );
 }
+
+#[tokio::test]
+async fn goal_get_rejects_response_for_a_different_thread() {
+    let harness = FakeAppServer::start(vec![FakeStep::result(
+        "thread/goal/get",
+        json!({"threadId": "target"}),
+        json!({"goal": native_goal("different-thread", "active")}),
+    )])
+    .await;
+
+    let error = execute_tool(
+        "thread_goal_get",
+        ValidatedInput::ThreadGoalGet(ThreadGoalGetInput {
+            thread_id: "target".to_owned(),
+        }),
+        &harness.config,
+    )
+    .await
+    .unwrap_err();
+    let error: ToolErrorData = serde_json::from_value(error.data.unwrap()).unwrap();
+
+    assert_eq!(error.category, ToolErrorCategory::NativeError);
+    assert_eq!(error.tool, "thread_goal_get");
+    assert_eq!(error.stage, "thread/goal/get");
+    assert_eq!(harness.log().len(), 1);
+}
