@@ -409,7 +409,7 @@ pub(super) async fn goal_mutation(
         &context,
     )
     .await?;
-    goal_from_native(&response, "thread/goal/set")?
+    goal_from_native(&response, context.thread_id(), "thread/goal/set")?
         .ok_or_else(|| malformed_result(tool, "thread/goal/set"))
 }
 

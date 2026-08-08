@@ -127,6 +127,7 @@ pub(crate) fn turn_from_native(value: &Value, stage: &'static str) -> Result<Tur
 
 pub(crate) fn goal_from_native(
     response: &Value,
+    expected_thread_id: &str,
     stage: &'static str,
 ) -> Result<Option<ThreadGoal>, ToolErrorData> {
     let Some(goal) = response.get("goal") else {
@@ -135,8 +136,12 @@ pub(crate) fn goal_from_native(
     if goal.is_null() {
         return Ok(None);
     }
+    let thread_id = required_string(goal, "threadId", stage)?;
+    if thread_id != expected_thread_id {
+        return Err(malformed_native(stage));
+    }
     Ok(Some(ThreadGoal {
-        thread_id: required_string(goal, "threadId", stage)?,
+        thread_id,
         objective: required_string(goal, "objective", stage)?,
         status: required_value::<ThreadGoalStatus>(goal, "status", stage)?,
         token_budget: optional_u64(goal, "tokenBudget", stage)?,

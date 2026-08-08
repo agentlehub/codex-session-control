@@ -152,6 +152,37 @@ async fn malformed_goal_mutation_results_are_attributed_to_the_set_stage() {
 }
 
 #[tokio::test]
+async fn goal_set_rejects_response_for_a_different_thread() {
+    let harness = FakeAppServer::start(vec![FakeStep::result(
+        "thread/goal/set",
+        json!({
+            "threadId": "target",
+            "objective": "replacement objective",
+            "status": "active",
+        }),
+        json!({"goal": native_goal("different-thread", "active")}),
+    )])
+    .await;
+
+    let error = execute_tool(
+        "thread_goal_set",
+        ValidatedInput::ThreadGoalSet(ThreadGoalSetInput {
+            thread_id: "target".to_owned(),
+            objective: "replacement objective".to_owned(),
+        }),
+        &harness.config,
+    )
+    .await
+    .unwrap_err();
+    let error: ToolErrorData = serde_json::from_value(error.data.unwrap()).unwrap();
+
+    assert_eq!(error.category, ToolErrorCategory::NativeError);
+    assert_eq!(error.tool, "thread_goal_set");
+    assert_eq!(error.stage, "thread/goal/set");
+    assert_eq!(harness.log().len(), 1);
+}
+
+#[tokio::test]
 async fn absent_goal_pause_and_resume_still_issue_exactly_one_native_mutation() {
     for (tool, status) in [
         ("thread_goal_pause", "paused"),
