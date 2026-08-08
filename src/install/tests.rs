@@ -23,7 +23,7 @@ use super::{
     enable_disable::{disable_with_context, enable_with_context},
     evidence::{
         InstalledEvidenceCase, InvalidEvidence, NativeProductResidue, ResolvedUserPaths,
-        StoredEvidence, classify_selected_home_evidence,
+        SelectedHomeOperation, StoredEvidence, classify_selected_home_evidence,
         classify_selected_home_evidence_with_native_product_artifact, load_config_from_paths,
         read_configuration_evidence, read_manifest_evidence, require_selected_home_evidence,
         select_first_install_codex_home, selected_codex_home,
@@ -38,10 +38,10 @@ use super::{
     product_target,
     release::{
         RELEASE_CONNECT_TIMEOUT, RELEASE_METADATA_TIMEOUT, RELEASE_TRANSFER_IDLE_TIMEOUT,
-        ReleaseAsset, ReleaseEndpoints, ReleaseStage, build_release_client,
+        ReleaseAsset, ReleaseDownloadError, ReleaseEndpoints, ReleaseStage, build_release_client,
         discover_latest_release, download_verified_release, production_release_endpoints,
         release_target_for_arch, stream_release_asset, validate_checksum_entry,
-        with_release_stage_timeout,
+        verify_release_integrity, with_release_stage_timeout,
     },
     render::{render_projection, render_unit},
     service::{
@@ -56,8 +56,9 @@ use super::{
     test_target,
     uninstall::uninstall_with_context,
     update::{
-        TerminalState, UpdateContext, baseline_active_turn_gate, list_active_threads,
-        outer_update_with_endpoints, run_candidate_apply, staged_update_with_context,
+        TerminalState, UpdateContext, UpdateStage, baseline_active_turn_gate, list_active_threads,
+        outer_update_with_endpoints, release_failure_stage, run_candidate_apply,
+        staged_update_with_context,
     },
     wrapper::{exec_codex_wrapper_command, prepare_codex_wrapper},
 };
@@ -80,6 +81,73 @@ fn higher_test_release_version() -> String {
         .expect("package minor version must permit a higher test release");
 
     semver::Version::new(current.major, next_minor, 0).to_string()
+}
+
+fn invalid_desktop_attachment_shapes(valid: &Value) -> Vec<(&'static str, Value)> {
+    let descriptor = PathBuf::from(valid["descriptorPath"].as_str().unwrap());
+    let app_directory = descriptor.parent().unwrap();
+    let config_root = app_directory.parent().unwrap();
+    let app_id = valid["appId"].as_str().unwrap();
+    let descriptor_file_name = descriptor.file_name().unwrap();
+    let cases = [
+        (
+            "relative-launcher",
+            "launcherPath",
+            Value::from("relative/launcher"),
+        ),
+        ("empty-app-id", "appId", Value::from("")),
+        ("current-directory-app-id", "appId", Value::from(".")),
+        ("parent-directory-app-id", "appId", Value::from("..")),
+        ("slash-app-id", "appId", Value::from("codex/desktop")),
+        ("backslash-app-id", "appId", Value::from("codex\\desktop")),
+        ("control-app-id", "appId", Value::from("codex\0desktop")),
+        (
+            "relative-descriptor",
+            "descriptorPath",
+            Value::from("relative/app-server-attachment.json"),
+        ),
+        (
+            "non-normalized-descriptor",
+            "descriptorPath",
+            Value::from(
+                app_directory
+                    .join("..")
+                    .join(app_id)
+                    .join(descriptor_file_name)
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        ),
+        (
+            "mismatched-descriptor-parent",
+            "descriptorPath",
+            Value::from(
+                config_root
+                    .join("other-app")
+                    .join(descriptor_file_name)
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        ),
+        (
+            "unexpected-descriptor-filename",
+            "descriptorPath",
+            Value::from(
+                app_directory
+                    .join("other.json")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        ),
+    ];
+    cases
+        .into_iter()
+        .map(|(case, field, value)| {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            (case, invalid)
+        })
+        .collect()
 }
 
 #[test]

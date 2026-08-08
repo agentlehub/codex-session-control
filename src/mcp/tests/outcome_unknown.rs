@@ -23,6 +23,59 @@ struct Case {
     reconciliation: ReconciliationKind,
 }
 
+#[test]
+fn mutation_context_owns_attribution_and_derives_reconciliation_from_one_identity() {
+    let unscoped = MutationContext::unscoped();
+    assert_eq!(unscoped.known_ids(), (None, None));
+    assert_eq!(unscoped.reconciliation_request(), None);
+
+    let attributed_only =
+        MutationContext::for_thread("thread-context".to_owned(), ReconciliationPolicy::None);
+    assert_eq!(attributed_only.known_ids(), (Some("thread-context"), None));
+    assert_eq!(attributed_only.reconciliation_request(), None);
+
+    let thread = MutationContext::for_thread(
+        "thread-context".to_owned(),
+        ReconciliationPolicy::CompactThreadRead,
+    );
+    assert_eq!(thread.known_ids(), (Some("thread-context"), None));
+    assert_eq!(
+        thread.reconciliation_request(),
+        Some((
+            "thread/read",
+            json!({"threadId": "thread-context", "includeTurns": false}),
+        ))
+    );
+
+    let turn = MutationContext::for_turn(
+        "thread-context".to_owned(),
+        "turn-context".to_owned(),
+        ReconciliationPolicy::LatestTurnRead,
+    );
+    assert_eq!(
+        turn.known_ids(),
+        (Some("thread-context"), Some("turn-context"))
+    );
+    assert_eq!(
+        turn.reconciliation_request(),
+        Some((
+            "thread/turns/list",
+            json!({
+                "threadId": "thread-context",
+                "limit": 1,
+                "itemsView": "notLoaded",
+            }),
+        ))
+    );
+
+    let goal =
+        MutationContext::for_thread("thread-context".to_owned(), ReconciliationPolicy::GoalGet);
+    assert_eq!(
+        goal.reconciliation_request(),
+        Some(("thread/goal/get", json!({"threadId": "thread-context"}),))
+    );
+}
+
 fn cases() -> Vec<Case> {
     vec![
         Case {
@@ -111,18 +164,27 @@ fn cases() -> Vec<Case> {
     ]
 }
 
-fn reconciliation(kind: ReconciliationKind) -> Reconciliation {
+fn reconciliation_policy(kind: ReconciliationKind) -> ReconciliationPolicy {
     match kind {
-        ReconciliationKind::Goal => Reconciliation::GoalGet {
-            thread_id: "target".to_owned(),
-        },
-        ReconciliationKind::LatestTurn => Reconciliation::LatestTurnRead {
-            thread_id: "target".to_owned(),
-        },
-        ReconciliationKind::CompactThread => Reconciliation::CompactThreadRead {
-            thread_id: "target".to_owned(),
-        },
-        ReconciliationKind::None => Reconciliation::None,
+        ReconciliationKind::Goal => ReconciliationPolicy::GoalGet,
+        ReconciliationKind::LatestTurn => ReconciliationPolicy::LatestTurnRead,
+        ReconciliationKind::CompactThread => ReconciliationPolicy::CompactThreadRead,
+        ReconciliationKind::None => ReconciliationPolicy::None,
+    }
+}
+
+fn mutation_context(case: &Case) -> MutationContext {
+    match case.mutation_method {
+        "thread/start" => MutationContext::unscoped(),
+        "turn/interrupt" => MutationContext::for_turn(
+            "target".to_owned(),
+            "turn".to_owned(),
+            reconciliation_policy(case.reconciliation),
+        ),
+        _ => MutationContext::for_thread(
+            "target".to_owned(),
+            reconciliation_policy(case.reconciliation),
+        ),
     }
 }
 
@@ -182,6 +244,7 @@ async fn every_mutation_dispatches_once_and_observes_at_most_once() {
         let harness = FakeAppServer::start_connections(scripts).await;
         let client = AppServerClient::from_config(&harness.config);
         let mut connection = client.connect_initialized().await.unwrap();
+        let context = mutation_context(&case);
 
         let error = mutation_request(
             &client,
@@ -189,9 +252,7 @@ async fn every_mutation_dispatches_once_and_observes_at_most_once() {
             case.tool,
             case.mutation_method,
             case.mutation_params,
-            Some("target"),
-            (case.mutation_method == "turn/interrupt").then_some("turn"),
-            reconciliation(case.reconciliation),
+            &context,
         )
         .await
         .unwrap_err();
@@ -255,6 +316,8 @@ async fn reconciliation_failure_keeps_outcome_unknown_without_replay() {
     .await;
     let client = AppServerClient::from_config(&harness.config);
     let mut connection = client.connect_initialized().await.unwrap();
+    let context =
+        MutationContext::for_thread("target".to_owned(), ReconciliationPolicy::CompactThreadRead);
 
     let error = mutation_request(
         &client,
@@ -262,11 +325,7 @@ async fn reconciliation_failure_keeps_outcome_unknown_without_replay() {
         "thread_title_set",
         "thread/name/set",
         json!({"threadId": "target", "name": "title"}),
-        Some("target"),
-        None,
-        Reconciliation::CompactThreadRead {
-            thread_id: "target".to_owned(),
-        },
+        &context,
     )
     .await
     .unwrap_err();
@@ -286,6 +345,51 @@ async fn reconciliation_failure_keeps_outcome_unknown_without_replay() {
         1
     );
     assert_eq!(harness.connection_count(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn fork_timeout_preserves_context_attribution_without_replay() {
+    let harness = FakeAppServer::start(vec![FakeStep {
+        method: "thread/fork",
+        params: json!({
+            "threadId": "target",
+            "deferGoalContinuation": true,
+        }),
+        response: FakeResponse::Pending,
+        notify_after: false,
+        delay: Duration::ZERO,
+    }])
+    .await;
+    let client = AppServerClient::from_config(&harness.config);
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let operation = tokio::spawn(async move {
+        fork_thread(
+            &client,
+            &mut connection,
+            ThreadForkInput {
+                thread_id: Some("target".to_owned()),
+                defer_goal_continuation: true,
+            },
+        )
+        .await
+    });
+    harness.wait_for_requests(1).await;
+
+    tokio::time::advance(crate::app_server::NATIVE_STAGE_TIMEOUT).await;
+    let error = operation.await.unwrap().unwrap_err();
+
+    assert_eq!(error.category, ToolErrorCategory::OutcomeUnknown);
+    assert_eq!(
+        error.dispatch,
+        Some(crate::error::DispatchState::MayHaveBeenDispatched)
+    );
+    assert_eq!(error.thread_id.as_deref(), Some("target"));
+    assert!(error.turn_id.is_none());
+    assert!(error.observation.is_none());
+    assert!(error.reconciliation_error.is_none());
+    assert_eq!(harness.log().len(), 1);
+    assert_eq!(harness.connection_count(), 1);
 }
 
 #[tokio::test]
@@ -317,6 +421,11 @@ async fn interrupt_race_preserves_targeted_and_latest_turn_ids_without_inference
     .await;
     let client = AppServerClient::from_config(&harness.config);
     let mut connection = client.connect_initialized().await.unwrap();
+    let context = MutationContext::for_turn(
+        "target".to_owned(),
+        "original-turn".to_owned(),
+        ReconciliationPolicy::LatestTurnRead,
+    );
 
     let error = mutation_request(
         &client,
@@ -327,11 +436,7 @@ async fn interrupt_race_preserves_targeted_and_latest_turn_ids_without_inference
             "threadId": "target",
             "turnId": "original-turn",
         }),
-        Some("target"),
-        Some("original-turn"),
-        Reconciliation::LatestTurnRead {
-            thread_id: "target".to_owned(),
-        },
+        &context,
     )
     .await
     .unwrap_err();
