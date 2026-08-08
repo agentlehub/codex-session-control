@@ -473,6 +473,11 @@ async fn message_race_never_retries_the_opposite_operation() {
         .unwrap_err();
 
         assert_eq!(error.category, ToolErrorCategory::NativeError);
+        assert_eq!(error.thread_id.as_deref(), Some("target"));
+        assert_eq!(
+            error.turn_id.as_deref(),
+            (method == "turn/steer").then_some("active-turn")
+        );
         let log = harness.log();
         assert_eq!(log.len(), 3);
         assert_eq!(log[2]["method"], method);
