@@ -38,10 +38,10 @@ use super::{
     product_target,
     release::{
         RELEASE_CONNECT_TIMEOUT, RELEASE_METADATA_TIMEOUT, RELEASE_TRANSFER_IDLE_TIMEOUT,
-        ReleaseAsset, ReleaseEndpoints, ReleaseStage, build_release_client,
+        ReleaseAsset, ReleaseDownloadError, ReleaseEndpoints, ReleaseStage, build_release_client,
         discover_latest_release, download_verified_release, production_release_endpoints,
         release_target_for_arch, stream_release_asset, validate_checksum_entry,
-        with_release_stage_timeout,
+        verify_release_integrity, with_release_stage_timeout,
     },
     render::{render_projection, render_unit},
     service::{
@@ -56,8 +56,9 @@ use super::{
     test_target,
     uninstall::uninstall_with_context,
     update::{
-        TerminalState, UpdateContext, baseline_active_turn_gate, list_active_threads,
-        outer_update_with_endpoints, run_candidate_apply, staged_update_with_context,
+        TerminalState, UpdateContext, UpdateStage, baseline_active_turn_gate, list_active_threads,
+        outer_update_with_endpoints, release_failure_stage, run_candidate_apply,
+        staged_update_with_context,
     },
     wrapper::{exec_codex_wrapper_command, prepare_codex_wrapper},
 };

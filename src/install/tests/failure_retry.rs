@@ -187,6 +187,13 @@ fn assert_preserved_normal_home_state(preserved: &[(PathBuf, Vec<u8>, u32)]) {
 async fn immutable_release_server(
     fixture: &Fixture,
 ) -> (ReleaseEndpoints, tokio::task::JoinHandle<()>, PathBuf) {
+    immutable_release_server_with_checksum_failure(fixture, false).await
+}
+
+async fn immutable_release_server_with_checksum_failure(
+    fixture: &Fixture,
+    fail_checksum_transfer: bool,
+) -> (ReleaseEndpoints, tokio::task::JoinHandle<()>, PathBuf) {
     let candidate_log = fixture.paths.home.join("outer-candidate.log");
     let version = higher_test_release_version();
     let binary = Arc::<[u8]>::from(
@@ -241,6 +248,16 @@ async fn immutable_release_server(
                 .split_whitespace()
                 .nth(1)
                 .unwrap();
+            if fail_checksum_transfer && path.ends_with("/SHA256SUMS") {
+                stream
+                    .write_all(
+                        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                stream.shutdown().await.unwrap();
+                return;
+            }
             let body = if path.ends_with("/releases/latest") {
                 Arc::clone(&served_metadata)
             } else if path.ends_with(&format!("/{served_binary_name}")) {
@@ -272,6 +289,46 @@ async fn immutable_release_server(
         task,
         candidate_log,
     )
+}
+
+#[tokio::test]
+async fn checksum_transfer_failure_is_reported_at_release_download_stage() {
+    let fixture = Fixture::new();
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(fixture.context(true)).await.unwrap();
+    let (endpoints, server, _) =
+        immutable_release_server_with_checksum_failure(&fixture, true).await;
+
+    let error =
+        outer_update_with_endpoints(lifecycle_context_with_stage(&fixture, None), endpoints)
+            .await
+            .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("failed at release-download: release-download request failed"),
+        "{error}"
+    );
+    server.await.unwrap();
+}
+
+#[test]
+fn release_failure_stage_uses_typed_classification_not_display_text() {
+    let download = ReleaseDownloadError::Download(ControllerError::Operational(
+        "checksum mirror rejected the binary transfer".to_owned(),
+    ));
+    let integrity = ReleaseDownloadError::Integrity(ControllerError::Operational(
+        "release payload is not trusted".to_owned(),
+    ));
+
+    assert!(download.to_string().contains("checksum"));
+    assert!(!integrity.to_string().contains("checksum"));
+    assert_eq!(
+        release_failure_stage(&download),
+        UpdateStage::ReleaseDownload
+    );
+    assert_eq!(release_failure_stage(&integrity), UpdateStage::Checksum);
 }
 
 #[test]
