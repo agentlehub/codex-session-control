@@ -1,13 +1,18 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::Write,
-    process::{Command, Stdio},
+    io::{self, Read, Write},
+    os::unix::process::{CommandExt, ExitStatusExt},
+    process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio},
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 use assert_cmd::cargo::cargo_bin;
 use serde_json::{Value, json};
 
 const INSTRUCTIONS: &str = "These tools inspect and control Codex threads through the shared app-server used by connected Codex clients.";
+const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const CATALOG_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 const TOOL_EFFECTS: [(&str, bool, bool); 13] = [
     ("thread_create", false, false),
@@ -24,6 +29,311 @@ const TOOL_EFFECTS: [(&str, bool, bool); 13] = [
     ("thread_goal_clear", false, true),
     ("thread_interrupt", false, true),
 ];
+
+struct ChildGuard {
+    child: Option<Child>,
+    process_group: Option<u32>,
+}
+
+impl ChildGuard {
+    fn spawn(command: &mut Command) -> io::Result<Self> {
+        command.process_group(0);
+        command.spawn().map(|child| Self {
+            process_group: Some(child.id()),
+            child: Some(child),
+        })
+    }
+
+    fn id(&self) -> u32 {
+        self.child.as_ref().expect("child already reaped").id()
+    }
+
+    fn stdin_mut(&mut self) -> Option<&mut ChildStdin> {
+        self.child.as_mut()?.stdin.as_mut()
+    }
+
+    fn close_stdin(&mut self) {
+        drop(
+            self.child
+                .as_mut()
+                .expect("child already reaped")
+                .stdin
+                .take(),
+        );
+    }
+
+    fn wait_with_output(mut self, timeout: Duration) -> io::Result<Output> {
+        let child = self.child.as_mut().expect("child already reaped");
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("child stdout was not piped"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| io::Error::other("child stderr was not piped"))?;
+        let stdout_reader = read_pipe(stdout);
+        let stderr_reader = read_pipe(stderr);
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            match self
+                .child
+                .as_mut()
+                .expect("child already reaped")
+                .try_wait()
+            {
+                Ok(Some(status)) => {
+                    self.child.take();
+                    let cleanup_result = self.terminate_process_group();
+                    let output_result = collect_output(status, stdout_reader, stderr_reader);
+                    cleanup_result?;
+                    return output_result;
+                }
+                Ok(None) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        self.terminate_and_reap()?;
+                        let stdout_result = join_pipe(stdout_reader, "stdout");
+                        let stderr_result = join_pipe(stderr_reader, "stderr");
+                        let stdout = stdout_result?;
+                        let stderr = stderr_result?;
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!(
+                                "child did not exit within {timeout:?}; stdout: {}; stderr: {}",
+                                String::from_utf8_lossy(&stdout),
+                                String::from_utf8_lossy(&stderr)
+                            ),
+                        ));
+                    }
+                    thread::sleep(CHILD_POLL_INTERVAL.min(remaining));
+                }
+                Err(error) => {
+                    self.terminate_and_reap()?;
+                    let stdout_result = join_pipe(stdout_reader, "stdout");
+                    let stderr_result = join_pipe(stderr_reader, "stderr");
+                    let _ = stdout_result?;
+                    let _ = stderr_result?;
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    fn terminate_and_reap(&mut self) -> io::Result<()> {
+        let group_result = self.terminate_process_group();
+        let child_result = self.terminate_child();
+        match (group_result, child_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(group_error), Err(child_error)) => Err(io::Error::other(format!(
+                "process-group cleanup failed: {group_error}; child cleanup failed: {child_error}"
+            ))),
+        }
+    }
+
+    fn terminate_process_group(&mut self) -> io::Result<()> {
+        let Some(process_group) = self.process_group else {
+            return Ok(());
+        };
+        let process_group = rustix::process::Pid::from_raw(process_group as i32)
+            .ok_or_else(|| io::Error::other("process group id is zero"))?;
+        match rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL) {
+            Ok(()) | Err(rustix::io::Errno::SRCH) => {
+                self.process_group.take();
+                Ok(())
+            }
+            Err(error) => Err(io::Error::from(error)),
+        }
+    }
+
+    fn terminate_child(&mut self) -> io::Result<()> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(());
+        };
+        if let Ok(Some(_)) = child.try_wait() {
+            self.child.take();
+            return Ok(());
+        }
+        if let Err(kill_error) = child.kill() {
+            return match child.try_wait() {
+                Ok(Some(_)) => {
+                    self.child.take();
+                    Ok(())
+                }
+                Ok(None) => Err(kill_error),
+                Err(recheck_error) => Err(io::Error::other(format!(
+                    "child kill failed: {kill_error}; exit recheck failed: {recheck_error}"
+                ))),
+            };
+        }
+        match child.wait() {
+            Ok(_) => {
+                self.child.take();
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.terminate_and_reap();
+    }
+}
+
+fn read_pipe(mut pipe: impl Read + Send + 'static) -> JoinHandle<io::Result<Vec<u8>>> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+}
+
+fn join_pipe(reader: JoinHandle<io::Result<Vec<u8>>>, stream: &str) -> io::Result<Vec<u8>> {
+    reader
+        .join()
+        .map_err(|_| io::Error::other(format!("{stream} reader panicked")))?
+}
+
+fn collect_output(
+    status: ExitStatus,
+    stdout_reader: JoinHandle<io::Result<Vec<u8>>>,
+    stderr_reader: JoinHandle<io::Result<Vec<u8>>>,
+) -> io::Result<Output> {
+    let stdout = join_pipe(stdout_reader, "stdout");
+    let stderr = join_pipe(stderr_reader, "stderr");
+    Ok(Output {
+        status,
+        stdout: stdout?,
+        stderr: stderr?,
+    })
+}
+
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> io::Result<Option<ExitStatus>> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        thread::sleep(CHILD_POLL_INTERVAL.min(remaining));
+    }
+}
+
+fn terminate_test_child(child: &mut Child) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    if child.kill().is_ok() {
+        let _ = child.wait();
+    }
+}
+
+#[test]
+fn child_guard_captures_output_after_normal_exit() {
+    let mut command = Command::new(cargo_bin("codex-session-control"));
+    command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let child = ChildGuard::spawn(&mut command).unwrap();
+    let output = child.wait_with_output(CATALOG_EXIT_TIMEOUT).unwrap();
+
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .starts_with("codex-session-control ")
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn child_guard_terminates_and_reaps_on_timeout() {
+    let mut command = Command::new(cargo_bin("codex-session-control"));
+    command
+        .arg("mcp-server")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let child = ChildGuard::spawn(&mut command).unwrap();
+    let child_pid = child.id();
+    let error = child
+        .wait_with_output(Duration::from_millis(100))
+        .unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(
+        !std::path::Path::new(&format!("/proc/{child_pid}")).exists(),
+        "timed-out child was not reaped"
+    );
+}
+
+#[test]
+fn child_guard_drop_terminates_and_reaps() {
+    let mut command = Command::new(cargo_bin("codex-session-control"));
+    command
+        .arg("mcp-server")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let child = ChildGuard::spawn(&mut command).unwrap();
+    let child_pid = child.id();
+    drop(child);
+
+    assert!(
+        !std::path::Path::new(&format!("/proc/{child_pid}")).exists(),
+        "dropped child was not reaped"
+    );
+}
+
+#[test]
+fn child_guard_drop_terminates_process_group() {
+    let mut leader_command = Command::new(cargo_bin("codex-session-control"));
+    leader_command
+        .arg("mcp-server")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let leader = ChildGuard::spawn(&mut leader_command).unwrap();
+
+    let mut member_command = Command::new(cargo_bin("codex-session-control"));
+    member_command
+        .arg("mcp-server")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(leader.id() as i32);
+    let mut member = member_command.spawn().unwrap();
+
+    drop(leader);
+    let member_status = match wait_for_child_exit(&mut member, CATALOG_EXIT_TIMEOUT) {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            terminate_test_child(&mut member);
+            panic!("dropped child left a process-group member running");
+        }
+        Err(error) => {
+            terminate_test_child(&mut member);
+            panic!("failed while waiting for process-group member: {error}");
+        }
+    };
+    assert_eq!(
+        member_status.signal(),
+        Some(rustix::process::Signal::KILL.as_raw()),
+        "process-group member did not receive SIGKILL"
+    );
+}
 
 #[test]
 fn public_catalog_is_exact() {
@@ -50,16 +360,16 @@ fn public_catalog_is_exact() {
         }),
     ];
 
-    let mut child = Command::new(cargo_bin("codex-session-control"))
+    let mut command = Command::new(cargo_bin("codex-session-control"));
+    command
         .arg("mcp-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::piped());
+    let mut child = ChildGuard::spawn(&mut command).unwrap();
     let child_pid = child.id();
     {
-        let stdin = child.stdin.as_mut().unwrap();
+        let stdin = child.stdin_mut().unwrap();
         for message in messages {
             writeln!(stdin, "{message}").unwrap();
         }
@@ -70,8 +380,8 @@ fn public_catalog_is_exact() {
         children.trim().is_empty(),
         "mcp-server spawned a child: {children}"
     );
-    drop(child.stdin.take());
-    let output = child.wait_with_output().unwrap();
+    child.close_stdin();
+    let output = child.wait_with_output(CATALOG_EXIT_TIMEOUT).unwrap();
     assert!(
         output.status.success(),
         "stderr: {}",
