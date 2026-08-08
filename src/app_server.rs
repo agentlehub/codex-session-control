@@ -325,7 +325,7 @@ impl AppServerConnection {
         let response: Value = self
             .request("thread/goal/get", json!({"threadId": thread_id}))
             .await?;
-        goal_from_native(&response)
+        goal_from_native(&response, "thread/goal/get")
     }
 
     pub async fn wait_for_notification_or_quiet(&mut self) -> Result<(), ToolErrorData> {

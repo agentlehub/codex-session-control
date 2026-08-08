@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
@@ -324,7 +322,7 @@ pub(super) async fn set_title(
     client: &AppServerClient,
     connection: &mut AppServerConnection,
     input: ThreadTitleSetInput,
-) -> Result<BTreeMap<String, Value>, ToolErrorData> {
+) -> Result<ThreadTitleSetResult, ToolErrorData> {
     let thread_id = input
         .thread_id
         .ok_or_else(|| malformed_result("thread_title_set", "validation"))?;
@@ -338,7 +336,7 @@ pub(super) async fn set_title(
         &context,
     )
     .await?;
-    Ok(BTreeMap::new())
+    Ok(ThreadTitleSetResult {})
 }
 
 pub(super) async fn set_goal(
@@ -411,7 +409,8 @@ pub(super) async fn goal_mutation(
         &context,
     )
     .await?;
-    goal_from_native(&response)?.ok_or_else(|| malformed_result(tool, "thread/goal/set"))
+    goal_from_native(&response, "thread/goal/set")?
+        .ok_or_else(|| malformed_result(tool, "thread/goal/set"))
 }
 
 pub(super) async fn clear_goal(

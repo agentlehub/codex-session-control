@@ -503,7 +503,7 @@ async fn title_and_goal_clear_use_exact_single_requests() {
     .await;
     let title_client = AppServerClient::from_config(&title_harness.config);
     let mut title_connection = title_client.connect_initialized().await.unwrap();
-    let result = set_title(
+    let result: ThreadTitleSetResult = set_title(
         &title_client,
         &mut title_connection,
         ThreadTitleSetInput {
@@ -513,7 +513,7 @@ async fn title_and_goal_clear_use_exact_single_requests() {
     )
     .await
     .unwrap();
-    assert!(result.is_empty());
+    assert_eq!(serde_json::to_value(result).unwrap(), json!({}));
     assert_eq!(title_harness.log().len(), 1);
 
     let clear_harness = FakeAppServer::start(vec![FakeStep::result(

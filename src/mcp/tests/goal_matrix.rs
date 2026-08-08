@@ -120,6 +120,38 @@ async fn native_owns_the_complete_one_request_goal_matrix() {
 }
 
 #[tokio::test]
+async fn malformed_goal_mutation_results_are_attributed_to_the_set_stage() {
+    for result in [json!({}), json!({"goal": {"threadId": "target"}})] {
+        let harness = FakeAppServer::start(vec![FakeStep::result(
+            "thread/goal/set",
+            json!({
+                "threadId": "target",
+                "objective": "replacement objective",
+                "status": "active",
+            }),
+            result,
+        )])
+        .await;
+        let client = AppServerClient::from_config(&harness.config);
+        let mut connection = client.connect_initialized().await.unwrap();
+
+        let error = set_goal(
+            &client,
+            &mut connection,
+            ThreadGoalSetInput {
+                thread_id: "target".to_owned(),
+                objective: "replacement objective".to_owned(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.stage, "thread/goal/set");
+        assert_eq!(harness.log().len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn absent_goal_pause_and_resume_still_issue_exactly_one_native_mutation() {
     for (tool, status) in [
         ("thread_goal_pause", "paused"),
