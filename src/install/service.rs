@@ -108,19 +108,46 @@ impl LifecycleTarget {
     }
 }
 
-pub(super) fn query_systemctl_state(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SystemctlEnablementState {
+    Enabled,
+    Disabled,
+    NotFound,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SystemctlActivityState {
+    Active,
+    Inactive,
+}
+
+pub(super) fn query_systemctl_enablement(
     systemctl: &Path,
-    operation: &str,
     unit_name: &str,
-) -> Result<bool, ControllerError> {
-    Command::new(systemctl)
-        .args(["--user", operation, unit_name])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .map_err(|_| ControllerError::Operational("systemctl command failed".to_owned()))
+) -> Result<SystemctlEnablementState, ControllerError> {
+    match query_service_enablement(systemctl, unit_name) {
+        ServiceEnablement::Enabled => Ok(SystemctlEnablementState::Enabled),
+        ServiceEnablement::Disabled => Ok(SystemctlEnablementState::Disabled),
+        ServiceEnablement::Absent => Ok(SystemctlEnablementState::NotFound),
+        ServiceEnablement::Unproven => Err(systemctl_state_query_error("is-enabled")),
+    }
+}
+
+pub(super) fn query_systemctl_activity(
+    systemctl: &Path,
+    unit_name: &str,
+) -> Result<SystemctlActivityState, ControllerError> {
+    match query_service_activity(systemctl, unit_name) {
+        ServiceActivity::Active => Ok(SystemctlActivityState::Active),
+        ServiceActivity::Inactive => Ok(SystemctlActivityState::Inactive),
+        ServiceActivity::Unproven => Err(systemctl_state_query_error("is-active")),
+    }
+}
+
+fn systemctl_state_query_error(operation: &str) -> ControllerError {
+    ControllerError::Operational(format!(
+        "systemctl {operation} could not provide trustworthy service state"
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -329,15 +356,21 @@ pub(super) async fn verify_enabled_service(
     target: &LifecycleTarget,
     expected_running_version: &str,
 ) -> Result<(), ControllerError> {
-    if !query_systemctl_state(systemctl, "is-enabled", &target.unit_name)? {
-        return Err(ControllerError::Operational(
-            "service is not enabled".to_owned(),
-        ));
+    match query_systemctl_enablement(systemctl, &target.unit_name)? {
+        SystemctlEnablementState::Enabled => {}
+        SystemctlEnablementState::Disabled | SystemctlEnablementState::NotFound => {
+            return Err(ControllerError::Operational(
+                "service is not enabled".to_owned(),
+            ));
+        }
     }
-    if !query_systemctl_state(systemctl, "is-active", &target.unit_name)? {
-        return Err(ControllerError::Operational(
-            "service is not active".to_owned(),
-        ));
+    match query_systemctl_activity(systemctl, &target.unit_name)? {
+        SystemctlActivityState::Active => {}
+        SystemctlActivityState::Inactive => {
+            return Err(ControllerError::Operational(
+                "service is not active".to_owned(),
+            ));
+        }
     }
     wait_for_control_socket(&target.paths.socket, target.paths.euid).await?;
     let client = AppServerClient::new(

@@ -142,6 +142,49 @@ Failed checks:\n\
 }
 
 #[tokio::test]
+async fn status_reports_untrustworthy_systemctl_state_as_operational_drift() {
+    for operation in ["is-enabled", "is-active"] {
+        let fixture = Fixture::new();
+        let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+        setup_with_context(fixture.context(true)).await.unwrap();
+        fs::write(
+            &fixture.systemctl_fail,
+            format!("--user {operation} codex-session-control-test-Setup1.service"),
+        )
+        .unwrap();
+        fixture.clear_logs();
+
+        let report = status_with_context(context(&fixture)).await.unwrap();
+
+        assert!(!report.healthy, "{operation}");
+        assert_eq!(
+            report.stdout,
+            format!(
+                "Status: drifted\n\
+Installed release: {version}\n\
+Codex app-server service: unknown, unknown\n\
+CLI attachment: available through codex-session-control codex\n\
+Desktop attachment: unavailable\n\
+Loaded task state: not_verified\n\
+Failed checks:\n\
+- service-state: systemctl {operation} could not provide trustworthy service state\n\
+{indent}action: journalctl --user -u codex-session-control-test-Setup1.service\n",
+                indent = "  ",
+                version = env!("CARGO_PKG_VERSION")
+            ),
+            "{operation}"
+        );
+        assert_eq!(
+            fixture.systemctl_log(),
+            "--user is-enabled codex-session-control-test-Setup1.service\n\
+--user is-active codex-session-control-test-Setup1.service\n",
+            "{operation}"
+        );
+        assert_read_only_logs(&fixture);
+    }
+}
+
+#[tokio::test]
 async fn status_reports_compatible_desktop_as_available_after_setup_without_mutation() {
     let fixture = Fixture::new();
     let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
