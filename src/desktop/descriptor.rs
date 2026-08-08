@@ -15,8 +15,6 @@ use serde::Deserialize;
 
 use crate::{error::ControllerError, model::DesktopAttachmentIdentity};
 
-use super::DESCRIPTOR_FILE_NAME;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DescriptorState {
     Absent,
@@ -38,7 +36,7 @@ pub(crate) fn inspect_descriptor(
     identity: &DesktopAttachmentIdentity,
     expected: &[u8],
 ) -> Result<DescriptorState, ControllerError> {
-    validate_identity_shape(identity)?;
+    identity.validate()?;
     let expected = parse_descriptor(expected)?;
     let parent = match open_descriptor_parent(identity)? {
         Some(parent) => parent,
@@ -94,7 +92,7 @@ pub(crate) fn preflight_descriptor_switch(
     new: &DesktopAttachmentIdentity,
     expected: &[u8],
 ) -> Result<(), ControllerError> {
-    validate_identity_shape(new)?;
+    new.validate()?;
     if let Some(old) = old {
         let old_state = inspect_descriptor(old, expected)?;
         if !matches!(
@@ -124,7 +122,7 @@ pub(crate) fn publish_descriptor(
     identity: &DesktopAttachmentIdentity,
     expected: &[u8],
 ) -> Result<bool, ControllerError> {
-    validate_identity_shape(identity)?;
+    identity.validate()?;
     let expected_document = parse_descriptor(expected)?;
     prepare_descriptor_parent(identity)?;
     let parent = open_descriptor_parent(identity)?
@@ -189,7 +187,7 @@ pub(crate) fn remove_expected_descriptor(
     identity: &DesktopAttachmentIdentity,
     expected: &[u8],
 ) -> Result<bool, ControllerError> {
-    validate_identity_shape(identity)?;
+    identity.validate()?;
     let expected_document = parse_descriptor(expected)?;
     let Some(parent) = open_descriptor_parent(identity)? else {
         return Ok(false);
@@ -209,51 +207,6 @@ pub(crate) fn remove_expected_descriptor(
                 .map_err(|_| desktop_error("descriptor parent cannot be synced"))?;
             Ok(true)
         }
-    }
-}
-
-pub(super) fn validate_identity_shape(
-    identity: &DesktopAttachmentIdentity,
-) -> Result<(), ControllerError> {
-    if !identity.launcher_path.is_absolute() || !identity.descriptor_path.is_absolute() {
-        return Err(desktop_error("Desktop identity paths must be absolute"));
-    }
-    if identity
-        .descriptor_path
-        .components()
-        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
-    {
-        return Err(desktop_error(
-            "Desktop identity descriptor path is not lexically normalized",
-        ));
-    }
-    validate_app_id(&identity.app_id)
-        .map_err(|reason| desktop_error(format!("Desktop attachment unavailable: {reason}")))?;
-    let parent = identity
-        .descriptor_path
-        .parent()
-        .ok_or_else(|| desktop_error("descriptor path has no parent"))?;
-    if parent.file_name() != Some(OsStr::new(&identity.app_id))
-        || parent.parent().is_none()
-        || identity.descriptor_path.file_name() != Some(OsStr::new(DESCRIPTOR_FILE_NAME))
-    {
-        return Err(desktop_error(
-            "Desktop identity descriptor path is inconsistent",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_app_id(app_id: &str) -> Result<(), String> {
-    if app_id.is_empty()
-        || app_id == "."
-        || app_id == ".."
-        || app_id.contains(['/', '\\'])
-        || app_id.chars().any(char::is_control)
-    {
-        Err("Desktop appIdentity.id is not one safe path component".to_owned())
-    } else {
-        Ok(())
     }
 }
 
@@ -313,7 +266,7 @@ pub(super) fn parse_descriptor(bytes: &[u8]) -> Result<DescriptorDocument, Contr
 pub(crate) fn prepare_descriptor_parent(
     identity: &DesktopAttachmentIdentity,
 ) -> Result<(), ControllerError> {
-    validate_identity_shape(identity)?;
+    identity.validate()?;
     let app_directory = identity
         .descriptor_path
         .parent()
