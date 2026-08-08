@@ -13,8 +13,8 @@ pub(crate) use descriptor::{
     remove_expected_descriptor, render_descriptor,
 };
 pub(crate) use discovery::{
-    DesktopAvailability, DesktopTarget, discover_and_verify_desktop, inspect_desktop_availability,
-    verify_persisted_desktop,
+    DesktopAvailability, DesktopStructure, DesktopTarget, inspect_desktop_structure,
+    probe_desktop_capability, probe_persisted_desktop_capability,
 };
 
 #[derive(Debug)]
