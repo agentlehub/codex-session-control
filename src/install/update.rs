@@ -35,8 +35,9 @@ use super::{
     },
     render::{reconcile_projection, render_projection, render_unit},
     service::{
-        LifecycleTarget, query_systemctl_state, run_systemctl, verify_disabled_service,
-        verify_enabled_service,
+        CallerUnitEvidence, CallerUnitInspection, LifecycleTarget, ServiceActivity,
+        ServiceEnablement, inspect_caller_unit, query_service_activity, query_service_enablement,
+        run_systemctl, verify_disabled_service, verify_enabled_service,
     },
     sha256_bytes,
     status::{StatusContext, status_with_context},
@@ -157,17 +158,98 @@ impl UpdateProgress {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RestartReason {
+    RunningCodexVersion,
+    CodexExecutablePath,
+    ServiceUnit,
+}
+
+impl RestartReason {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::RunningCodexVersion => "running Codex version differs",
+            Self::CodexExecutablePath => "resolved Codex executable path differs",
+            Self::ServiceUnit => "rendered systemd unit differs",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum RestartInspection {
     ProvenUnchanged,
-    ProvenChanged,
+    ProvenChanged { reasons: Vec<RestartReason> },
     Unknown { evidence: String },
+}
+
+impl RestartInspection {
+    fn reasons(&self) -> Option<&[RestartReason]> {
+        match self {
+            Self::ProvenChanged { reasons } => Some(reasons),
+            Self::ProvenUnchanged | Self::Unknown { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ServiceSnapshot {
     enabled: bool,
     active: bool,
+}
+
+fn restart_reason_summary(reasons: &[RestartReason]) -> String {
+    reasons
+        .iter()
+        .map(|reason| reason.message())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn self_hosted_update_refusal(reasons: &[RestartReason], display_command: &str) -> String {
+    format!(
+        "update requires restarting the managed app-server because {}. This command is running inside the managed app-server; run from an independent terminal: {display_command} update.\n",
+        restart_reason_summary(reasons)
+    )
+}
+
+fn unproven_update_caller_refusal(reasons: &[RestartReason], display_command: &str) -> String {
+    format!(
+        "update requires restarting the managed app-server because {}. A working systemctl --user whoami is required to prove this command is independent; repair or upgrade the systemd user environment, then run from an independent terminal: {display_command} update.\n",
+        restart_reason_summary(reasons)
+    )
+}
+
+fn guard_restart_required_update(
+    systemctl: &Path,
+    lifecycle: &LifecycleContext,
+    snapshot: ServiceSnapshot,
+    restart: &RestartInspection,
+    display_command: &str,
+    progress: &UpdateProgress,
+) -> Result<(), ControllerError> {
+    if snapshot.active
+        && let Some(reasons) = restart.reasons()
+    {
+        match inspect_caller_unit(systemctl, &lifecycle.target) {
+            CallerUnitInspection::Independent => {}
+            CallerUnitInspection::SelfHosted(CallerUnitEvidence::WhoAmI) => {
+                return Err(progress.fail(
+                    UpdateStage::RestartInspection,
+                    self_hosted_update_refusal(reasons, display_command),
+                    "",
+                ));
+            }
+            CallerUnitInspection::SelfHosted(CallerUnitEvidence::ControlGroup)
+            | CallerUnitInspection::Unknown { .. } => {
+                return Err(progress.fail(
+                    UpdateStage::RestartInspection,
+                    unproven_update_caller_refusal(reasons, display_command),
+                    "",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 impl TerminalState {
@@ -381,7 +463,7 @@ async fn outer_restart_preflight(
         lifecycle.target,
         retry
     );
-    match inspect_restart(
+    let restart = inspect_restart(
         paths,
         &manifest,
         snapshot,
@@ -389,21 +471,26 @@ async fn outer_restart_preflight(
         &expected_running_version,
         &desired_unit_sha256,
     )
-    .await
-    {
-        RestartInspection::Unknown { evidence } => {
-            Err(progress.fail(UpdateStage::RestartInspection, evidence, retry))
-        }
-        _ => {
-            complete_lifecycle_stage!(
-                progress,
-                UpdateStage::RestartInspection,
-                lifecycle.target,
-                retry
-            );
-            Ok(())
-        }
+    .await;
+    if let RestartInspection::Unknown { evidence } = &restart {
+        return Err(progress.fail(UpdateStage::RestartInspection, evidence, retry));
     }
+    let display_command = display_command_for_paths(paths, &lifecycle.path_environment);
+    guard_restart_required_update(
+        &systemctl,
+        lifecycle,
+        snapshot,
+        &restart,
+        &display_command,
+        progress,
+    )?;
+    complete_lifecycle_stage!(
+        progress,
+        UpdateStage::RestartInspection,
+        lifecycle.target,
+        retry
+    );
+    Ok(())
 }
 
 pub(super) async fn staged_update_with_context(
@@ -524,6 +611,14 @@ disable stops running turns; the final enable is needed only when the service sh
         );
         return Err(progress.fail(UpdateStage::RestartInspection, evidence, &recovery));
     }
+    guard_restart_required_update(
+        &systemctl,
+        lifecycle,
+        snapshot,
+        &restart,
+        &display_command,
+        &progress,
+    )?;
     complete_lifecycle_stage!(
         progress,
         UpdateStage::RestartInspection,
@@ -550,7 +645,7 @@ disable stops running turns; the final enable is needed only when the service sh
         }
     }
 
-    if snapshot.active && restart == RestartInspection::ProvenChanged {
+    if snapshot.active && restart.reasons().is_some() {
         baseline_active_turn_gate(paths, &expected_running_version, context.terminal)
             .await
             .map_err(|error| progress.fail(UpdateStage::ActiveTurnGate, error, &retry))?;
@@ -667,7 +762,7 @@ disable stops running turns; the final enable is needed only when the service sh
                 enabled: true,
                 active: true,
             },
-            RestartInspection::ProvenChanged,
+            RestartInspection::ProvenChanged { .. },
         ) => {
             run_systemctl(
                 &systemctl,
@@ -887,16 +982,34 @@ fn service_snapshot(
     systemctl: &Path,
     target: &LifecycleTarget,
 ) -> Result<ServiceSnapshot, ControllerError> {
-    let snapshot = ServiceSnapshot {
-        enabled: query_systemctl_state(systemctl, "is-enabled", &target.unit_name)?,
-        active: query_systemctl_state(systemctl, "is-active", &target.unit_name)?,
-    };
-    if !snapshot.enabled && snapshot.active {
-        return Err(ControllerError::Operational(
-            "disabled service is active".to_owned(),
-        ));
+    match (
+        query_service_enablement(systemctl, &target.unit_name),
+        query_service_activity(systemctl, &target.unit_name),
+    ) {
+        (ServiceEnablement::Enabled, ServiceActivity::Active) => Ok(ServiceSnapshot {
+            enabled: true,
+            active: true,
+        }),
+        (ServiceEnablement::Enabled, ServiceActivity::Inactive) => Ok(ServiceSnapshot {
+            enabled: true,
+            active: false,
+        }),
+        (ServiceEnablement::Disabled | ServiceEnablement::Absent, ServiceActivity::Inactive) => {
+            Ok(ServiceSnapshot {
+                enabled: false,
+                active: false,
+            })
+        }
+        (ServiceEnablement::Unproven, _) => Err(ControllerError::Operational(
+            "service enablement cannot be proven".to_owned(),
+        )),
+        (_, ServiceActivity::Unproven) => Err(ControllerError::Operational(
+            "service activity cannot be proven".to_owned(),
+        )),
+        _ => Err(ControllerError::Operational(
+            "inactive/enablement service state is contradictory".to_owned(),
+        )),
     }
-    Ok(snapshot)
 }
 
 async fn inspect_restart(
@@ -952,21 +1065,28 @@ async fn inspect_restart(
         env!("CARGO_PKG_VERSION").to_owned(),
         expected_running_version.to_owned(),
     );
-    match client.connect_initialized().await {
-        Ok(connection) if connection.compatibility_warning().is_none() => {}
-        Ok(_) => return RestartInspection::ProvenChanged,
+    let connection = match client.connect_initialized().await {
+        Ok(connection) => connection,
         Err(_) => {
             return RestartInspection::Unknown {
                 evidence: "running app-server identity cannot be proven".to_owned(),
             };
         }
+    };
+    let mut reasons = Vec::new();
+    if connection.compatibility_warning().is_some() {
+        reasons.push(RestartReason::RunningCodexVersion);
     }
-    if desired_codex != manifest.codex_executable
-        || desired_unit_sha256 != manifest.service_unit_sha256
-    {
-        RestartInspection::ProvenChanged
-    } else {
+    if desired_codex != manifest.codex_executable {
+        reasons.push(RestartReason::CodexExecutablePath);
+    }
+    if desired_unit_sha256 != manifest.service_unit_sha256 {
+        reasons.push(RestartReason::ServiceUnit);
+    }
+    if reasons.is_empty() {
         RestartInspection::ProvenUnchanged
+    } else {
+        RestartInspection::ProvenChanged { reasons }
     }
 }
 

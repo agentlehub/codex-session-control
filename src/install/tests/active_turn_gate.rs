@@ -470,6 +470,43 @@ async fn every_gate_failure_keeps_installed_state_unchanged() {
     }
 }
 
+#[tokio::test]
+async fn self_hosted_restart_required_update_refuses_before_active_turn_inspection() {
+    let fixture = Fixture::new();
+    let setup_authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(fixture.context(true)).await.unwrap();
+    drop(setup_authority);
+    fs::write(
+        &fixture.whoami_unit,
+        b"codex-session-control-test-Setup1.service\n",
+    )
+    .unwrap();
+    let authority =
+        ScriptedAuthority::start(&fixture.paths, vec![page(vec![], None), page(vec![], None)])
+            .await;
+    let candidate = higher_candidate(&fixture, "candidate-self-hosted-active-turn");
+    let (context, _) = changed_update_context(&fixture, candidate);
+    let before_binary = fs::read(&fixture.paths.binary).unwrap();
+    let before_manifest = fs::read(&fixture.paths.manifest).unwrap();
+    fixture.clear_logs();
+
+    let error = staged_update_with_context(context).await.unwrap_err();
+
+    assert!(error.to_string().contains("failed at restart-inspection:"));
+    assert!(
+        error
+            .to_string()
+            .contains("run from an independent terminal")
+    );
+    assert_eq!(authority.requests(), Vec::<Value>::new());
+    assert_eq!(fixture.systemctl_log().matches("--user whoami").count(), 1);
+    assert_eq!(fs::read(&fixture.paths.binary).unwrap(), before_binary);
+    assert_eq!(fs::read(&fixture.paths.manifest).unwrap(), before_manifest);
+    assert!(!fixture.systemctl_log().contains("daemon-reload"));
+    assert!(!fixture.systemctl_log().contains(" restart "));
+    drop(authority);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn accepted_gate_has_no_second_handoff_and_restarts_only_the_service() {
     let fixture = Fixture::new();
@@ -520,6 +557,7 @@ async fn accepted_gate_has_no_second_handoff_and_restarts_only_the_service() {
             .codex_executable,
         new_codex
     );
+    assert_eq!(fixture.systemctl_log().matches("--user whoami").count(), 1);
     assert_eq!(authority.requests().len(), 2);
     assert_eq!(fixture.systemctl_log().matches(" restart ").count(), 1);
     assert!(!fixture.codex_log().contains("thread/interrupt"));
