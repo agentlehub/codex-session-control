@@ -190,7 +190,7 @@ pub(super) fn classify_service_enablement(code: Option<i32>, stdout: &[u8]) -> S
 pub(super) fn classify_service_activity(code: Option<i32>, stdout: &[u8]) -> ServiceActivity {
     match (code, stdout) {
         (Some(0), b"active\n") => ServiceActivity::Active,
-        (Some(3), b"inactive\n") => ServiceActivity::Inactive,
+        (Some(3 | 4), b"inactive\n") => ServiceActivity::Inactive,
         _ => ServiceActivity::Unproven,
     }
 }
