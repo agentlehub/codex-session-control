@@ -104,4 +104,6 @@ When the connection file is valid, Desktop connects to the existing Codex Sessio
 
 Without a connection file, Desktop runs normally without Codex Session Control. If the file is invalid, unsafe, unreadable, or points to an unavailable socket, Desktop refuses the configured connection instead of silently starting a second Codex service.
 
+An attached Desktop task depends on the managed service. A restart-required `update`, or an active `disable` or `uninstall`, refuses before restarting or stopping that service and before removing the connection file when the command is running through the attached task. The refusal does not sign the user out or touch Codex authentication. An independent terminal invocation may still intentionally stop the service and disconnect Desktop.
+
 The supported Desktop build and Codex Session Control must use the same Codex executable, socket, and `CODEX_HOME`.
