@@ -245,6 +245,54 @@ async fn message_send_preserves_other_pre_read_failures() {
 }
 
 #[tokio::test]
+async fn message_send_rejects_malformed_compact_snapshot_without_dispatching() {
+    let harness = FakeAppServer::start(vec![
+        FakeStep::result(
+            "thread/read",
+            json!({"threadId": "target", "includeTurns": false}),
+            json!({"thread": native_thread("target", json!({"type": "idle"}), 20)}),
+        ),
+        FakeStep::result(
+            "thread/turns/list",
+            json!({
+                "threadId": "target",
+                "limit": 1,
+                "itemsView": "notLoaded",
+            }),
+            json!({}),
+        ),
+        FakeStep::result(
+            "turn/start",
+            json!({
+                "threadId": "target",
+                "input": [{"type": "text", "text": "message"}],
+            }),
+            json!({"turn": native_turn("unexpected", "inProgress")}),
+        ),
+    ])
+    .await;
+    let client = AppServerClient::from_config(&harness.config);
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let error = send_message(
+        &client,
+        &mut connection,
+        ThreadMessageSendInput {
+            thread_id: "target".to_owned(),
+            prompt: "message".to_owned(),
+            model: None,
+            reasoning_effort: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.category, ToolErrorCategory::NativeError);
+    assert_eq!(error.stage, "thread/turns/list");
+    assert_eq!(harness.log().len(), 2);
+}
+
+#[tokio::test]
 async fn idle_message_reads_once_then_starts_with_overrides() {
     let mut steps = snapshot_steps(
         "target",
@@ -425,6 +473,11 @@ async fn message_race_never_retries_the_opposite_operation() {
         .unwrap_err();
 
         assert_eq!(error.category, ToolErrorCategory::NativeError);
+        assert_eq!(error.thread_id.as_deref(), Some("target"));
+        assert_eq!(
+            error.turn_id.as_deref(),
+            (method == "turn/steer").then_some("active-turn")
+        );
         let log = harness.log();
         assert_eq!(log.len(), 3);
         assert_eq!(log[2]["method"], method);
@@ -450,7 +503,7 @@ async fn title_and_goal_clear_use_exact_single_requests() {
     .await;
     let title_client = AppServerClient::from_config(&title_harness.config);
     let mut title_connection = title_client.connect_initialized().await.unwrap();
-    let result = set_title(
+    let result: ThreadTitleSetResult = set_title(
         &title_client,
         &mut title_connection,
         ThreadTitleSetInput {
@@ -460,7 +513,7 @@ async fn title_and_goal_clear_use_exact_single_requests() {
     )
     .await
     .unwrap();
-    assert!(result.is_empty());
+    assert_eq!(serde_json::to_value(result).unwrap(), json!({}));
     assert_eq!(title_harness.log().len(), 1);
 
     let clear_harness = FakeAppServer::start(vec![FakeStep::result(
@@ -576,5 +629,37 @@ async fn terminal_interrupt_returns_false_without_mutation_or_replacement_chase(
         ThreadInterruptResult::NotInterrupted { interrupted: false }
     ));
     assert_eq!(harness.connection_count(), 1);
+    assert_eq!(harness.log().len(), 2);
+}
+
+#[tokio::test]
+async fn interrupt_rejects_in_progress_turn_without_id_instead_of_reporting_false() {
+    let mut steps = snapshot_steps(
+        "target",
+        json!({"type": "active", "activeFlags": []}),
+        20,
+        None,
+        false,
+    );
+    steps[1].response = FakeResponse::Result(json!({
+        "data": [{"status": "inProgress"}],
+        "nextCursor": null,
+    }));
+    let harness = FakeAppServer::start(steps).await;
+    let client = AppServerClient::from_config(&harness.config);
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let error = interrupt_thread(
+        &client,
+        &mut connection,
+        ThreadInterruptInput {
+            thread_id: "target".to_owned(),
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.category, ToolErrorCategory::NativeError);
+    assert_eq!(error.stage, "thread/turns/list");
     assert_eq!(harness.log().len(), 2);
 }

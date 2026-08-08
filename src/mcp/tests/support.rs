@@ -61,6 +61,7 @@ pub(super) struct FakeAppServer {
     pub(super) config: ProductConfig,
     pub(super) log: Arc<Mutex<Vec<Value>>>,
     pub(super) connections: Arc<AtomicUsize>,
+    request_received: Arc<tokio::sync::Notify>,
     pub(super) task: tokio::task::JoinHandle<()>,
 }
 
@@ -88,8 +89,10 @@ impl FakeAppServer {
         };
         let log = Arc::new(Mutex::new(Vec::new()));
         let connections = Arc::new(AtomicUsize::new(0));
+        let request_received = Arc::new(tokio::sync::Notify::new());
         let task_log = Arc::clone(&log);
         let task_connections = Arc::clone(&connections);
+        let task_request_received = Arc::clone(&request_received);
         let task = tokio::spawn(async move {
             for steps in scripts {
                 let (stream, _) = listener.accept().await.unwrap();
@@ -123,6 +126,7 @@ impl FakeAppServer {
                         "method": step.method,
                         "params": request["params"].clone(),
                     }));
+                    task_request_received.notify_one();
                     tokio::time::sleep(step.delay).await;
                     let id = request["id"].clone();
                     match step.response {
@@ -167,6 +171,7 @@ impl FakeAppServer {
             config,
             log,
             connections,
+            request_received,
             task,
         }
     }
@@ -177,6 +182,16 @@ impl FakeAppServer {
 
     pub(super) fn connection_count(&self) -> usize {
         self.connections.load(Ordering::SeqCst)
+    }
+
+    pub(super) async fn wait_for_requests(&self, count: usize) {
+        loop {
+            let request_received = self.request_received.notified();
+            if self.log.lock().unwrap().len() >= count {
+                return;
+            }
+            request_received.await;
+        }
     }
 }
 

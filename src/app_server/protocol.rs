@@ -16,23 +16,35 @@ pub(super) fn compact_snapshot_from_native(
     let thread = metadata
         .get("thread")
         .ok_or_else(|| malformed_native("thread/read"))?;
+    let returned_thread_id = required_string(thread, "id", "thread/read")?;
+    if returned_thread_id != thread_id {
+        return Err(malformed_native("thread/read"));
+    }
     let status = required_value::<ThreadStatus>(thread, "status", "thread/read")?;
-    let latest_turn = latest
+    let latest_turns = latest
         .get("data")
         .and_then(Value::as_array)
-        .and_then(|turns| turns.first());
-    let active_turn =
-        latest_turn.filter(|turn| turn.get("status").and_then(Value::as_str) == Some("inProgress"));
+        .ok_or_else(|| malformed_native("thread/turns/list"))?;
+    let (active_turn_id, active_turn_status) = match latest_turns.first() {
+        Some(turn) => {
+            let turn_status = required_value::<TurnStatus>(turn, "status", "thread/turns/list")?;
+            if turn_status == TurnStatus::InProgress {
+                (
+                    Some(required_string(turn, "id", "thread/turns/list")?),
+                    Some(turn_status),
+                )
+            } else {
+                (None, None)
+            }
+        }
+        None => (None, None),
+    };
     Ok(ThreadSnapshot {
-        thread_id: optional_string(thread, "id", "thread/read")?
-            .unwrap_or_else(|| thread_id.to_owned()),
+        thread_id: returned_thread_id,
         name: optional_string(thread, "name", "thread/read")?,
         status,
-        active_turn_id: active_turn
-            .and_then(|turn| turn.get("id"))
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        active_turn_status: active_turn.map(|_| TurnStatus::InProgress),
+        active_turn_id,
+        active_turn_status,
         updated_at: required_i64(thread, "updatedAt", "thread/read")?,
     })
 }
@@ -113,22 +125,30 @@ pub(crate) fn turn_from_native(value: &Value, stage: &'static str) -> Result<Tur
     })
 }
 
-pub(crate) fn goal_from_native(response: &Value) -> Result<Option<ThreadGoal>, ToolErrorData> {
+pub(crate) fn goal_from_native(
+    response: &Value,
+    expected_thread_id: &str,
+    stage: &'static str,
+) -> Result<Option<ThreadGoal>, ToolErrorData> {
     let Some(goal) = response.get("goal") else {
-        return Err(malformed_native("thread/goal/get"));
+        return Err(malformed_native(stage));
     };
     if goal.is_null() {
         return Ok(None);
     }
+    let thread_id = required_string(goal, "threadId", stage)?;
+    if thread_id != expected_thread_id {
+        return Err(malformed_native(stage));
+    }
     Ok(Some(ThreadGoal {
-        thread_id: required_string(goal, "threadId", "thread/goal/get")?,
-        objective: required_string(goal, "objective", "thread/goal/get")?,
-        status: required_value::<ThreadGoalStatus>(goal, "status", "thread/goal/get")?,
-        token_budget: optional_u64(goal, "tokenBudget", "thread/goal/get")?,
-        tokens_used: required_u64(goal, "tokensUsed", "thread/goal/get")?,
-        time_used_seconds: required_u64(goal, "timeUsedSeconds", "thread/goal/get")?,
-        created_at: required_i64(goal, "createdAt", "thread/goal/get")?,
-        updated_at: required_i64(goal, "updatedAt", "thread/goal/get")?,
+        thread_id,
+        objective: required_string(goal, "objective", stage)?,
+        status: required_value::<ThreadGoalStatus>(goal, "status", stage)?,
+        token_budget: optional_u64(goal, "tokenBudget", stage)?,
+        tokens_used: required_u64(goal, "tokensUsed", stage)?,
+        time_used_seconds: required_u64(goal, "timeUsedSeconds", stage)?,
+        created_at: required_i64(goal, "createdAt", stage)?,
+        updated_at: required_i64(goal, "updatedAt", stage)?,
     }))
 }
 

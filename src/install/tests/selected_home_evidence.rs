@@ -20,6 +20,16 @@ const COMMANDS: [&str; 8] = [
     "codex",
 ];
 
+const SELECTED_HOME_OPERATIONS: [SelectedHomeOperation; 7] = [
+    SelectedHomeOperation::Setup,
+    SelectedHomeOperation::Update,
+    SelectedHomeOperation::Enable,
+    SelectedHomeOperation::Disable,
+    SelectedHomeOperation::Uninstall,
+    SelectedHomeOperation::Mcp,
+    SelectedHomeOperation::Codex,
+];
+
 fn fixture() -> (TempDir, ResolvedUserPaths) {
     let root = crate::test_support::private_tempdir();
     let home = root.path().join("home");
@@ -49,7 +59,7 @@ fn valid_config(paths: &ResolvedUserPaths, home: &Path) -> String {
 
 fn valid_manifest(paths: &ResolvedUserPaths, home: &Path) -> serde_json::Value {
     serde_json::json!({
-        "schemaVersion": 2,
+        "schemaVersion": 3,
         "productVersion": env!("CARGO_PKG_VERSION"),
         "target": test_target(),
         "binarySha256": "a".repeat(64),
@@ -57,11 +67,20 @@ fn valid_manifest(paths: &ResolvedUserPaths, home: &Path) -> serde_json::Value {
         "projectionSha256": "c".repeat(64),
         "pluginVersion": env!("CARGO_PKG_VERSION"),
         "codexExecutable": "/usr/bin/codex",
-        "codexVersion": TESTED_CODEX_VERSION,
         "codexHome": home,
         "socketPath": paths.socket,
         "desktopAttachment": null
     })
+}
+
+fn valid_schema_two_manifest(paths: &ResolvedUserPaths, home: &Path) -> serde_json::Value {
+    let mut manifest = valid_manifest(paths, home);
+    manifest["schemaVersion"] = serde_json::json!(2);
+    manifest.as_object_mut().unwrap().insert(
+        "codexVersion".to_owned(),
+        serde_json::json!(TESTED_CODEX_VERSION),
+    );
+    manifest
 }
 
 fn write_manifest(paths: &ResolvedUserPaths, manifest: serde_json::Value) {
@@ -74,14 +93,14 @@ fn write_manifest(paths: &ResolvedUserPaths, manifest: serde_json::Value) {
 fn seed_case(paths: &ResolvedUserPaths, case: InstalledEvidenceCase) {
     let selected_home = paths.home.join(".codex");
     match case {
-        InstalledEvidenceCase::CoherentV2 => {
+        InstalledEvidenceCase::Coherent => {
             write_owned(&paths.config, valid_config(paths, &selected_home));
             write_manifest(paths, valid_manifest(paths, &selected_home));
         }
-        InstalledEvidenceCase::ConfigurationOnlyV2 => {
+        InstalledEvidenceCase::ConfigurationOnly => {
             write_owned(&paths.config, valid_config(paths, &selected_home));
         }
-        InstalledEvidenceCase::ManifestOnlyV2 => {
+        InstalledEvidenceCase::ManifestOnly => {
             write_manifest(paths, valid_manifest(paths, &selected_home));
         }
         InstalledEvidenceCase::FirstInstall => {}
@@ -104,19 +123,34 @@ fn seed_case(paths: &ResolvedUserPaths, case: InstalledEvidenceCase) {
             manifest["schemaVersion"] = serde_json::json!(1);
             write_manifest(paths, manifest);
         }
-        InstalledEvidenceCase::ContradictoryV2 => {
+        InstalledEvidenceCase::Contradictory => {
             write_owned(&paths.config, valid_config(paths, &selected_home));
             write_manifest(paths, valid_manifest(paths, &paths.home.join("other-home")));
         }
     }
 }
 
+fn assert_all_selected_home_operations_reject(paths: &ResolvedUserPaths, context: &str) {
+    for operation in SELECTED_HOME_OPERATIONS {
+        assert!(
+            matches!(
+                require_selected_home_evidence(paths, operation),
+                Err(ControllerError::InvalidData {
+                    field: "installed_evidence",
+                    ..
+                })
+            ),
+            "{context} must block {operation:?}"
+        );
+    }
+}
+
 #[test]
 fn table_drives_the_only_selected_home_evidence_states() {
     let cases = [
-        (InstalledEvidenceCase::CoherentV2, true),
-        (InstalledEvidenceCase::ConfigurationOnlyV2, true),
-        (InstalledEvidenceCase::ManifestOnlyV2, true),
+        (InstalledEvidenceCase::Coherent, true),
+        (InstalledEvidenceCase::ConfigurationOnly, true),
+        (InstalledEvidenceCase::ManifestOnly, true),
         (InstalledEvidenceCase::FirstInstall, false),
         (
             InstalledEvidenceCase::PartialArtifactsWithoutIdentity,
@@ -124,7 +158,7 @@ fn table_drives_the_only_selected_home_evidence_states() {
         ),
         (InstalledEvidenceCase::InvalidConfiguration, false),
         (InstalledEvidenceCase::InvalidManifest, false),
-        (InstalledEvidenceCase::ContradictoryV2, false),
+        (InstalledEvidenceCase::Contradictory, false),
     ];
     for (expected_case, has_selected_home) in cases {
         let (_root, paths) = fixture();
@@ -142,6 +176,125 @@ fn table_drives_the_only_selected_home_evidence_states() {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GateExpectation {
+    Allowed,
+    Rejected(&'static str),
+}
+
+#[test]
+fn selected_home_operation_policy_is_exhaustive() {
+    use GateExpectation::{Allowed, Rejected};
+
+    const GENERIC_REJECTION: &str = "selected-home identity is unavailable or contradictory";
+    const UPDATE_REPAIR: &str = "installed configuration requires same-release setup repair";
+    const COHERENT_INSTALLATION: &str = "coherent schema-2 configuration and supported schema-2 or schema-3 installed manifest are required";
+    const VALID_CONFIGURATION: &str = "valid schema-2 configuration is required";
+    const CASES: [InstalledEvidenceCase; 8] = [
+        InstalledEvidenceCase::Coherent,
+        InstalledEvidenceCase::ConfigurationOnly,
+        InstalledEvidenceCase::ManifestOnly,
+        InstalledEvidenceCase::FirstInstall,
+        InstalledEvidenceCase::PartialArtifactsWithoutIdentity,
+        InstalledEvidenceCase::InvalidConfiguration,
+        InstalledEvidenceCase::InvalidManifest,
+        InstalledEvidenceCase::Contradictory,
+    ];
+    const EXPECTED: [[GateExpectation; 8]; 7] = [
+        [
+            Allowed,
+            Allowed,
+            Allowed,
+            Allowed,
+            Allowed,
+            Rejected(GENERIC_REJECTION),
+            Rejected(GENERIC_REJECTION),
+            Rejected(GENERIC_REJECTION),
+        ],
+        [
+            Allowed,
+            Rejected(UPDATE_REPAIR),
+            Allowed,
+            Rejected(GENERIC_REJECTION),
+            Rejected(GENERIC_REJECTION),
+            Rejected(GENERIC_REJECTION),
+            Rejected(GENERIC_REJECTION),
+            Rejected(GENERIC_REJECTION),
+        ],
+        [
+            Allowed,
+            Rejected(COHERENT_INSTALLATION),
+            Rejected(COHERENT_INSTALLATION),
+            Rejected(COHERENT_INSTALLATION),
+            Rejected(COHERENT_INSTALLATION),
+            Rejected(COHERENT_INSTALLATION),
+            Rejected(COHERENT_INSTALLATION),
+            Rejected(COHERENT_INSTALLATION),
+        ],
+        [
+            Allowed,
+            Rejected(GENERIC_REJECTION),
+            Allowed,
+            Rejected(GENERIC_REJECTION),
+            Rejected(GENERIC_REJECTION),
+            Rejected(GENERIC_REJECTION),
+            Rejected(GENERIC_REJECTION),
+            Rejected(GENERIC_REJECTION),
+        ],
+        [
+            Allowed,
+            Rejected(GENERIC_REJECTION),
+            Allowed,
+            Rejected(GENERIC_REJECTION),
+            Rejected(GENERIC_REJECTION),
+            Rejected(GENERIC_REJECTION),
+            Rejected(GENERIC_REJECTION),
+            Rejected(GENERIC_REJECTION),
+        ],
+        [
+            Allowed,
+            Allowed,
+            Rejected(VALID_CONFIGURATION),
+            Rejected(VALID_CONFIGURATION),
+            Rejected(VALID_CONFIGURATION),
+            Rejected(VALID_CONFIGURATION),
+            Rejected(VALID_CONFIGURATION),
+            Rejected(VALID_CONFIGURATION),
+        ],
+        [
+            Allowed,
+            Rejected(COHERENT_INSTALLATION),
+            Rejected(COHERENT_INSTALLATION),
+            Rejected(COHERENT_INSTALLATION),
+            Rejected(COHERENT_INSTALLATION),
+            Rejected(COHERENT_INSTALLATION),
+            Rejected(COHERENT_INSTALLATION),
+            Rejected(COHERENT_INSTALLATION),
+        ],
+    ];
+
+    for (operation, expected_outcomes) in SELECTED_HOME_OPERATIONS.into_iter().zip(EXPECTED) {
+        for (case, expected) in CASES.into_iter().zip(expected_outcomes) {
+            let (_root, paths) = fixture();
+            seed_case(&paths, case);
+            let result = require_selected_home_evidence(&paths, operation);
+            match (result, expected) {
+                (Ok(evidence), Allowed) => assert_eq!(evidence.case, case),
+                (
+                    Err(ControllerError::InvalidData {
+                        field: "installed_evidence",
+                        reason,
+                    }),
+                    Rejected(expected_reason),
+                ) => assert_eq!(reason, expected_reason, "{operation:?} rejected {case:?}"),
+                (actual, expected) => {
+                    panic!("{operation:?} produced {actual:?} for {case:?}; expected {expected:?}")
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn only_true_first_install_consults_ambient_codex_home() {
     let (_root, paths) = fixture();
@@ -155,7 +308,7 @@ fn only_true_first_install_consults_ambient_codex_home() {
         InstalledEvidenceCase::PartialArtifactsWithoutIdentity,
         InstalledEvidenceCase::InvalidConfiguration,
         InstalledEvidenceCase::InvalidManifest,
-        InstalledEvidenceCase::ContradictoryV2,
+        InstalledEvidenceCase::Contradictory,
     ] {
         let (_root, paths) = fixture();
         seed_case(&paths, case);
@@ -187,8 +340,7 @@ fn invalid_explicit_first_install_home_is_not_replaced_with_the_default() {
         "the production-path regression fixture requires a true first install"
     );
     assert!(
-        require_selected_home_evidence(&paths, &[InstalledEvidenceCase::FirstInstall], "setup")
-            .is_err(),
+        require_selected_home_evidence(&paths, SelectedHomeOperation::Setup).is_err(),
         "setup must receive the explicit CODEX_HOME validation error"
     );
 }
@@ -218,10 +370,12 @@ fn injected_exact_native_residue_blocks_ambient_first_install_selection() {
         InstalledEvidenceCase::PartialArtifactsWithoutIdentity,
     );
     assert_eq!(paths.codex_home, paths.home.join(".codex"));
-    assert!(
-        require_selected_home_evidence(&paths, &[InstalledEvidenceCase::FirstInstall], "setup",)
-            .is_err(),
-        "exact native product residue must block first-install selection"
+    assert_eq!(
+        require_selected_home_evidence(&paths, SelectedHomeOperation::Setup)
+            .unwrap()
+            .case,
+        InstalledEvidenceCase::PartialArtifactsWithoutIdentity,
+        "setup must treat native product residue as repairable partial evidence"
     );
 }
 
@@ -432,47 +586,16 @@ fn malformed_or_incompatible_schema_two_manifest_is_invalid_evidence() {
         ("pluginVersion", serde_json::json!("not-a-version")),
     ] {
         let (_root, paths) = fixture();
-        let mut manifest = valid_manifest(&paths, &paths.home.join(".codex"));
+        let mut manifest = valid_schema_two_manifest(&paths, &paths.home.join(".codex"));
         manifest[field] = value;
         write_manifest(&paths, manifest);
 
         assert_eq!(
             classify_selected_home_evidence(&paths).case,
             InstalledEvidenceCase::InvalidManifest,
-            "{field} must not authorize a schema-2 identity"
+            "{field} must not authorize a selected-home identity"
         );
-        for (operation, permitted) in [
-            (
-                "setup",
-                &[
-                    InstalledEvidenceCase::CoherentV2,
-                    InstalledEvidenceCase::ConfigurationOnlyV2,
-                    InstalledEvidenceCase::ManifestOnlyV2,
-                    InstalledEvidenceCase::FirstInstall,
-                    InstalledEvidenceCase::PartialArtifactsWithoutIdentity,
-                ][..],
-            ),
-            (
-                "update",
-                &[
-                    InstalledEvidenceCase::CoherentV2,
-                    InstalledEvidenceCase::ManifestOnlyV2,
-                ][..],
-            ),
-            ("enable", &[InstalledEvidenceCase::CoherentV2][..]),
-            (
-                "mcp",
-                &[
-                    InstalledEvidenceCase::CoherentV2,
-                    InstalledEvidenceCase::ConfigurationOnlyV2,
-                ][..],
-            ),
-        ] {
-            assert!(
-                require_selected_home_evidence(&paths, permitted, operation).is_err(),
-                "{field} must block {operation}"
-            );
-        }
+        assert_all_selected_home_operations_reject(&paths, field);
     }
 }
 
@@ -520,38 +643,7 @@ fn symlinked_evidence_source_ancestors_are_invalid_and_block_identity_loaders() 
             expected_case,
             "unsafe source ancestry must be invalid evidence"
         );
-        for (operation, permitted) in [
-            (
-                "setup",
-                &[
-                    InstalledEvidenceCase::CoherentV2,
-                    InstalledEvidenceCase::ConfigurationOnlyV2,
-                    InstalledEvidenceCase::ManifestOnlyV2,
-                    InstalledEvidenceCase::FirstInstall,
-                    InstalledEvidenceCase::PartialArtifactsWithoutIdentity,
-                ][..],
-            ),
-            (
-                "update",
-                &[
-                    InstalledEvidenceCase::CoherentV2,
-                    InstalledEvidenceCase::ManifestOnlyV2,
-                ][..],
-            ),
-            ("enable", &[InstalledEvidenceCase::CoherentV2][..]),
-            (
-                "mcp",
-                &[
-                    InstalledEvidenceCase::CoherentV2,
-                    InstalledEvidenceCase::ConfigurationOnlyV2,
-                ][..],
-            ),
-        ] {
-            assert!(
-                require_selected_home_evidence(&paths, permitted, operation).is_err(),
-                "unsafe source ancestry must block {operation}"
-            );
-        }
+        assert_all_selected_home_operations_reject(&paths, "unsafe source ancestry");
     }
 }
 
@@ -589,38 +681,7 @@ fn intermediate_symlink_before_effective_home_invalidates_all_product_evidence()
         classify_selected_home_evidence(&paths).case,
         InstalledEvidenceCase::InvalidConfiguration
     );
-    for (operation, permitted) in [
-        (
-            "setup",
-            &[
-                InstalledEvidenceCase::CoherentV2,
-                InstalledEvidenceCase::ConfigurationOnlyV2,
-                InstalledEvidenceCase::ManifestOnlyV2,
-                InstalledEvidenceCase::FirstInstall,
-                InstalledEvidenceCase::PartialArtifactsWithoutIdentity,
-            ][..],
-        ),
-        (
-            "update",
-            &[
-                InstalledEvidenceCase::CoherentV2,
-                InstalledEvidenceCase::ManifestOnlyV2,
-            ][..],
-        ),
-        ("enable", &[InstalledEvidenceCase::CoherentV2][..]),
-        (
-            "mcp",
-            &[
-                InstalledEvidenceCase::CoherentV2,
-                InstalledEvidenceCase::ConfigurationOnlyV2,
-            ][..],
-        ),
-    ] {
-        assert!(
-            require_selected_home_evidence(&paths, permitted, operation).is_err(),
-            "intermediate HOME symlink must block {operation}"
-        );
-    }
+    assert_all_selected_home_operations_reject(&paths, "intermediate HOME symlink");
 }
 
 #[tokio::test]
@@ -835,7 +896,7 @@ async fn invalid_evidence_command_matrix_preserves_identity_state_and_service_bo
     for evidence in [
         MatrixEvidence::Case(InstalledEvidenceCase::InvalidConfiguration),
         MatrixEvidence::Case(InstalledEvidenceCase::InvalidManifest),
-        MatrixEvidence::Case(InstalledEvidenceCase::ContradictoryV2),
+        MatrixEvidence::Case(InstalledEvidenceCase::Contradictory),
         MatrixEvidence::SymlinkedConfigurationParent,
         MatrixEvidence::SymlinkedManifestDataRoot,
     ] {
@@ -978,7 +1039,7 @@ fn invalid_or_contradictory_evidence_blocks_each_identity_dependent_loader_witho
     for case in [
         InstalledEvidenceCase::InvalidConfiguration,
         InstalledEvidenceCase::InvalidManifest,
-        InstalledEvidenceCase::ContradictoryV2,
+        InstalledEvidenceCase::Contradictory,
     ] {
         let (_root, paths) = fixture();
         seed_case(&paths, case);
@@ -991,38 +1052,7 @@ fn invalid_or_contradictory_evidence_blocks_each_identity_dependent_loader_witho
         ]
         .map(|path| (path.clone(), fs::read(&path).ok()));
 
-        for (operation, permitted) in [
-            (
-                "setup",
-                &[
-                    InstalledEvidenceCase::CoherentV2,
-                    InstalledEvidenceCase::ConfigurationOnlyV2,
-                    InstalledEvidenceCase::ManifestOnlyV2,
-                    InstalledEvidenceCase::FirstInstall,
-                    InstalledEvidenceCase::PartialArtifactsWithoutIdentity,
-                ][..],
-            ),
-            (
-                "update",
-                &[
-                    InstalledEvidenceCase::CoherentV2,
-                    InstalledEvidenceCase::ManifestOnlyV2,
-                ][..],
-            ),
-            ("enable", &[InstalledEvidenceCase::CoherentV2][..]),
-            (
-                "mcp",
-                &[
-                    InstalledEvidenceCase::CoherentV2,
-                    InstalledEvidenceCase::ConfigurationOnlyV2,
-                ][..],
-            ),
-        ] {
-            assert!(
-                require_selected_home_evidence(&paths, permitted, operation).is_err(),
-                "{case:?} must block {operation}"
-            );
-        }
+        assert_all_selected_home_operations_reject(&paths, &format!("{case:?}"));
 
         for (path, expected) in before {
             assert_eq!(

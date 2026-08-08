@@ -8,7 +8,7 @@ use crate::{app_server::TESTED_CODEX_VERSION, error::ControllerError};
 use super::{
     DESKTOP_DETACH_GUIDANCE, LifecycleContext, LifecycleTarget, display_command_for_paths,
     evidence::{
-        InstalledEvidenceCase, ResolvedUserPaths, classify_selected_home_evidence,
+        ResolvedUserPaths, SelectedHomeOperation, classify_selected_home_evidence,
         require_selected_home_evidence,
     },
     incomplete_descriptor_cleanup, lifecycle_context,
@@ -193,21 +193,14 @@ pub(super) async fn uninstall_with_context(
         &retry
     );
 
-    let evidence = require_selected_home_evidence(
-        paths,
-        &[
-            InstalledEvidenceCase::CoherentV2,
-            InstalledEvidenceCase::ManifestOnlyV2,
-        ],
-        "uninstall",
-    )
-    .map_err(|error| {
-        progress.fail(
-            UninstallStage::DescriptorRemove,
-            incomplete_descriptor_cleanup(error),
-            &retry,
-        )
-    })?;
+    let evidence = require_selected_home_evidence(paths, SelectedHomeOperation::Uninstall)
+        .map_err(|error| {
+            progress.fail(
+                UninstallStage::DescriptorRemove,
+                incomplete_descriptor_cleanup(error),
+                &retry,
+            )
+        })?;
     let desktop_intent_removed =
         remove_persisted_desktop_descriptor(paths, &evidence).map_err(|error| {
             progress.fail(
