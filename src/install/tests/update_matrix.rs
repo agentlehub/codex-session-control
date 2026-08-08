@@ -336,6 +336,49 @@ async fn candidate_identity_and_semver_rejections_precede_all_mutation() {
 }
 
 #[tokio::test]
+async fn invalid_persisted_desktop_identity_rejects_update_before_every_mutation() {
+    let fixture = Fixture::new();
+    let (authority, _) = setup_attached(&fixture).await;
+    seed_protected_codex_home_state(&fixture);
+    let valid_manifest_bytes = fs::read(&fixture.paths.manifest).unwrap();
+    let valid_manifest: Value = serde_json::from_slice(&valid_manifest_bytes).unwrap();
+    let valid_attachment = valid_manifest["desktopAttachment"].clone();
+    let candidate = higher_candidate(&fixture, "candidate-invalid-desktop-identity");
+
+    for (case, invalid_attachment) in invalid_desktop_attachment_shapes(&valid_attachment) {
+        let invalid_descriptor =
+            PathBuf::from(invalid_attachment["descriptorPath"].as_str().unwrap());
+        let mut invalid_manifest = valid_manifest.clone();
+        invalid_manifest["desktopAttachment"] = invalid_attachment;
+        let mut invalid_manifest_bytes = serde_json::to_vec_pretty(&invalid_manifest).unwrap();
+        invalid_manifest_bytes.push(b'\n');
+        fs::write(&fixture.paths.manifest, invalid_manifest_bytes).unwrap();
+        let before = snapshot_guarded_state(&fixture);
+        let invalid_descriptor_before = snapshot_file(invalid_descriptor);
+        fixture.clear_logs();
+
+        let error = staged_update_with_context(context(&fixture, candidate.clone(), None))
+            .await
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("failed at candidate-preflight:"),
+            "{case}: {error}"
+        );
+        assert_eq!(snapshot_guarded_state(&fixture), before, "{case}");
+        assert_eq!(
+            snapshot_file(invalid_descriptor_before.0.clone()),
+            invalid_descriptor_before
+        );
+        assert!(fixture.systemctl_log().is_empty(), "{case}");
+        assert!(fixture.codex_log().is_empty(), "{case}");
+    }
+
+    fs::write(&fixture.paths.manifest, valid_manifest_bytes).unwrap();
+    drop(authority);
+}
+
+#[tokio::test]
 async fn coherent_equal_candidate_reports_current_only_after_state_proof() {
     let fixture = Fixture::new();
     let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;

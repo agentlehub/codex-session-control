@@ -186,14 +186,98 @@ impl ResolvedUserPaths {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum InstalledEvidenceCase {
-    CoherentV2,
-    ConfigurationOnlyV2,
-    ManifestOnlyV2,
+    Coherent,
+    ConfigurationOnly,
+    ManifestOnly,
     FirstInstall,
     PartialArtifactsWithoutIdentity,
     InvalidConfiguration,
     InvalidManifest,
-    ContradictoryV2,
+    Contradictory,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SelectedHomeOperation {
+    Setup,
+    Update,
+    Enable,
+    Disable,
+    Uninstall,
+    Mcp,
+    Codex,
+}
+
+impl SelectedHomeOperation {
+    const fn rejection_reason(self, case: InstalledEvidenceCase) -> Option<&'static str> {
+        const GENERIC: &str = "selected-home identity is unavailable or contradictory";
+        const COHERENT_INSTALLATION: &str = "coherent schema-2 configuration and supported schema-2 or schema-3 installed manifest are required";
+        const VALID_CONFIGURATION: &str = "valid schema-2 configuration is required";
+
+        match self {
+            Self::Setup => match case {
+                InstalledEvidenceCase::Coherent
+                | InstalledEvidenceCase::ConfigurationOnly
+                | InstalledEvidenceCase::ManifestOnly
+                | InstalledEvidenceCase::FirstInstall
+                | InstalledEvidenceCase::PartialArtifactsWithoutIdentity => None,
+                InstalledEvidenceCase::InvalidConfiguration
+                | InstalledEvidenceCase::InvalidManifest
+                | InstalledEvidenceCase::Contradictory => Some(GENERIC),
+            },
+            Self::Update => match case {
+                InstalledEvidenceCase::Coherent | InstalledEvidenceCase::ManifestOnly => None,
+                InstalledEvidenceCase::ConfigurationOnly => {
+                    Some("installed configuration requires same-release setup repair")
+                }
+                InstalledEvidenceCase::FirstInstall
+                | InstalledEvidenceCase::PartialArtifactsWithoutIdentity
+                | InstalledEvidenceCase::InvalidConfiguration
+                | InstalledEvidenceCase::InvalidManifest
+                | InstalledEvidenceCase::Contradictory => Some(GENERIC),
+            },
+            Self::Enable | Self::Codex => match case {
+                InstalledEvidenceCase::Coherent => None,
+                InstalledEvidenceCase::ConfigurationOnly
+                | InstalledEvidenceCase::ManifestOnly
+                | InstalledEvidenceCase::FirstInstall
+                | InstalledEvidenceCase::PartialArtifactsWithoutIdentity
+                | InstalledEvidenceCase::InvalidConfiguration
+                | InstalledEvidenceCase::InvalidManifest
+                | InstalledEvidenceCase::Contradictory => Some(COHERENT_INSTALLATION),
+            },
+            Self::Disable | Self::Uninstall => match case {
+                InstalledEvidenceCase::Coherent | InstalledEvidenceCase::ManifestOnly => None,
+                InstalledEvidenceCase::ConfigurationOnly
+                | InstalledEvidenceCase::FirstInstall
+                | InstalledEvidenceCase::PartialArtifactsWithoutIdentity
+                | InstalledEvidenceCase::InvalidConfiguration
+                | InstalledEvidenceCase::InvalidManifest
+                | InstalledEvidenceCase::Contradictory => Some(GENERIC),
+            },
+            Self::Mcp => match case {
+                InstalledEvidenceCase::Coherent | InstalledEvidenceCase::ConfigurationOnly => None,
+                InstalledEvidenceCase::ManifestOnly
+                | InstalledEvidenceCase::FirstInstall
+                | InstalledEvidenceCase::PartialArtifactsWithoutIdentity
+                | InstalledEvidenceCase::InvalidConfiguration
+                | InstalledEvidenceCase::InvalidManifest
+                | InstalledEvidenceCase::Contradictory => Some(VALID_CONFIGURATION),
+            },
+        }
+    }
+
+    pub(super) fn require_permitted_case(
+        self,
+        case: InstalledEvidenceCase,
+    ) -> Result<(), ControllerError> {
+        match self.rejection_reason(case) {
+            Some(reason) => Err(ControllerError::InvalidData {
+                field: "installed_evidence",
+                reason,
+            }),
+            None => Ok(()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -365,16 +449,16 @@ pub(super) fn selected_codex_home(
 ) -> Result<Option<PathBuf>, ControllerError> {
     let evidence = classify_selected_home_evidence(paths);
     match evidence.case {
-        InstalledEvidenceCase::CoherentV2
-        | InstalledEvidenceCase::ConfigurationOnlyV2
-        | InstalledEvidenceCase::ManifestOnlyV2 => Ok(evidence.selected_home),
+        InstalledEvidenceCase::Coherent
+        | InstalledEvidenceCase::ConfigurationOnly
+        | InstalledEvidenceCase::ManifestOnly => Ok(evidence.selected_home),
         InstalledEvidenceCase::FirstInstall => {
             select_first_install_codex_home(ambient_codex_home, &paths.home, paths).map(Some)
         }
         InstalledEvidenceCase::PartialArtifactsWithoutIdentity
         | InstalledEvidenceCase::InvalidConfiguration
         | InstalledEvidenceCase::InvalidManifest
-        | InstalledEvidenceCase::ContradictoryV2 => Ok(None),
+        | InstalledEvidenceCase::Contradictory => Ok(None),
     }
 }
 
@@ -431,17 +515,15 @@ pub(super) fn classify_selected_home_evidence_with_native_product_artifact(
         (StoredEvidence::Invalid(_), _) => InstalledEvidenceCase::InvalidConfiguration,
         (_, StoredEvidence::Invalid(_)) => InstalledEvidenceCase::InvalidManifest,
         (StoredEvidence::Valid(_), StoredEvidence::Valid(_)) if selected_home.is_some() => {
-            InstalledEvidenceCase::CoherentV2
+            InstalledEvidenceCase::Coherent
         }
         (StoredEvidence::Valid(_), StoredEvidence::Valid(_)) => {
-            InstalledEvidenceCase::ContradictoryV2
+            InstalledEvidenceCase::Contradictory
         }
         (StoredEvidence::Valid(_), StoredEvidence::Missing) => {
-            InstalledEvidenceCase::ConfigurationOnlyV2
+            InstalledEvidenceCase::ConfigurationOnly
         }
-        (StoredEvidence::Missing, StoredEvidence::Valid(_)) => {
-            InstalledEvidenceCase::ManifestOnlyV2
-        }
+        (StoredEvidence::Missing, StoredEvidence::Valid(_)) => InstalledEvidenceCase::ManifestOnly,
         (StoredEvidence::Missing, StoredEvidence::Missing)
             if product_artifact_is_present(paths) || native_product_residue.is_present() =>
         {
@@ -468,8 +550,7 @@ pub(super) fn classify_selected_home_evidence_with_native_product_artifact(
 
 pub(super) fn require_selected_home_evidence(
     paths: &ResolvedUserPaths,
-    permitted: &[InstalledEvidenceCase],
-    operation: &'static str,
+    operation: SelectedHomeOperation,
 ) -> Result<SelectedHomeEvidence, ControllerError> {
     let evidence = classify_selected_home_evidence(paths);
     if evidence.case == InstalledEvidenceCase::FirstInstall
@@ -477,20 +558,7 @@ pub(super) fn require_selected_home_evidence(
     {
         return Err(error.into());
     }
-    if !permitted.contains(&evidence.case) {
-        return Err(ControllerError::InvalidData {
-            field: "installed_evidence",
-            reason: match operation {
-                "update" if evidence.case == InstalledEvidenceCase::ConfigurationOnlyV2 => {
-                    "installed configuration requires same-release setup repair"
-                }
-                "enable" => "coherent schema-2 configuration and manifest are required",
-                "codex" => "coherent schema-2 configuration and manifest are required",
-                "mcp" => "valid schema-2 configuration is required",
-                _ => "selected-home identity is unavailable or contradictory",
-            },
-        });
-    }
+    operation.require_permitted_case(evidence.case)?;
     if let Some(selected_home) = &evidence.selected_home
         && selected_home != &paths.codex_home
     {
@@ -596,14 +664,7 @@ pub(crate) fn load_installed_config() -> Result<ProductConfig, ControllerError> 
 pub(super) fn load_config_from_paths(
     paths: &ResolvedUserPaths,
 ) -> Result<ProductConfig, ControllerError> {
-    let evidence = require_selected_home_evidence(
-        paths,
-        &[
-            InstalledEvidenceCase::CoherentV2,
-            InstalledEvidenceCase::ConfigurationOnlyV2,
-        ],
-        "mcp",
-    )?;
+    let evidence = require_selected_home_evidence(paths, SelectedHomeOperation::Mcp)?;
     let expected = evidence.configuration.ok_or(ControllerError::InvalidData {
         field: "config",
         reason: "invalid installed configuration",

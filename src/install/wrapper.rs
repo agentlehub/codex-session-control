@@ -3,7 +3,7 @@ use std::{ffi::OsString, path::Path, process::Command};
 use crate::{app_server::AppServerClient, error::ControllerError, model::ProductConfig};
 
 use super::{
-    evidence::{InstalledEvidenceCase, ResolvedUserPaths, require_selected_home_evidence},
+    evidence::{ResolvedUserPaths, SelectedHomeOperation, require_selected_home_evidence},
     native::{read_codex_version, valid_executable},
     paths::{
         FileKind, lifecycle_file_error, read_product_evidence_file, validate_control_socket,
@@ -23,8 +23,7 @@ pub(super) async fn prepare_codex_wrapper(
 ) -> Result<Command, ControllerError> {
     let unavailable = |error: ControllerError| wrapper_authority_unavailable(error.to_string());
     let evidence =
-        require_selected_home_evidence(paths, &[InstalledEvidenceCase::CoherentV2], "codex")
-            .map_err(unavailable)?;
+        require_selected_home_evidence(paths, SelectedHomeOperation::Codex).map_err(unavailable)?;
     let expected_config = evidence.configuration.ok_or_else(|| {
         unavailable(ControllerError::InvalidData {
             field: "configuration",
@@ -34,7 +33,7 @@ pub(super) async fn prepare_codex_wrapper(
     let manifest = evidence.manifest.ok_or_else(|| {
         unavailable(ControllerError::InvalidData {
             field: "manifest",
-            reason: "valid schema-2 installed manifest is required",
+            reason: "valid schema-2 or schema-3 installed manifest is required",
         })
     })?;
     if expected_config.codex_executable != manifest.codex_executable

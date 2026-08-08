@@ -91,9 +91,9 @@ async fn wrapper_rejects_a_valid_but_contradictory_manifest_before_exec() {
 
     assert_eq!(error.exit_code(), 1);
     assert!(
-        error
-            .to_string()
-            .contains("coherent schema-2 configuration and manifest are required")
+        error.to_string().contains(
+            "coherent schema-2 configuration and supported schema-2 or schema-3 installed manifest are required"
+        )
     );
 }
 
