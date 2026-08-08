@@ -20,7 +20,7 @@ use crate::{
 use super::{
     CandidateRelease, DesktopAttachmentStatus, LifecycleContext, LifecycleReceipt,
     display_command_for_paths,
-    evidence::{InstalledEvidenceCase, ResolvedUserPaths, require_selected_home_evidence},
+    evidence::{ResolvedUserPaths, SelectedHomeOperation, require_selected_home_evidence},
     native::{
         read_codex_version, reconcile_marketplace, reconcile_plugin, resolve_named_executable,
     },
@@ -947,14 +947,7 @@ fn inspect_candidate(path: &Path) -> Result<CandidateRelease, ControllerError> {
 }
 
 fn load_update_manifest(paths: &ResolvedUserPaths) -> Result<InstalledRelease, ControllerError> {
-    let evidence = require_selected_home_evidence(
-        paths,
-        &[
-            InstalledEvidenceCase::CoherentV2,
-            InstalledEvidenceCase::ManifestOnlyV2,
-        ],
-        "update",
-    )?;
+    let evidence = require_selected_home_evidence(paths, SelectedHomeOperation::Update)?;
     let expected = evidence
         .manifest
         .ok_or_else(|| ControllerError::Operational("installed manifest is invalid".to_owned()))?;

@@ -19,7 +19,7 @@ use super::{
     DESKTOP_DETACH_GUIDANCE, DesktopAttachmentStatus, LifecycleContext, LifecycleDesktopPlan,
     LifecycleReceipt, LifecycleTarget, cleanup_changed_descriptor_after_start_failure,
     display_command_for_paths,
-    evidence::{InstalledEvidenceCase, ResolvedUserPaths, require_selected_home_evidence},
+    evidence::{ResolvedUserPaths, SelectedHomeOperation, require_selected_home_evidence},
     incomplete_descriptor_cleanup, lifecycle_context,
     native::{read_codex_version, resolve_named_executable},
     paths::{lifecycle_file_error, read_product_evidence_file, read_status_file},
@@ -104,9 +104,8 @@ pub(super) async fn enable_with_context(
         display_command_for_paths(&context.target.paths, &context.path_environment);
     let retry = format!("{display_command} enable");
     let paths = &context.target.paths;
-    let evidence =
-        require_selected_home_evidence(paths, &[InstalledEvidenceCase::CoherentV2], "enable")
-            .map_err(|error| progress.fail(LifecycleStage::Configuration, error, &retry))?;
+    let evidence = require_selected_home_evidence(paths, SelectedHomeOperation::Enable)
+        .map_err(|error| progress.fail(LifecycleStage::Configuration, error, &retry))?;
     let expected_config = evidence.configuration.ok_or_else(|| {
         progress.fail(
             LifecycleStage::Configuration,
@@ -365,21 +364,15 @@ pub(super) async fn disable_with_context(
         &retry
     );
 
-    let evidence = require_selected_home_evidence(
-        &context.target.paths,
-        &[
-            InstalledEvidenceCase::CoherentV2,
-            InstalledEvidenceCase::ManifestOnlyV2,
-        ],
-        "disable",
-    )
-    .map_err(|error| {
-        progress.fail(
-            LifecycleStage::DescriptorRemove,
-            incomplete_descriptor_cleanup(error),
-            &retry,
-        )
-    })?;
+    let evidence =
+        require_selected_home_evidence(&context.target.paths, SelectedHomeOperation::Disable)
+            .map_err(|error| {
+                progress.fail(
+                    LifecycleStage::DescriptorRemove,
+                    incomplete_descriptor_cleanup(error),
+                    &retry,
+                )
+            })?;
     let desktop_intent_removed =
         remove_persisted_desktop_descriptor(&context.target.paths, &evidence).map_err(|error| {
             progress.fail(
