@@ -923,7 +923,8 @@ failed at descriptor-remove:"
                     assert_eq!(
                         fixture.systemctl_log(),
                         format!(
-                            "--user disable --now {unit}\n\
+                            "--user is-active {unit}\n\
+                                     --user disable --now {unit}\n\
                                      --user is-enabled {unit}\n\
                                      --user is-active {unit}\n"
                         )
@@ -941,7 +942,8 @@ failed at descriptor-remove:"
                     assert_eq!(
                         fixture.systemctl_log(),
                         format!(
-                            "--user disable --now {unit}\n\
+                            "--user is-active {unit}\n\
+                                     --user disable --now {unit}\n\
                                      --user is-enabled {unit}\n\
                                      --user is-active {unit}\n"
                         )
