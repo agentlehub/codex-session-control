@@ -1064,6 +1064,56 @@ fn systemd_integration_owns_complete_disposable_user_contract() {
     )
     .unwrap();
 
+    assert!(
+        transaction.starts_with("#!/usr/bin/env bash\nset -euo pipefail\n"),
+        "disposable systemd transaction must use the strict Bash header"
+    );
+    let transaction_lines = transaction.lines().collect::<Vec<_>>();
+    let exact_line = |expected: &str| {
+        let matches = transaction_lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| (*line == expected).then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matches.len(),
+            1,
+            "disposable systemd transaction must contain exactly one `{expected}` line"
+        );
+        matches[0]
+    };
+    let cleanup_definition = exact_line("cleanup() {");
+    let cleanup_end = transaction_lines
+        .iter()
+        .enumerate()
+        .skip(cleanup_definition + 1)
+        .find_map(|(index, line)| (*line == "}").then_some(index))
+        .expect("cleanup function closing brace is missing");
+    let trap_installation = exact_line("trap cleanup EXIT");
+    let first_privileged_mutation =
+        exact_line("sudo useradd --create-home --home-dir \"$home\" --shell /bin/bash \"$user\"");
+    let explicit_cleanup = exact_line("cleanup");
+    let trap_clearing = exact_line("trap - EXIT");
+    let runtime_absence = exact_line("test ! -e \"$runtime\"");
+    let home_absence = exact_line("test ! -e \"$home\"");
+    let linger_absence = exact_line("test ! -e \"/var/lib/systemd/linger/$user\"");
+    let manager_absence = exact_line("if sudo systemctl is-active --quiet \"$manager\"; then");
+    assert!(
+        cleanup_definition < cleanup_end
+            && cleanup_end < trap_installation
+            && trap_installation < first_privileged_mutation,
+        "cleanup must be defined and trapped before the first privileged mutation"
+    );
+    assert!(
+        first_privileged_mutation < explicit_cleanup
+            && explicit_cleanup < trap_clearing
+            && trap_clearing < runtime_absence
+            && runtime_absence < home_absence
+            && home_absence < linger_absence
+            && linger_absence < manager_absence,
+        "explicit cleanup and trap clearing must precede final disposable-state absence checks"
+    );
+
     let checkout = integration.find(CHECKOUT_REFERENCE).unwrap();
     let prerequisites = integration
         .find("- name: Install systemd-user prerequisites")
@@ -1222,7 +1272,7 @@ test ! -e "$home"
 test ! -e "/var/lib/systemd/linger/$user"
 if sudo systemctl is-active --quiet "$manager"; then"#,
         ),
-        "cleanup must precede final runtime, home, linger, and manager absence verification"
+        "cleanup must precede contiguous final runtime, home, linger, and manager absence verification"
     );
     assert!(
         transaction
