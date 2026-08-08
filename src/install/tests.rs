@@ -82,6 +82,73 @@ fn higher_test_release_version() -> String {
     semver::Version::new(current.major, next_minor, 0).to_string()
 }
 
+fn invalid_desktop_attachment_shapes(valid: &Value) -> Vec<(&'static str, Value)> {
+    let descriptor = PathBuf::from(valid["descriptorPath"].as_str().unwrap());
+    let app_directory = descriptor.parent().unwrap();
+    let config_root = app_directory.parent().unwrap();
+    let app_id = valid["appId"].as_str().unwrap();
+    let descriptor_file_name = descriptor.file_name().unwrap();
+    let cases = [
+        (
+            "relative-launcher",
+            "launcherPath",
+            Value::from("relative/launcher"),
+        ),
+        ("empty-app-id", "appId", Value::from("")),
+        ("current-directory-app-id", "appId", Value::from(".")),
+        ("parent-directory-app-id", "appId", Value::from("..")),
+        ("slash-app-id", "appId", Value::from("codex/desktop")),
+        ("backslash-app-id", "appId", Value::from("codex\\desktop")),
+        ("control-app-id", "appId", Value::from("codex\0desktop")),
+        (
+            "relative-descriptor",
+            "descriptorPath",
+            Value::from("relative/app-server-attachment.json"),
+        ),
+        (
+            "non-normalized-descriptor",
+            "descriptorPath",
+            Value::from(
+                app_directory
+                    .join("..")
+                    .join(app_id)
+                    .join(descriptor_file_name)
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        ),
+        (
+            "mismatched-descriptor-parent",
+            "descriptorPath",
+            Value::from(
+                config_root
+                    .join("other-app")
+                    .join(descriptor_file_name)
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        ),
+        (
+            "unexpected-descriptor-filename",
+            "descriptorPath",
+            Value::from(
+                app_directory
+                    .join("other.json")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        ),
+    ];
+    cases
+        .into_iter()
+        .map(|(case, field, value)| {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            (case, invalid)
+        })
+        .collect()
+}
+
 #[test]
 fn synthetic_release_version_is_strictly_higher_than_package_version() {
     let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
