@@ -31,7 +31,10 @@ use super::{
     paths::{SOCKET_SECURITY_REQUIREMENT, StatusFileError, read_status_file},
     product_target,
     render::{RenderedProjection, render_projection},
-    service::{LifecycleTarget, query_systemctl_state},
+    service::{
+        LifecycleTarget, SystemctlActivityState, SystemctlEnablementState,
+        query_systemctl_activity, query_systemctl_enablement,
+    },
     sha256_bytes,
 };
 
@@ -369,8 +372,11 @@ fn inspect_service_and_socket(
     let systemctl =
         resolve_named_executable(&context.path_environment, &context.cwd, "systemctl").ok();
     let enabled = systemctl.as_ref().and_then(|systemctl| {
-        match query_systemctl_state(systemctl, "is-enabled", &context.target.unit_name) {
-            Ok(state) => Some(state),
+        match query_systemctl_enablement(systemctl, &context.target.unit_name) {
+            Ok(SystemctlEnablementState::Enabled) => Some(true),
+            Ok(SystemctlEnablementState::Disabled | SystemctlEnablementState::NotFound) => {
+                Some(false)
+            }
             Err(error) => {
                 failures.push(StatusFailure {
                     check: "service-state",
@@ -382,8 +388,9 @@ fn inspect_service_and_socket(
         }
     });
     let active = systemctl.as_ref().and_then(|systemctl| {
-        match query_systemctl_state(systemctl, "is-active", &context.target.unit_name) {
-            Ok(state) => Some(state),
+        match query_systemctl_activity(systemctl, &context.target.unit_name) {
+            Ok(SystemctlActivityState::Active) => Some(true),
+            Ok(SystemctlActivityState::Inactive) => Some(false),
             Err(error) => {
                 failures.push(StatusFailure {
                     check: "service-state",
