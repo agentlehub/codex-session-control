@@ -80,6 +80,44 @@ async fn first_install_waits_for_safe_socket_after_service_start_returns() {
 }
 
 #[tokio::test]
+async fn setup_verification_reports_untrustworthy_systemctl_state_as_operational_failure() {
+    for operation in ["is-enabled", "is-active"] {
+        let fixture = Fixture::new();
+        let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+        fs::write(
+            &fixture.systemctl_fail,
+            format!("--user {operation} codex-session-control-test-Setup1.service"),
+        )
+        .unwrap();
+
+        let error = setup_with_context(fixture.context(true)).await.unwrap_err();
+
+        assert_eq!(error.exit_code(), 1, "{operation}");
+        assert!(
+            error.to_string().contains(&format!(
+                "failed at service-verify: systemctl {operation} could not provide trustworthy service state\n"
+            )),
+            "{operation}: {error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("retry: codex-session-control update\n"),
+            "{operation}: {error}"
+        );
+        assert!(!fixture.paths.manifest.exists(), "{operation}");
+        let systemctl = fixture.systemctl_log();
+        assert!(
+            systemctl.contains(&format!(
+                "--user {operation} codex-session-control-test-Setup1.service\n"
+            )),
+            "{operation}: {systemctl}"
+        );
+        assert!(!systemctl.contains("--quiet"), "{operation}: {systemctl}");
+    }
+}
+
+#[tokio::test]
 async fn preflight_treats_absent_selected_home_as_empty_native_state() {
     let fixture = Fixture::new();
     fs::remove_dir_all(&fixture.paths.codex_home).unwrap();
