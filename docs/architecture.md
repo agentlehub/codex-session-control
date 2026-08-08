@@ -51,11 +51,11 @@ CLI and MCP work without Desktop integration. Desktop support requires a verifie
 
 `setup` and `enable` create the Desktop connection file before starting the service. `disable` and `uninstall` stop the service and wait for its socket to disappear before removing that file. Uninstall removes only files owned by Codex Session Control.
 
-Before an operation can stop or restart an active managed service, Codex Session Control inspects the caller. A successful `systemctl --user whoami` exactly identifies the caller's unit: the managed unit proves self-hosting, while another valid unit proves independence. If that inspection is unavailable, the fallback compares the caller's cgroup with the managed service's `ControlGroup`; it can prove self-hosting but never independence. Any other result is unknown and fails closed before a disruptive operation.
+Codex Session Control stops or restarts an active managed service only when the lifecycle command is independent of that service. Otherwise, it refuses before changing service or installed state and shows how to retry.
 
-`update` verifies the downloaded release and current installation, snapshots the service, and determines whether the running Codex version, configured executable path, or rendered systemd unit requires a restart. A no-restart update applies its durable files without interrupting the service, verifies the resulting service state, and writes the schema-3 installation manifest last. If an active service needs a restart, caller independence is required before the active-task gate, file changes, descriptor changes, or service action. An independent caller then reviews the active-task interruption prompt before the update applies files, restarts the service, verifies it, and persists the manifest last.
+`update` verifies the downloaded release and the current installation before making changes. It restarts the service only when the Codex executable or systemd unit changes. If the restart would interrupt active sessions, Codex Session Control lists them and asks for permission to continue. The update stops unless the user explicitly answers yes.
 
-For an active service, `disable` and `uninstall` inspect the caller before `systemctl --user disable --now`. Only after the service stop is verified can either command remove a Desktop connection file; uninstall then removes only files owned by Codex Session Control. If any lifecycle operation fails, Codex Session Control reports the completed stages and shows a recovery command. It does not undo completed changes automatically.
+Updates that do not require a restart are applied without interrupting the service. If an update fails, Codex Session Control reports which steps completed and shows a command to retry. It does not undo completed changes automatically.
 
 MCP tool catalog changes apply to new sessions. Already-open sessions may continue using cached tools.
 
