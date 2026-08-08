@@ -338,6 +338,7 @@ fn validation_warning_prefixes_preserve_structured_success_and_error_bytes() {
     for (tool, _, _) in TOOL_EFFECTS {
         let structured = json!({"tool": tool, "value": [3, 2, 1]});
         let structured_bytes = serde_json::to_vec(&structured).unwrap();
+        let structured_text = serde_json::to_string(&structured).unwrap();
         let error = ToolErrorData::fixed(ToolErrorCategory::TargetUnavailable, tool, "connect");
         let error_value = serde_json::to_value(&error).unwrap();
         let error_bytes = serde_json::to_vec(&error_value).unwrap();
@@ -349,16 +350,14 @@ fn validation_warning_prefixes_preserve_structured_success_and_error_bytes() {
                 structured_bytes
             );
             let rendered = serde_json::to_value(&success).unwrap();
-            assert!(
-                rendered["content"][0]["text"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with(warning)
+            assert_eq!(
+                rendered["content"][0]["text"].as_str().unwrap(),
+                format!("{warning}\n\n{structured_text}")
             );
 
             let failure = error_response(error.clone(), Some(warning));
             assert_eq!(failure.code, ErrorCode(-32000));
-            assert!(failure.message.starts_with(warning));
+            assert_eq!(failure.message, format!("{warning}\n\n{}", error.message));
             assert_eq!(
                 serde_json::to_vec(failure.data.as_ref().unwrap()).unwrap(),
                 error_bytes
@@ -371,15 +370,13 @@ fn validation_warning_prefixes_preserve_structured_success_and_error_bytes() {
             structured_bytes
         );
         let rendered = serde_json::to_value(&success).unwrap();
-        assert!(
-            !rendered["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .starts_with("WARNING:")
+        assert_eq!(
+            rendered["content"][0]["text"].as_str().unwrap(),
+            structured_text
         );
 
         let failure = error_response(error.clone(), None);
-        assert!(!failure.message.starts_with("WARNING:"));
+        assert_eq!(failure.message, error.message);
         assert_eq!(
             serde_json::to_vec(failure.data.as_ref().unwrap()).unwrap(),
             error_bytes

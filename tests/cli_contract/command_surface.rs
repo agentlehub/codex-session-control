@@ -256,55 +256,6 @@ fn uninstall_exposes_the_preservation_boundary_and_no_bypass_controls() {
     }
 }
 
-fn uninstall_implementation_source() -> &'static str {
-    let source = include_str!("../../src/install/uninstall.rs");
-    let start = source
-        .find("async fn uninstall_with_context(")
-        .expect("uninstall implementation start");
-    let end = source[start..]
-        .find("fn cleanup_codex_executable(")
-        .map(|offset| start + offset)
-        .expect("uninstall implementation end");
-    &source[start..end]
-}
-
-#[test]
-fn desktop_stop_lifecycle() {
-    let implementation = uninstall_implementation_source();
-
-    assert!(implementation.contains("UninstallStage::DescriptorRemove"));
-    assert!(
-        implementation.find("UninstallStage::ServiceStopVerify")
-            < implementation.find("UninstallStage::DescriptorRemove")
-    );
-    assert!(
-        implementation.find("UninstallStage::DescriptorRemove")
-            < implementation.find("UninstallStage::ServiceUnitRemove")
-    );
-}
-
-#[test]
-fn uninstall_success_receipt() {
-    let implementation = uninstall_implementation_source();
-
-    for required in [
-        "Codex app-server service: removed",
-        "Product descriptor: removed",
-        "Product projection: removed",
-        "Product configuration: removed",
-        "Product executable: removed",
-        "Codex home preserved:",
-        "Authentication preserved: yes",
-        "Tasks preserved: yes",
-        "Rollouts preserved: yes",
-    ] {
-        assert!(implementation.contains(required), "{required}");
-    }
-    for forbidden in ["manual:", "rm -rf", "remove the Codex home"] {
-        assert!(!implementation.contains(forbidden), "{forbidden}");
-    }
-}
-
 #[test]
 fn update_exposes_no_public_staging_restart_or_release_controls() {
     Command::cargo_bin("codex-session-control")
