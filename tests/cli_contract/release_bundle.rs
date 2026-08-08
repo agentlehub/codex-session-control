@@ -2,6 +2,7 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use sha2::{Digest, Sha256};
@@ -231,13 +232,35 @@ pub(super) fn assert_release_asset_rules() {
 }
 
 pub(super) fn assert_release_assets() {
-    let Some(directory) = std::env::var_os(RELEASE_DIR_ENV) else {
-        eprintln!("skipped release bundle: {RELEASE_DIR_ENV} is unset");
-        return;
-    };
-    let directory = PathBuf::from(directory);
+    let directory = PathBuf::from(
+        std::env::var_os(RELEASE_DIR_ENV)
+            .unwrap_or_else(|| panic!("{RELEASE_DIR_ENV} must be set")),
+    );
     validate_release_bundle(&directory).unwrap();
     eprintln!("validated release bundle: {}", directory.display());
+}
+
+#[test]
+fn required_release_asset_validation_fails_without_its_directory() {
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["release_assets", "--exact", "--ignored", "--nocapture"])
+        .env_remove(RELEASE_DIR_ENV)
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "required release validation passed without {RELEASE_DIR_ENV}:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("CODEX_SESSION_CONTROL_RELEASE_DIR must be set"),
+        "missing-directory failure was not explicit:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
 }
 
 #[test]
