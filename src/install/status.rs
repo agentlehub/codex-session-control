@@ -11,8 +11,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     app_server::{AppServerClient, TESTED_CODEX_VERSION, socket_mode_is_owner_only},
     desktop::{
-        DescriptorState, DesktopAvailability, inspect_descriptor, inspect_desktop_availability,
-        render_descriptor, verify_persisted_desktop,
+        DescriptorState, DesktopStructure, inspect_descriptor, inspect_desktop_structure,
+        render_descriptor,
     },
     error::ControllerError,
     model::{DesktopAttachmentIdentity, InstalledRelease},
@@ -69,7 +69,6 @@ struct ServiceStatusState {
     enabled: Option<bool>,
     active: Option<bool>,
     socket_present: bool,
-    socket_valid: bool,
 }
 
 pub(crate) async fn status(target: LifecycleTarget) -> Result<StatusReport, ControllerError> {
@@ -110,7 +109,7 @@ pub(super) async fn status_with_context(
         &journal_action,
         &mut failures,
     );
-    let app_server_healthy = inspect_app_server_health(
+    inspect_app_server_health(
         paths,
         &installed,
         &service,
@@ -119,20 +118,14 @@ pub(super) async fn status_with_context(
         &mut failures,
     )
     .await;
-    let authority_available = service.enabled == Some(true)
-        && service.active == Some(true)
-        && service.socket_valid
-        && app_server_healthy;
     let desktop_attachment = inspect_desktop_attachment(
         installed.manifest.as_ref(),
         &context,
         &service,
-        authority_available,
         &setup_action,
         &update_action,
         &mut failures,
-    )
-    .await;
+    );
 
     Ok(render_status_report(
         &display_command,
@@ -433,12 +426,6 @@ fn inspect_service_and_socket(
 
     let socket_metadata = fs::symlink_metadata(&paths.socket);
     let socket_present = socket_metadata.is_ok();
-    let socket_valid = socket_metadata.as_ref().is_ok_and(|metadata| {
-        !metadata.file_type().is_symlink()
-            && metadata.file_type().is_socket()
-            && metadata.uid() == paths.euid
-            && socket_mode_is_owner_only(metadata.mode())
-    });
     match (enabled, active, socket_metadata) {
         (Some(true), _, Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
             failures.push(StatusFailure {
@@ -480,7 +467,6 @@ fn inspect_service_and_socket(
         enabled,
         active,
         socket_present,
-        socket_valid,
     }
 }
 
@@ -491,8 +477,7 @@ async fn inspect_app_server_health(
     update_action: &str,
     journal_action: &str,
     failures: &mut Vec<StatusFailure>,
-) -> bool {
-    let mut app_server_healthy = false;
+) {
     if service.active == Some(true)
         && service.socket_present
         && let Some((_, expected_running_version)) = &installed.codex_version
@@ -504,9 +489,7 @@ async fn inspect_app_server_health(
             expected_running_version.clone(),
         );
         match client.connect_initialized().await {
-            Ok(connection) if connection.compatibility_warning().is_none() => {
-                app_server_healthy = true;
-            }
+            Ok(connection) if connection.compatibility_warning().is_none() => {}
             Ok(_) => failures.push(StatusFailure {
                 check: "app-server-initialize",
                 detail: "running Codex version differs from executable".to_owned(),
@@ -536,15 +519,12 @@ async fn inspect_app_server_health(
             action: update_action.to_owned(),
         });
     }
-
-    app_server_healthy
 }
 
-async fn inspect_desktop_attachment(
+fn inspect_desktop_attachment(
     manifest: Option<&InstalledRelease>,
     context: &StatusContext,
     service: &ServiceStatusState,
-    authority_available: bool,
     setup_action: &str,
     update_action: &str,
     failures: &mut Vec<StatusFailure>,
@@ -566,47 +546,11 @@ async fn inspect_desktop_attachment(
                 action: update_action.to_owned(),
             });
         }
-        match verify_persisted_desktop(identity, &context.desktop_environment).await {
-            Ok(DesktopAvailability::Verified(_))
-                if descriptor == Some(DescriptorState::Expected) && authority_available =>
-            {
-                "available"
-            }
-            Ok(DesktopAvailability::Verified(_)) => "unverified",
-            Ok(DesktopAvailability::Unavailable { .. }) => "unverified",
-            Err(error) => {
-                failures.push(StatusFailure {
-                    check: "desktop-launcher",
-                    detail: error.to_string(),
-                    action: unsafe_path_action(),
-                });
-                "unverified"
-            }
-        }
+        "unverified"
     } else {
-        match inspect_desktop_availability(None, &context.desktop_environment).await {
-            Ok(DesktopAvailability::Verified(target)) => {
-                match inspect_status_descriptor(
-                    &target.identity,
-                    &context.target.paths.socket,
-                    failures,
-                    setup_action,
-                ) {
-                    Some(DescriptorState::Absent | DescriptorState::Expected) => {
-                        "available after setup"
-                    }
-                    Some(DescriptorState::Foreign) | None => "unverified",
-                }
-            }
-            Ok(DesktopAvailability::Unavailable { .. }) => "unavailable",
-            Err(error) => {
-                failures.push(StatusFailure {
-                    check: "desktop-launcher",
-                    detail: error.to_string(),
-                    action: unsafe_path_action(),
-                });
-                "unavailable"
-            }
+        match inspect_desktop_structure(None, &context.desktop_environment) {
+            DesktopStructure::Detected => "unverified",
+            DesktopStructure::Unavailable => "unavailable",
         }
     }
 }

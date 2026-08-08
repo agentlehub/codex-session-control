@@ -10,8 +10,8 @@ use std::{
 use crate::{
     app_server::{AppServerClient, TESTED_CODEX_VERSION},
     desktop::{
-        DescriptorState, DesktopAvailability, inspect_descriptor, publish_descriptor,
-        render_descriptor, verify_persisted_desktop,
+        DescriptorState, DesktopAvailability, inspect_descriptor,
+        probe_persisted_desktop_capability, publish_descriptor, render_descriptor,
     },
     error::ControllerError,
     model::{InstalledRelease, ProductConfig, Thread, ThreadStatus},
@@ -700,7 +700,7 @@ disable stops running turns; the final enable is needed only when the service sh
     let (desktop_status, desktop_warning) = match manifest.desktop_attachment.as_ref() {
         None => (DesktopAttachmentStatus::Unavailable, None),
         Some(identity) => {
-            match verify_persisted_desktop(identity, &lifecycle.desktop_environment)
+            match probe_persisted_desktop_capability(identity, &lifecycle.desktop_environment)
                 .await
                 .map_err(|error| progress.fail(UpdateStage::DesktopDiscovery, error, &retry))?
             {

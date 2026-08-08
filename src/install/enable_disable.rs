@@ -8,8 +8,8 @@ use crate::{
     app_server::TESTED_CODEX_VERSION,
     desktop::{
         DescriptorState, DesktopAvailability, DesktopTarget, inspect_descriptor,
-        preflight_descriptor_switch, publish_descriptor, render_descriptor,
-        verify_persisted_desktop,
+        preflight_descriptor_switch, probe_persisted_desktop_capability, publish_descriptor,
+        render_descriptor,
     },
     error::ControllerError,
     model::{InstalledRelease, ProductConfig},
@@ -432,7 +432,7 @@ async fn resolve_enable_desktop(
             ));
         }
     }
-    match verify_persisted_desktop(identity, environment).await? {
+    match probe_persisted_desktop_capability(identity, environment).await? {
         DesktopAvailability::Verified(target) => {
             preflight_descriptor_switch(Some(identity), &target.identity, &descriptor)?;
             Ok(LifecycleDesktopPlan {

@@ -13,9 +13,9 @@ use serde_json::Value;
 use crate::{
     app_server::TESTED_CODEX_VERSION,
     desktop::{
-        DescriptorState, DesktopAvailability, DesktopTarget, discover_and_verify_desktop,
-        inspect_descriptor, preflight_descriptor_switch, publish_descriptor,
-        remove_expected_descriptor, render_descriptor, verify_persisted_desktop,
+        DescriptorState, DesktopAvailability, DesktopTarget, inspect_descriptor,
+        preflight_descriptor_switch, probe_desktop_capability, probe_persisted_desktop_capability,
+        publish_descriptor, remove_expected_descriptor, render_descriptor,
     },
     error::ControllerError,
     model::{DesktopAttachmentIdentity, InstalledRelease, ProductConfig},
@@ -664,11 +664,11 @@ async fn resolve_setup_desktop(
         .as_ref()
         .and_then(|manifest| manifest.desktop_attachment.clone());
     let availability = if let Some(launcher) = context.desktop_launcher.as_deref() {
-        discover_and_verify_desktop(Some(launcher), &context.desktop_environment).await?
+        probe_desktop_capability(Some(launcher), &context.desktop_environment).await?
     } else if let Some(identity) = previous.as_ref() {
-        verify_persisted_desktop(identity, &context.desktop_environment).await?
+        probe_persisted_desktop_capability(identity, &context.desktop_environment).await?
     } else {
-        discover_and_verify_desktop(None, &context.desktop_environment).await?
+        probe_desktop_capability(None, &context.desktop_environment).await?
     };
     match availability {
         DesktopAvailability::Verified(target) => {
