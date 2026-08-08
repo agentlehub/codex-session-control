@@ -509,36 +509,7 @@ pub(super) async fn verify_setup_service(
     target: &LifecycleTarget,
     expected_codex_version: &str,
 ) -> Result<(), ControllerError> {
-    run_systemctl(
-        systemctl,
-        ["--user", "is-enabled", "--quiet", target.unit_name.as_str()],
-    )?;
-    run_systemctl(
-        systemctl,
-        ["--user", "is-active", "--quiet", target.unit_name.as_str()],
-    )?;
-    wait_for_control_socket(&target.paths.socket, target.paths.euid).await?;
-    let client = AppServerClient::new(
-        target.paths.socket.clone(),
-        target.paths.codex_home.clone(),
-        env!("CARGO_PKG_VERSION").to_owned(),
-        expected_codex_version.to_owned(),
-    );
-    let connection =
-        client
-            .connect_initialized()
-            .await
-            .map_err(|_| ControllerError::InvalidData {
-                field: "service",
-                reason: "app-server initialize failed",
-            })?;
-    if connection.compatibility_warning().is_some() {
-        return Err(ControllerError::InvalidData {
-            field: "service",
-            reason: "running Codex version differs from executable",
-        });
-    }
-    Ok(())
+    verify_enabled_service(systemctl, target, expected_codex_version).await
 }
 
 pub(super) fn detect_running_unattached_clients(
