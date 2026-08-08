@@ -16,12 +16,95 @@ use super::contract::*;
 
 const THREAD_HISTORY_NOT_MATERIALIZED: &str = "Codex has not materialized this thread's history yet. No message was sent. Wait a few seconds, then retry `thread_message_send`.";
 
-#[derive(Debug)]
-pub(super) enum Reconciliation {
-    GoalGet { thread_id: String },
-    LatestTurnRead { thread_id: String },
-    CompactThreadRead { thread_id: String },
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ReconciliationPolicy {
+    GoalGet,
+    LatestTurnRead,
+    CompactThreadRead,
     None,
+}
+
+#[derive(Debug)]
+pub(super) struct MutationContext {
+    thread_id: Option<String>,
+    turn_id: Option<String>,
+    reconciliation: ReconciliationPolicy,
+}
+
+impl MutationContext {
+    pub(super) fn unscoped() -> Self {
+        Self {
+            thread_id: None,
+            turn_id: None,
+            reconciliation: ReconciliationPolicy::None,
+        }
+    }
+
+    pub(super) fn for_thread(thread_id: String, reconciliation: ReconciliationPolicy) -> Self {
+        Self {
+            thread_id: Some(thread_id),
+            turn_id: None,
+            reconciliation,
+        }
+    }
+
+    pub(super) fn for_turn(
+        thread_id: String,
+        turn_id: String,
+        reconciliation: ReconciliationPolicy,
+    ) -> Self {
+        Self {
+            thread_id: Some(thread_id),
+            turn_id: Some(turn_id),
+            reconciliation,
+        }
+    }
+
+    pub(super) fn known_ids(&self) -> (Option<&str>, Option<&str>) {
+        (self.thread_id.as_deref(), self.turn_id.as_deref())
+    }
+
+    fn thread_id(&self) -> &str {
+        self.thread_id
+            .as_deref()
+            .expect("thread-scoped mutation context")
+    }
+
+    fn turn_id(&self) -> &str {
+        self.turn_id
+            .as_deref()
+            .expect("turn-scoped mutation context")
+    }
+
+    fn into_thread_id(self) -> String {
+        self.thread_id.expect("thread-scoped mutation context")
+    }
+
+    fn into_turn_id(self) -> String {
+        self.turn_id.expect("turn-scoped mutation context")
+    }
+
+    pub(super) fn reconciliation_request(&self) -> Option<(&'static str, Value)> {
+        let thread_id = self.thread_id.as_deref()?;
+        match self.reconciliation {
+            ReconciliationPolicy::GoalGet => {
+                Some(("thread/goal/get", json!({"threadId": thread_id})))
+            }
+            ReconciliationPolicy::LatestTurnRead => Some((
+                "thread/turns/list",
+                json!({
+                    "threadId": thread_id,
+                    "limit": 1,
+                    "itemsView": "notLoaded",
+                }),
+            )),
+            ReconciliationPolicy::CompactThreadRead => Some((
+                "thread/read",
+                json!({"threadId": thread_id, "includeTurns": false}),
+            )),
+            ReconciliationPolicy::None => None,
+        }
+    }
 }
 
 pub(super) async fn create_thread(
@@ -40,22 +123,22 @@ pub(super) async fn create_thread(
             json!({"model_reasoning_effort": reasoning_effort}),
         );
     }
+    let start_context = MutationContext::unscoped();
     let start = mutation_request(
         client,
         connection,
         "thread_create",
         "thread/start",
         start_params,
-        None,
-        None,
-        Reconciliation::None,
+        &start_context,
     )
     .await?;
     let thread_value = start
         .get("thread")
         .ok_or_else(|| malformed_result("thread_create", "thread/start"))?;
     let thread = thread_from_native(thread_value, "thread/start")?;
-    let thread_id = thread.id.clone();
+    let turn_context =
+        MutationContext::for_thread(thread.id.clone(), ReconciliationPolicy::CompactThreadRead);
 
     let turn = mutation_request(
         client,
@@ -63,14 +146,10 @@ pub(super) async fn create_thread(
         "thread_create",
         "turn/start",
         json!({
-            "threadId": thread_id,
+            "threadId": turn_context.thread_id(),
             "input": [{"type": "text", "text": input.prompt}],
         }),
-        Some(&thread.id),
-        None,
-        Reconciliation::CompactThreadRead {
-            thread_id: thread.id.clone(),
-        },
+        &turn_context,
     )
     .await?;
     let turn_value = turn
@@ -99,18 +178,17 @@ pub(super) async fn fork_thread(
     let thread_id = input
         .thread_id
         .ok_or_else(|| malformed_result("thread_fork", "validation"))?;
+    let context = MutationContext::for_thread(thread_id, ReconciliationPolicy::None);
     let response = mutation_request(
         client,
         connection,
         "thread_fork",
         "thread/fork",
         json!({
-            "threadId": thread_id,
+            "threadId": context.thread_id(),
             "deferGoalContinuation": input.defer_goal_continuation,
         }),
-        Some(&thread_id),
-        None,
-        Reconciliation::None,
+        &context,
     )
     .await?;
     let thread = response
@@ -159,26 +237,27 @@ pub(super) async fn send_message(
                 error.thread_id = Some(input.thread_id.clone());
                 error
             })?;
+            let context = MutationContext::for_turn(
+                input.thread_id,
+                turn_id,
+                ReconciliationPolicy::CompactThreadRead,
+            );
             let response = mutation_request(
                 client,
                 connection,
                 "thread_message_send",
                 "turn/steer",
                 json!({
-                    "threadId": input.thread_id,
-                    "expectedTurnId": turn_id,
+                    "threadId": context.thread_id(),
+                    "expectedTurnId": context.turn_id(),
                     "input": text_input,
                 }),
-                Some(&input.thread_id),
-                Some(&turn_id),
-                Reconciliation::CompactThreadRead {
-                    thread_id: input.thread_id.clone(),
-                },
+                &context,
             )
             .await?;
             Ok(ThreadMessageSendResult {
                 action: ThreadMessageAction::Steered,
-                thread_id: input.thread_id,
+                thread_id: context.into_thread_id(),
                 turn_id: native_required_string(
                     &response,
                     "turnId",
@@ -188,10 +267,14 @@ pub(super) async fn send_message(
             })
         }
         ThreadStatus::NotLoaded | ThreadStatus::Idle | ThreadStatus::SystemError => {
+            let context = MutationContext::for_thread(
+                input.thread_id,
+                ReconciliationPolicy::CompactThreadRead,
+            );
             let mut params = Map::new();
             params.insert(
                 "threadId".to_owned(),
-                Value::String(input.thread_id.clone()),
+                Value::String(context.thread_id().to_owned()),
             );
             params.insert("input".to_owned(), text_input);
             if let Some(model) = input.model {
@@ -206,11 +289,7 @@ pub(super) async fn send_message(
                 "thread_message_send",
                 "turn/start",
                 params,
-                Some(&input.thread_id),
-                None,
-                Reconciliation::CompactThreadRead {
-                    thread_id: input.thread_id.clone(),
-                },
+                &context,
             )
             .await?;
             let turn = response
@@ -219,7 +298,7 @@ pub(super) async fn send_message(
                 .and_then(|turn| turn_from_native(turn, "turn/start"))?;
             Ok(ThreadMessageSendResult {
                 action: ThreadMessageAction::Started,
-                thread_id: input.thread_id,
+                thread_id: context.into_thread_id(),
                 turn_id: turn.id,
             })
         }
@@ -249,17 +328,14 @@ pub(super) async fn set_title(
     let thread_id = input
         .thread_id
         .ok_or_else(|| malformed_result("thread_title_set", "validation"))?;
+    let context = MutationContext::for_thread(thread_id, ReconciliationPolicy::CompactThreadRead);
     mutation_request(
         client,
         connection,
         "thread_title_set",
         "thread/name/set",
-        json!({"threadId": thread_id, "name": input.title}),
-        Some(&thread_id),
-        None,
-        Reconciliation::CompactThreadRead {
-            thread_id: thread_id.clone(),
-        },
+        json!({"threadId": context.thread_id(), "name": input.title}),
+        &context,
     )
     .await?;
     Ok(BTreeMap::new())
@@ -317,22 +393,22 @@ pub(super) async fn goal_mutation(
     thread_id: String,
     fields: Value,
 ) -> Result<ThreadGoal, ToolErrorData> {
+    let context = MutationContext::for_thread(thread_id, ReconciliationPolicy::GoalGet);
     let mut params = fields
         .as_object()
         .expect("goal mutation fields are objects")
         .clone();
-    params.insert("threadId".to_owned(), Value::String(thread_id.clone()));
+    params.insert(
+        "threadId".to_owned(),
+        Value::String(context.thread_id().to_owned()),
+    );
     let response = mutation_request(
         client,
         connection,
         tool,
         "thread/goal/set",
         params,
-        Some(&thread_id),
-        None,
-        Reconciliation::GoalGet {
-            thread_id: thread_id.clone(),
-        },
+        &context,
     )
     .await?;
     goal_from_native(&response)?.ok_or_else(|| malformed_result(tool, "thread/goal/set"))
@@ -343,17 +419,14 @@ pub(super) async fn clear_goal(
     connection: &mut AppServerConnection,
     input: ThreadGoalClearInput,
 ) -> Result<ThreadGoalClearResult, ToolErrorData> {
+    let context = MutationContext::for_thread(input.thread_id, ReconciliationPolicy::GoalGet);
     let response = mutation_request(
         client,
         connection,
         "thread_goal_clear",
         "thread/goal/clear",
-        json!({"threadId": input.thread_id}),
-        Some(&input.thread_id),
-        None,
-        Reconciliation::GoalGet {
-            thread_id: input.thread_id.clone(),
-        },
+        json!({"threadId": context.thread_id()}),
+        &context,
     )
     .await?;
     let cleared = response
@@ -372,46 +445,42 @@ pub(super) async fn interrupt_thread(
     let Some(turn_id) = snapshot.active_turn_id else {
         return Ok(ThreadInterruptResult::NotInterrupted { interrupted: false });
     };
+    let context = MutationContext::for_turn(
+        input.thread_id,
+        turn_id,
+        ReconciliationPolicy::LatestTurnRead,
+    );
     mutation_request(
         client,
         connection,
         "thread_interrupt",
         "turn/interrupt",
-        json!({"threadId": input.thread_id, "turnId": turn_id}),
-        Some(&input.thread_id),
-        Some(&turn_id),
-        Reconciliation::LatestTurnRead {
-            thread_id: input.thread_id.clone(),
-        },
+        json!({"threadId": context.thread_id(), "turnId": context.turn_id()}),
+        &context,
     )
     .await?;
     Ok(ThreadInterruptResult::Interrupted {
         interrupted: true,
-        turn_id,
+        turn_id: context.into_turn_id(),
     })
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "native mutation dispatch requires explicit tool, method, payload, target identifiers, and reconciliation policy"
-)]
 pub(super) async fn mutation_request(
     client: &AppServerClient,
     connection: &mut AppServerConnection,
     tool: &'static str,
     method: &'static str,
     params: impl Serialize,
-    thread_id: Option<&str>,
-    turn_id: Option<&str>,
-    reconciliation: Reconciliation,
+    context: &MutationContext,
 ) -> Result<Value, ToolErrorData> {
+    let (thread_id, turn_id) = context.known_ids();
     match connection
         .mutate(tool, method, params, thread_id, turn_id)
         .await
     {
         Ok(result) => Ok(result),
         Err(error) if error.category == ToolErrorCategory::OutcomeUnknown => {
-            Err(reconcile_outcome_unknown(client, error, reconciliation).await)
+            Err(reconcile_outcome_unknown(client, error, context).await)
         }
         Err(error) => Err(error),
     }
@@ -420,34 +489,12 @@ pub(super) async fn mutation_request(
 pub(super) async fn reconcile_outcome_unknown(
     client: &AppServerClient,
     mut error: ToolErrorData,
-    reconciliation: Reconciliation,
+    context: &MutationContext,
 ) -> ToolErrorData {
-    let result = match reconciliation {
-        Reconciliation::None => return error,
-        Reconciliation::GoalGet { thread_id } => {
-            reconcile_request(client, "thread/goal/get", json!({"threadId": thread_id})).await
-        }
-        Reconciliation::LatestTurnRead { thread_id } => {
-            reconcile_request(
-                client,
-                "thread/turns/list",
-                json!({
-                    "threadId": thread_id,
-                    "limit": 1,
-                    "itemsView": "notLoaded"
-                }),
-            )
-            .await
-        }
-        Reconciliation::CompactThreadRead { thread_id } => {
-            reconcile_request(
-                client,
-                "thread/read",
-                json!({"threadId": thread_id, "includeTurns": false}),
-            )
-            .await
-        }
+    let Some((method, params)) = context.reconciliation_request() else {
+        return error;
     };
+    let result = reconcile_request(client, method, params).await;
     match result {
         Ok(observation) => error.observation = Some(observation),
         Err(reconciliation_error) => {
