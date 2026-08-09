@@ -1,10 +1,12 @@
 use std::{
     fs,
     os::unix::fs::{PermissionsExt, symlink},
+    time::Duration,
 };
 
 use super::support::{FakeAuthority, Fixture};
 use super::*;
+use tokio::{net::UnixListener, sync::oneshot, time::timeout};
 
 const SERVICE_STATES: [(&str, bool, bool, bool); 4] = [
     ("enabled_active_socket", true, true, true),
@@ -82,7 +84,7 @@ async fn service_state_table_has_exact_health_stdout_and_read_only_argv() {
 Installed release: {version}\n\
 Codex app-server service: {service}\n\
 CLI attachment: available through codex-session-control codex\n\
-Desktop attachment: unavailable\n\
+Desktop configuration: unavailable\n\
 Loaded task state: not_verified\n\
 Availability: codex-session-control enable\n",
                 version = env!("CARGO_PKG_VERSION")
@@ -93,7 +95,7 @@ Availability: codex-session-control enable\n",
 Installed release: {version}\n\
 Codex app-server service: {service}\n\
 CLI attachment: available through codex-session-control codex\n\
-Desktop attachment: unavailable\n\
+Desktop configuration: unavailable\n\
 Loaded task state: not_verified\n",
                 version = env!("CARGO_PKG_VERSION")
             )
@@ -108,7 +110,7 @@ Loaded task state: not_verified\n",
 Installed release: {version}\n\
 Codex app-server service: {service}\n\
 CLI attachment: available through codex-session-control codex\n\
-Desktop attachment: unavailable\n\
+Desktop configuration: unavailable\n\
 Loaded task state: not_verified\n\
 Failed checks:\n\
 - service-state: {detail}\n\
@@ -142,6 +144,34 @@ Failed checks:\n\
 }
 
 #[tokio::test]
+async fn app_server_health_does_not_connect_to_an_unsafe_socket() {
+    let fixture = Fixture::new();
+    let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(fixture.context(true)).await.unwrap();
+    drop(authority);
+    fs::remove_file(&fixture.paths.socket).unwrap();
+    let listener = UnixListener::bind(&fixture.paths.socket).unwrap();
+    fs::set_permissions(&fixture.paths.socket, fs::Permissions::from_mode(0o666)).unwrap();
+    fixture.clear_logs();
+    let (accepted_tx, accepted_rx) = oneshot::channel();
+    let listener_task = tokio::spawn(async move {
+        if listener.accept().await.is_ok() {
+            let _ = accepted_tx.send(());
+        }
+    });
+
+    let report = status_with_context(context(&fixture)).await.unwrap();
+
+    assert!(
+        timeout(Duration::from_millis(50), accepted_rx)
+            .await
+            .is_err()
+    );
+    assert!(!report.stdout.contains("- app-server-initialize:"));
+    listener_task.abort();
+}
+
+#[tokio::test]
 async fn absent_unit_exit_four_is_trusted_inactive_status_evidence() {
     let fixture = Fixture::new();
     let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
@@ -167,7 +197,7 @@ async fn absent_unit_exit_four_is_trusted_inactive_status_evidence() {
 Installed release: {version}\n\
 Codex app-server service: disabled, inactive\n\
 CLI attachment: available through codex-session-control codex\n\
-Desktop attachment: unavailable\n\
+Desktop configuration: unavailable\n\
 Loaded task state: not_verified\n\
 Failed checks:\n\
 - service-unit: missing\n\
@@ -207,7 +237,7 @@ async fn status_reports_untrustworthy_systemctl_state_as_operational_drift() {
 Installed release: {version}\n\
 Codex app-server service: unknown, unknown\n\
 CLI attachment: available through codex-session-control codex\n\
-Desktop attachment: unavailable\n\
+Desktop configuration: unavailable\n\
 Loaded task state: not_verified\n\
 Failed checks:\n\
 - service-state: systemctl {operation} could not provide trustworthy service state\n\
@@ -264,7 +294,11 @@ async fn status_inspects_structural_desktop_without_launch_or_mutation() {
         !launcher_marker.exists(),
         "status must not execute the Desktop launcher"
     );
-    assert!(report.stdout.contains("Desktop attachment: unverified\n"));
+    assert!(
+        report
+            .stdout
+            .contains("Desktop configuration: unverified\n")
+    );
     assert!(!fixture.paths.home.join(".config/codex-desktop").exists());
     assert_eq!(fs::read(&desktop_entry).unwrap(), desktop_entry_before);
     assert_read_only_logs(&fixture);
@@ -302,7 +336,7 @@ async fn status_uses_persisted_desktop_evidence_without_launch_or_mutation() {
         !launcher_marker.exists(),
         "status must not execute the persisted Desktop launcher"
     );
-    assert!(report.stdout.contains("Desktop attachment: unverified\n"));
+    assert!(report.stdout.contains("Desktop configuration: ready\n"));
     assert_eq!(fs::read(&descriptor).unwrap(), descriptor_before);
     assert_eq!(
         fs::metadata(&descriptor).unwrap().permissions().mode(),
@@ -361,7 +395,11 @@ async fn status_leaves_unknown_descriptor_unverified_after_null_setup_without_mu
     let report = status_with_context(context(&fixture)).await.unwrap();
 
     assert!(report.healthy, "{}", report.stdout);
-    assert!(report.stdout.contains("Desktop attachment: unverified\n"));
+    assert!(
+        report
+            .stdout
+            .contains("Desktop configuration: unverified\n")
+    );
     assert_eq!(fs::read(&descriptor).unwrap(), descriptor_before);
     assert_read_only_logs(&fixture);
 }
@@ -394,7 +432,7 @@ async fn status_reports_descriptor_service_matrix_without_mutation() {
     assert!(
         structurally_unverified
             .stdout
-            .contains("Desktop attachment: unverified\n")
+            .contains("Desktop configuration: ready\n")
     );
     assert_eq!(fs::read(&descriptor).unwrap(), expected);
 
@@ -404,7 +442,7 @@ async fn status_reports_descriptor_service_matrix_without_mutation() {
     assert!(
         absent_active
             .stdout
-            .contains("Desktop attachment: unverified\n")
+            .contains("Desktop configuration: not_ready\n")
     );
     assert!(absent_active.stdout.contains("- desktop-descriptor:"));
     assert!(
@@ -422,7 +460,7 @@ async fn status_reports_descriptor_service_matrix_without_mutation() {
     assert!(
         absent_inactive
             .stdout
-            .contains("Desktop attachment: unverified\n")
+            .contains("Desktop configuration: not_ready\n")
     );
 
     fs::write(
@@ -459,7 +497,7 @@ async fn status_keeps_a_missing_persisted_launcher_unverified_and_read_only() {
     let report = status_with_context(context(&fixture)).await.unwrap();
 
     assert!(report.healthy, "{}", report.stdout);
-    assert!(report.stdout.contains("Desktop attachment: unverified\n"));
+    assert!(report.stdout.contains("Desktop configuration: ready\n"));
     assert_eq!(fs::read(&descriptor).unwrap(), expected);
     assert_read_only_logs(&fixture);
 }
@@ -488,12 +526,54 @@ async fn status_detects_unsafe_descriptor_when_persisted_launcher_is_unavailable
     let report = status_with_context(context(&fixture)).await.unwrap();
 
     assert!(!report.healthy);
-    assert!(report.stdout.contains("Desktop attachment: unverified\n"));
+    assert!(report.stdout.contains("Desktop configuration: not_ready\n"));
     assert!(report.stdout.contains("- desktop-descriptor:"));
     assert_eq!(fs::read(&descriptor).unwrap(), descriptor_before);
     assert_eq!(
         fs::metadata(&descriptor).unwrap().permissions().mode() & 0o7777,
         0o1600
+    );
+    assert_read_only_logs(&fixture);
+}
+
+#[tokio::test]
+async fn status_leaves_descriptor_safe_open_failure_unverified() {
+    let fixture = Fixture::new();
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+    let launcher = fixture._root.path().join("desktop-launcher");
+    let descriptor = fixture
+        .paths
+        .home
+        .join(".config/codex-desktop/app-server-attachment.json");
+    super::write_executable_fixture(
+        &launcher,
+        "#!/bin/sh\nif [ \"$1\" = \"--print-build-info\" ]; then printf '%s\\n' '{\"appIdentity\":{\"id\":\"codex-desktop\"},\"linuxCapabilities\":[\"external-app-server-attachment-descriptor-v1\"]}'; exit 0; fi\nexit 64\n",
+    );
+    let mut setup = fixture.context(true);
+    setup.desktop_launcher = Some(launcher);
+    setup_with_context(setup).await.unwrap();
+    fs::set_permissions(&descriptor, fs::Permissions::from_mode(0o000)).unwrap();
+    fixture.clear_logs();
+
+    let report = status_with_context(context(&fixture)).await.unwrap();
+
+    assert!(!report.healthy);
+    assert!(
+        report
+            .stdout
+            .contains("Desktop configuration: unverified\n")
+    );
+    assert!(report.stdout.contains("descriptor cannot be opened safely"));
+    assert_read_only_logs(&fixture);
+
+    fs::remove_file(&fixture.active).unwrap();
+    fixture.clear_logs();
+    let inactive = status_with_context(context(&fixture)).await.unwrap();
+
+    assert!(
+        inactive
+            .stdout
+            .contains("Desktop configuration: not_ready\n")
     );
     assert_read_only_logs(&fixture);
 }
@@ -536,7 +616,7 @@ Status: drifted\n\
 Installed release: {version}\n\
 Codex app-server service: enabled, inactive\n\
 CLI attachment: available through codex-session-control codex\n\
-Desktop attachment: unavailable\n\
+Desktop configuration: unavailable\n\
 Loaded task state: not_verified\n\
 Failed checks:\n\
 - executable: digest does not match installed manifest\n\
@@ -583,7 +663,7 @@ async fn unsafe_path_drift_names_the_path_and_invariant_without_repair() {
 Installed release: {version}\n\
 Codex app-server service: enabled, active\n\
 CLI attachment: available through codex-session-control codex\n\
-Desktop attachment: unavailable\n\
+Desktop configuration: unavailable\n\
 Loaded task state: not_verified\n\
 Failed checks:\n\
 - configuration: {}: unsafe owner, type, or mode\n\

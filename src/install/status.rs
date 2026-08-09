@@ -69,6 +69,29 @@ struct ServiceStatusState {
     enabled: Option<bool>,
     active: Option<bool>,
     socket_present: bool,
+    socket_safe: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AppServerHealthState {
+    Healthy,
+    Unhealthy,
+    Unverified,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DesktopConfigurationState {
+    Ready,
+    NotReady,
+    Unverified,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DescriptorStatusEvidence {
+    Expected,
+    NotReady,
+    Unverified,
 }
 
 pub(crate) async fn status(target: LifecycleTarget) -> Result<StatusReport, ControllerError> {
@@ -109,7 +132,7 @@ pub(super) async fn status_with_context(
         &journal_action,
         &mut failures,
     );
-    inspect_app_server_health(
+    let app_server_health = inspect_app_server_health(
         paths,
         &installed,
         &service,
@@ -118,10 +141,11 @@ pub(super) async fn status_with_context(
         &mut failures,
     )
     .await;
-    let desktop_attachment = inspect_desktop_attachment(
+    let desktop_configuration = inspect_desktop_configuration(
         installed.manifest.as_ref(),
         &context,
         &service,
+        app_server_health,
         &setup_action,
         &update_action,
         &mut failures,
@@ -131,7 +155,7 @@ pub(super) async fn status_with_context(
         &display_command,
         &installed,
         &service,
-        desktop_attachment,
+        desktop_configuration,
         failures,
     ))
 }
@@ -426,7 +450,17 @@ fn inspect_service_and_socket(
 
     let socket_metadata = fs::symlink_metadata(&paths.socket);
     let socket_present = socket_metadata.is_ok();
-    match (enabled, active, socket_metadata) {
+    let socket_safe = match &socket_metadata {
+        Ok(metadata) => Some(
+            !metadata.file_type().is_symlink()
+                && metadata.file_type().is_socket()
+                && metadata.uid() == paths.euid
+                && socket_mode_is_owner_only(metadata.mode()),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(false),
+        Err(_) => None,
+    };
+    match (enabled, active, &socket_metadata) {
         (Some(true), _, Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
             failures.push(StatusFailure {
                 check: "socket",
@@ -467,6 +501,7 @@ fn inspect_service_and_socket(
         enabled,
         active,
         socket_present,
+        socket_safe,
     }
 }
 
@@ -477,9 +512,11 @@ async fn inspect_app_server_health(
     update_action: &str,
     journal_action: &str,
     failures: &mut Vec<StatusFailure>,
-) {
+) -> AppServerHealthState {
+    let mut health = AppServerHealthState::Unverified;
     if service.active == Some(true)
         && service.socket_present
+        && service.socket_safe == Some(true)
         && let Some((_, expected_running_version)) = &installed.codex_version
     {
         let client = AppServerClient::new(
@@ -489,17 +526,25 @@ async fn inspect_app_server_health(
             expected_running_version.clone(),
         );
         match client.connect_initialized().await {
-            Ok(connection) if connection.compatibility_warning().is_none() => {}
-            Ok(_) => failures.push(StatusFailure {
-                check: "app-server-initialize",
-                detail: "running Codex version differs from executable".to_owned(),
-                action: update_action.to_owned(),
-            }),
-            Err(_) => failures.push(StatusFailure {
-                check: "app-server-initialize",
-                detail: "app-server initialize failed".to_owned(),
-                action: journal_action.to_owned(),
-            }),
+            Ok(connection) if connection.compatibility_warning().is_none() => {
+                health = AppServerHealthState::Healthy;
+            }
+            Ok(_) => {
+                health = AppServerHealthState::Unhealthy;
+                failures.push(StatusFailure {
+                    check: "app-server-initialize",
+                    detail: "running Codex version differs from executable".to_owned(),
+                    action: update_action.to_owned(),
+                });
+            }
+            Err(_) => {
+                health = AppServerHealthState::Unhealthy;
+                failures.push(StatusFailure {
+                    check: "app-server-initialize",
+                    detail: "app-server initialize failed".to_owned(),
+                    action: journal_action.to_owned(),
+                });
+            }
         }
     }
 
@@ -519,16 +564,18 @@ async fn inspect_app_server_health(
             action: update_action.to_owned(),
         });
     }
+    health
 }
 
-fn inspect_desktop_attachment(
+fn inspect_desktop_configuration(
     manifest: Option<&InstalledRelease>,
     context: &StatusContext,
     service: &ServiceStatusState,
+    app_server_health: AppServerHealthState,
     setup_action: &str,
     update_action: &str,
     failures: &mut Vec<StatusFailure>,
-) -> &'static str {
+) -> DesktopConfigurationState {
     if let Some(identity) = manifest.and_then(|manifest| manifest.desktop_attachment.as_ref()) {
         let descriptor = inspect_status_descriptor(
             identity,
@@ -536,9 +583,12 @@ fn inspect_desktop_attachment(
             failures,
             setup_action,
         );
-        if descriptor == Some(DescriptorState::Absent)
+        if descriptor == DescriptorStatusEvidence::NotReady
             && service.enabled == Some(true)
             && service.active == Some(true)
+            && !failures
+                .iter()
+                .any(|failure| failure.check == "desktop-descriptor")
         {
             failures.push(StatusFailure {
                 check: "desktop-descriptor",
@@ -546,20 +596,44 @@ fn inspect_desktop_attachment(
                 action: update_action.to_owned(),
             });
         }
-        "unverified"
+        classify_desktop_configuration(descriptor, service, app_server_health)
     } else {
         match inspect_desktop_structure(None, &context.desktop_environment) {
-            DesktopStructure::Detected => "unverified",
-            DesktopStructure::Unavailable => "unavailable",
+            DesktopStructure::Detected => DesktopConfigurationState::Unverified,
+            DesktopStructure::Unavailable => DesktopConfigurationState::Unavailable,
         }
     }
+}
+
+fn classify_desktop_configuration(
+    descriptor: DescriptorStatusEvidence,
+    service: &ServiceStatusState,
+    app_server_health: AppServerHealthState,
+) -> DesktopConfigurationState {
+    if descriptor == DescriptorStatusEvidence::NotReady
+        || service.enabled == Some(false)
+        || service.active == Some(false)
+        || service.socket_safe == Some(false)
+        || app_server_health == AppServerHealthState::Unhealthy
+    {
+        return DesktopConfigurationState::NotReady;
+    }
+    if descriptor == DescriptorStatusEvidence::Unverified
+        || service.enabled.is_none()
+        || service.active.is_none()
+        || service.socket_safe.is_none()
+        || app_server_health == AppServerHealthState::Unverified
+    {
+        return DesktopConfigurationState::Unverified;
+    }
+    DesktopConfigurationState::Ready
 }
 
 fn render_status_report(
     display_command: &str,
     installed: &InstalledStatusState,
     service_state: &ServiceStatusState,
-    desktop_attachment: &str,
+    desktop_configuration: DesktopConfigurationState,
     failures: Vec<StatusFailure>,
 ) -> StatusReport {
     let compatibility_warning = installed.codex_version.as_ref().and_then(|(display, expected)| {
@@ -584,13 +658,19 @@ fn render_status_report(
         _ => "unknown, unknown".to_owned(),
     };
     let healthy = failures.is_empty();
+    let desktop_configuration = match desktop_configuration {
+        DesktopConfigurationState::Ready => "ready",
+        DesktopConfigurationState::NotReady => "not_ready",
+        DesktopConfigurationState::Unverified => "unverified",
+        DesktopConfigurationState::Unavailable => "unavailable",
+    };
     let mut stdout = compatibility_warning.unwrap_or_default();
     stdout.push_str(&format!(
         "Status: {}\n\
 Installed release: {installed_version}\n\
 Codex app-server service: {service}\n\
 CLI attachment: available through codex-session-control codex\n\
-Desktop attachment: {desktop_attachment}\n\
+Desktop configuration: {desktop_configuration}\n\
 Loaded task state: not_verified\n",
         if healthy { "healthy" } else { "drifted" },
     ));
@@ -614,7 +694,7 @@ fn inspect_status_descriptor(
     socket: &Path,
     failures: &mut Vec<StatusFailure>,
     setup_action: &str,
-) -> Option<DescriptorState> {
+) -> DescriptorStatusEvidence {
     let expected = match render_descriptor(socket) {
         Ok(expected) => expected,
         Err(error) => {
@@ -623,7 +703,7 @@ fn inspect_status_descriptor(
                 detail: error.to_string(),
                 action: unsafe_path_action(),
             });
-            return None;
+            return DescriptorStatusEvidence::Unverified;
         }
     };
     match inspect_descriptor(identity, &expected) {
@@ -633,17 +713,41 @@ fn inspect_status_descriptor(
                 detail: format!("{} is foreign", identity.descriptor_path.display()),
                 action: setup_action.to_owned(),
             });
-            Some(DescriptorState::Foreign)
+            DescriptorStatusEvidence::NotReady
         }
-        Ok(state) => Some(state),
+        Ok(DescriptorState::Absent) => DescriptorStatusEvidence::NotReady,
+        Ok(DescriptorState::Expected) => DescriptorStatusEvidence::Expected,
         Err(error) => {
+            let evidence = classify_descriptor_inspection_error(&error);
             failures.push(StatusFailure {
                 check: "desktop-descriptor",
                 detail: error.to_string(),
                 action: unsafe_path_action(),
             });
-            None
+            evidence
         }
+    }
+}
+
+fn classify_descriptor_inspection_error(error: &ControllerError) -> DescriptorStatusEvidence {
+    const PREFIX: &str = "Desktop descriptor safety error: ";
+
+    match error {
+        ControllerError::InvalidData { .. } => DescriptorStatusEvidence::NotReady,
+        ControllerError::Operational(detail) => match detail.strip_prefix(PREFIX) {
+            Some(
+                "descriptor ancestor is unsafe"
+                | "descriptor ancestor leaves the effective-user tree"
+                | "descriptor parent is not owned by the effective user"
+                | "descriptor is not an owner-only regular file"
+                | "descriptor JSON is invalid"
+                | "descriptor schema is unsupported"
+                | "descriptor socket path must be UTF-8"
+                | "descriptor socket path is not a normalized absolute path",
+            ) => DescriptorStatusEvidence::NotReady,
+            // Safe-open, metadata, read, race, and unknown inspection failures do not prove drift.
+            _ => DescriptorStatusEvidence::Unverified,
+        },
     }
 }
 
