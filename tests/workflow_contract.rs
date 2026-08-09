@@ -1284,8 +1284,8 @@ if sudo systemctl is-active --quiet "$manager"; then"#,
     for forbidden in [
         "/home/korty",
         "/run/user/1000",
-        "Desktop attachment: available",
-        "production Desktop attachment",
+        "Desktop configuration: ready",
+        "production Desktop configuration",
     ] {
         assert!(
             !ci.contains(forbidden),
