@@ -49,7 +49,7 @@ impl Cli {
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 pub(crate) enum Command {
-    #[command(about = "Install Codex Session Control and start the shared app-server")]
+    #[command(about = "Install Codex Session Control and start its service.")]
     Setup {
         #[arg(
             long,
@@ -72,8 +72,8 @@ pub(crate) enum Command {
     #[command(name = "mcp-server", hide = true)]
     McpServer,
     #[command(
-        about = "Start Codex CLI through the shared app-server",
-        override_help = "Start Codex CLI through the shared app-server\n\nUsage: codex-session-control codex [ARGS]...\n\nArguments:\n  [ARGS]...  Arguments passed directly to Codex CLI\n\nOptions:\n  -h, --help  Print help\n"
+        about = "Launch Codex CLI connected to Codex Session Control.",
+        override_help = "Launch Codex CLI connected to Codex Session Control.\n\nUsage: codex-session-control codex [ARGS]...\n\nArguments:\n  [ARGS]...  Arguments passed directly to Codex CLI\n\nOptions:\n  -h, --help  Print help\n"
     )]
     Codex {
         #[arg(

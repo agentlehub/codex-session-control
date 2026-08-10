@@ -59,13 +59,13 @@ Available commands:
 
 | Command | What it does |
 | --- | --- |
-| `setup` | Install Codex Session Control and start the shared app-server. |
+| `setup` | Install Codex Session Control and start its service. |
 | `update` | Install the latest release. |
 | `status` | Check whether Codex Session Control is ready. |
 | `enable` | Start the service and turn on automatic startup. |
 | `disable` | Stop the service and turn off automatic startup. |
 | `uninstall` | Remove the service while keeping your Codex data. |
-| `codex` | Start Codex CLI through the shared app-server. |
+| `codex` | Launch Codex CLI connected to Codex Session Control. |
 
 ### MCP tools
 

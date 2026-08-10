@@ -17,13 +17,13 @@ const APPROVED_ROOT_HELP: &str = concat!(
     "Usage: codex-session-control [OPTIONS] <COMMAND>\n",
     "\n",
     "Commands:\n",
-    "  setup      Install Codex Session Control and start the shared app-server\n",
+    "  setup      Install Codex Session Control and start its service.\n",
     "  update     Install the latest release\n",
     "  status     Check whether Codex Session Control is ready\n",
     "  enable     Start the service and turn on automatic startup\n",
     "  disable    Stop the service and turn off automatic startup\n",
     "  uninstall  Remove the service while keeping your Codex data\n",
-    "  codex      Start Codex CLI through the shared app-server\n",
+    "  codex      Launch Codex CLI connected to Codex Session Control.\n",
     "\n",
     "Options:\n",
     "      --verbose  Show diagnostic details\n",
@@ -32,7 +32,7 @@ const APPROVED_ROOT_HELP: &str = concat!(
 );
 
 const APPROVED_SETUP_HELP: &str = concat!(
-    "Install Codex Session Control and start the shared app-server\n",
+    "Install Codex Session Control and start its service.\n",
     "\n",
     "Usage: codex-session-control setup [OPTIONS]\n",
     "\n",
@@ -93,7 +93,7 @@ const APPROVED_UNINSTALL_HELP: &str = concat!(
 );
 
 const APPROVED_CODEX_HELP: &str = concat!(
-    "Start Codex CLI through the shared app-server\n",
+    "Launch Codex CLI connected to Codex Session Control.\n",
     "\n",
     "Usage: codex-session-control codex [ARGS]...\n",
     "\n",
