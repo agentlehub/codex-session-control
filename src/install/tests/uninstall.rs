@@ -394,7 +394,14 @@ async fn uninstall_default_and_verbose_are_behaviorally_identical() {
         .unwrap()
         .render();
 
-    assert_eq!(default, recorded);
+    let recorded = with_recorded_diagnostics(recorded, &verbose);
+
+    assert_eq!(default.stdout, recorded.stdout);
+    assert_eq!(
+        default.stderr,
+        without_verbose_diagnostics(&recorded.stderr)
+    );
+    assert_eq!(default.exit_code, recorded.exit_code);
     assert!(
         verbose
             .recorded_lines()

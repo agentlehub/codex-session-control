@@ -88,6 +88,14 @@ fn descriptor_residue_path(residue: DescriptorPublicationResidue) -> std::path::
     }
 }
 
+pub(super) fn enable_context_failure() -> UserFailure {
+    UserFailure::Ordinary(OrdinaryFailure::EnableUnexpectedRetry)
+}
+
+pub(super) fn disable_context_failure() -> UserFailure {
+    UserFailure::Ordinary(OrdinaryFailure::DisableUnexpectedRetry)
+}
+
 pub(super) fn enable_publication_failure(failure: DescriptorPublicationFailure) -> UserFailure {
     match failure.residue {
         Some(residue) => UserFailure::RollbackIncomplete(RollbackIncomplete::new(
@@ -214,7 +222,7 @@ pub(crate) async fn enable(
             diagnostics,
             LifecycleStage::Configuration,
             DiagnosticCause::Validation,
-            UserFailure::Ordinary(OrdinaryFailure::EnableUnexpectedRetry),
+            enable_context_failure(),
         )
     })?;
     enable_with_context_and_diagnostics(context, diagnostics).await
@@ -234,7 +242,7 @@ pub(crate) async fn disable(
             diagnostics,
             LifecycleStage::ServiceDisable,
             DiagnosticCause::Validation,
-            UserFailure::Ordinary(OrdinaryFailure::DisableUnexpectedRetry),
+            disable_context_failure(),
         )
     })?;
     disable_with_context_and_diagnostics(context, diagnostics).await

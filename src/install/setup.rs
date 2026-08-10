@@ -199,6 +199,10 @@ pub(super) fn setup_descriptor_publication_failure(
     }
 }
 
+pub(super) fn setup_invocation_failure() -> UserFailure {
+    UserFailure::Ordinary(OrdinaryFailure::SetupUnsafeTerminalRetry)
+}
+
 pub(super) struct SetupPreflight {
     codex: PathBuf,
     systemctl: PathBuf,
@@ -237,7 +241,7 @@ pub(crate) async fn setup(
             diagnostics,
             SetupStage::Preflight,
             DiagnosticCause::Validation,
-            UserFailure::Ordinary(OrdinaryFailure::SetupUnsafeTerminalRetry),
+            setup_invocation_failure(),
         )
     })?;
     let candidate = CandidateRelease {
@@ -257,7 +261,7 @@ pub(crate) async fn setup(
             diagnostics,
             SetupStage::Preflight,
             DiagnosticCause::Validation,
-            UserFailure::Ordinary(OrdinaryFailure::SetupUnsafeTerminalRetry),
+            setup_invocation_failure(),
         )
     })?;
     let cwd = std::env::current_dir().map_err(|_| {
@@ -265,7 +269,7 @@ pub(crate) async fn setup(
             diagnostics,
             SetupStage::Preflight,
             DiagnosticCause::Validation,
-            UserFailure::Ordinary(OrdinaryFailure::SetupUnsafeTerminalRetry),
+            setup_invocation_failure(),
         )
     })?;
     setup_with_context_and_diagnostics(

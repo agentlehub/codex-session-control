@@ -99,6 +99,15 @@ async fn enable_disable_producer_boundaries_select_complete_failures() {
     };
 
     assert_eq!(
+        enable_context_failure(),
+        UserFailure::Ordinary(OrdinaryFailure::EnableUnexpectedRetry)
+    );
+    assert_eq!(
+        disable_context_failure(),
+        UserFailure::Ordinary(OrdinaryFailure::DisableUnexpectedRetry)
+    );
+
+    assert_eq!(
         enable_publication_failure(DescriptorPublicationFailure {
             source: ControllerError::Operational("sentinel".to_owned()),
             residue: None,
@@ -160,6 +169,43 @@ async fn enable_disable_producer_boundaries_select_complete_failures() {
         UserFailure::Ordinary(OrdinaryFailure::EnableInstalledStateRepairSetup)
     ));
 
+    let enable_unexpected = Fixture::new();
+    let _authority = FakeAuthority::start(&enable_unexpected.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(enable_unexpected.context(true))
+        .await
+        .unwrap();
+    let launcher = enable_unexpected._root.path().join("desktop-launcher");
+    let descriptor = enable_unexpected
+        .paths
+        .home
+        .join(".config/codex-desktop/app-server-attachment.json");
+    write_executable_fixture(
+        &launcher,
+        "#!/bin/sh\nif [ \"$1\" = \"--print-build-info\" ]; then printf '%s\\n' '{\"appIdentity\":{\"id\":\"codex-desktop\"},\"linuxCapabilities\":[\"external-app-server-attachment-descriptor-v1\"]}'; exit 0; fi\nexit 64\n",
+    );
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(&enable_unexpected.paths.manifest).unwrap()).unwrap();
+    manifest["desktopAttachment"] = serde_json::json!({
+        "launcherPath": launcher,
+        "appId": "codex-desktop",
+        "descriptorPath": descriptor,
+    });
+    fs::write(
+        &enable_unexpected.paths.manifest,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let mut enable_unexpected_context = context(&enable_unexpected);
+    enable_unexpected_context.target = enable_unexpected_context
+        .target
+        .fail_after_completed_stage("descriptor");
+    assert_eq!(
+        enable_with_context(enable_unexpected_context)
+            .await
+            .unwrap_err(),
+        UserFailure::Ordinary(OrdinaryFailure::EnableUnexpectedRetry)
+    );
+
     let disable_fixture = Fixture::new();
     let _authority = FakeAuthority::start(&disable_fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(disable_fixture.context(true))
@@ -176,6 +222,22 @@ async fn enable_disable_producer_boundaries_select_complete_failures() {
             .unwrap_err(),
         UserFailure::IndependentTerminal(IndependentTerminal::Disable)
     ));
+
+    let disable_resolution = Fixture::new();
+    let _authority = FakeAuthority::start(&disable_resolution.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(disable_resolution.context(true))
+        .await
+        .unwrap();
+    let empty_bin = disable_resolution._root.path().join("empty-bin");
+    fs::create_dir(&empty_bin).unwrap();
+    let mut disable_resolution_context = context(&disable_resolution);
+    disable_resolution_context.path_environment = std::env::join_paths([empty_bin]).unwrap();
+    assert_eq!(
+        disable_with_context(disable_resolution_context)
+            .await
+            .unwrap_err(),
+        UserFailure::Ordinary(OrdinaryFailure::DisableServiceStopRetry)
+    );
 
     let unproven = Fixture::new();
     let _authority = FakeAuthority::start(&unproven.paths, TESTED_CODEX_VERSION).await;
@@ -290,7 +352,14 @@ async fn enable_default_and_verbose_are_behaviorally_identical() {
         .unwrap()
         .render();
 
-    assert_eq!(default, recorded);
+    let recorded = with_recorded_diagnostics(recorded, &verbose);
+
+    assert_eq!(default.stdout, recorded.stdout);
+    assert_eq!(
+        default.stderr,
+        without_verbose_diagnostics(&recorded.stderr)
+    );
+    assert_eq!(default.exit_code, recorded.exit_code);
     assert!(
         verbose
             .recorded_lines()
@@ -341,7 +410,14 @@ async fn disable_default_and_verbose_are_behaviorally_identical() {
         .unwrap()
         .render();
 
-    assert_eq!(default, recorded);
+    let recorded = with_recorded_diagnostics(recorded, &verbose);
+
+    assert_eq!(default.stdout, recorded.stdout);
+    assert_eq!(
+        default.stderr,
+        without_verbose_diagnostics(&recorded.stderr)
+    );
+    assert_eq!(default.exit_code, recorded.exit_code);
     assert!(
         verbose
             .recorded_lines()

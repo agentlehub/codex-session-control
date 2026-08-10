@@ -124,6 +124,11 @@ async fn setup_producer_boundaries_select_complete_failures() {
     use crate::desktop::{DescriptorPublicationFailure, DescriptorPublicationResidue};
 
     assert_eq!(
+        setup_invocation_failure(),
+        UserFailure::Ordinary(OrdinaryFailure::SetupUnsafeTerminalRetry)
+    );
+
+    assert_eq!(
         setup_cli_reconciliation_failure(&ControllerError::Operational("sentinel".to_owned())),
         UserFailure::Ordinary(OrdinaryFailure::SetupCliIntegrationRetry)
     );
@@ -289,7 +294,11 @@ async fn setup_default_and_verbose_are_behaviorally_identical() {
         .map(|success| success.render())
         .unwrap();
 
-    assert_eq!(default, verbose);
+    let verbose = with_recorded_diagnostics(verbose, &verbose_diagnostics);
+
+    assert_eq!(default.stdout, verbose.stdout);
+    assert_eq!(default.stderr, without_verbose_diagnostics(&verbose.stderr));
+    assert_eq!(default.exit_code, verbose.exit_code);
     assert!(
         verbose_diagnostics
             .recorded_lines()

@@ -22,8 +22,9 @@ use crate::{
 use super::{
     CandidateRelease, LifecycleContext,
     enable_disable::{
-        disable_with_context, disable_with_context_and_diagnostics, enable_publication_failure,
-        enable_service_failure, enable_with_context, enable_with_context_and_diagnostics,
+        disable_context_failure, disable_with_context, disable_with_context_and_diagnostics,
+        enable_context_failure, enable_publication_failure, enable_service_failure,
+        enable_with_context, enable_with_context_and_diagnostics,
     },
     evidence::{
         InstalledEvidenceCase, InvalidEvidence, NativeProductResidue, ResolvedUserPaths,
@@ -57,7 +58,8 @@ use super::{
     },
     setup::{
         SetupContext, setup_cli_reconciliation_failure, setup_descriptor_publication_failure,
-        setup_preflight, setup_with_context, setup_with_context_and_diagnostics,
+        setup_invocation_failure, setup_preflight, setup_with_context,
+        setup_with_context_and_diagnostics,
     },
     status::{StatusContext, status_with_context},
     test_target,
@@ -69,6 +71,23 @@ use super::{
     },
     wrapper::{exec_codex_wrapper_command, prepare_codex_wrapper},
 };
+
+fn with_recorded_diagnostics(
+    mut rendered: crate::cli_output::RenderedCli,
+    diagnostics: &crate::diagnostics::Diagnostics,
+) -> crate::cli_output::RenderedCli {
+    let mut stderr = diagnostics.recorded_lines().concat();
+    stderr.push_str(&rendered.stderr);
+    rendered.stderr = stderr;
+    rendered
+}
+
+fn without_verbose_diagnostics(stderr: &str) -> String {
+    stderr
+        .split_inclusive('\n')
+        .filter(|line| !(line.starts_with("[verbose] ") && line.ends_with('\n')))
+        .collect()
+}
 
 fn write_executable_fixture(path: &std::path::Path, contents: impl AsRef<[u8]>) {
     use std::os::unix::fs::PermissionsExt;
