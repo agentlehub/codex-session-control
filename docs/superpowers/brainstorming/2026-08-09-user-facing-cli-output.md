@@ -28,6 +28,7 @@ No output implementation begins until this brainstorming artifact is complete, r
 - Tests cover each distinct output/safety contract with focused tables and existing operational fixtures; they do not cross-product independent command, state, failure, recovery, and verbosity dimensions. ([Q29](#q29-how-should-tests-cover-the-output-refactor-without-a-cartesian-explosion))
 - Complexity preferences are enforced through ordinary review; implementation pauses only for changed approved behavior, material scope/runtime expansion, or substantial measured growth. ([Q30](#q30-what-complexity-guardrails-should-pause-implementation))
 - The next specification synthesizes only active requirements and constraints; this artifact retains superseded decisions solely as clearly marked provenance. ([Q31](#q31-should-the-specification-carry-the-full-brainstorming-chronology))
+- An abnormally terminated staged candidate uses the one approved completion-unknown result, while each existing failure producer selects a bounded Q23/Q27 variant directly from its semantic operation and known mutation/safety state. ([Return From Spec Writing](#return-from-spec-writing))
 
 ## Supporting Material
 
@@ -1114,3 +1115,42 @@ The operator selected option A and explicitly confirmed that superseded decision
 **Rationale**
 
 Brainstorming preserves why decisions changed, while a specification must state only what to build. Mixing those roles makes superseded vocabulary and provisional architecture easy to reintroduce. Clear inline supersession markers plus an active-only current-decision index preserve provenance without forcing later agents to infer which historical text still governs.
+
+## Return From Spec Writing
+
+Returning phase: `writing-specs`
+
+Returning artifact: `docs/superpowers/specs/2026-08-10-user-facing-cli-output-design.md`
+
+### Material Gaps
+
+Specification review identified two gaps: no exact parent-owned result was recorded for abnormal staged-candidate termination after mutation may have begun, and the review incorrectly escalated producer-level mapping of existing failures as an Operator product decision.
+
+### Resolved Operator Decisions
+
+When a staged update candidate terminates abnormally after mutation may have begun, the outer process selects one bounded update completion-unknown outcome. It writes stderr only, exits `1`, never recommends immediate retry, and renders exactly:
+
+```text
+Codex Session Control could not confirm that the update completed.
+
+The installed Codex Session Control state could not be verified.
+
+Check what needs attention:
+  codex-session-control status
+```
+
+Producer-level mapping is technical specification work under Q23 and Q27, not an Operator-level product decision. Each concrete failure-producing branch selects the appropriate bounded `UserFailure` variant directly from the semantic operation, known mutation state, and existing safety/retry behavior. Command-local stages remain diagnostic facts; they are not user-failure mapping keys. Do not add independent problem/recovery/mutation/retry axes, a generic stage-message table, string parsing, a cross-process result protocol, or a broad error-system rewrite.
+
+Escalate only when one concrete producer requires user-facing behavior or safety semantics not already approved. Repository classification found no such producer. Candidate launch must distinguish a proven pre-execution spawn failure from wait failure, signal termination, or an exit outside normal `0`/`1`; descriptor publication must preserve enough internal commit/residue/cleanup evidence to select the already-approved ordinary or rollback-incomplete outcome. These are narrow internal evidence projections, not new user-facing variants.
+
+Normal staged-candidate exit `0` or `1` remains candidate-owned and is propagated without a second friendly result from the outer process.
+
+### Affected Downstream Artifacts
+
+- `docs/superpowers/specs/2026-08-10-user-facing-cli-output-design.md`
+- `docs/superpowers/reviews/2026-08-10-user-facing-cli-output-design-review.md`
+- the fresh `writing-plans` handoff created after the repaired specification passes review
+
+### Required Return Point
+
+Review this source return, then resume `writing-specs` at the existing specification. Incorporate the exact completion-unknown result and producer-boundary classification, rerun the specification review gate, and continue to the approved specification-to-planning handoff boundary.
