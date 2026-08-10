@@ -630,34 +630,42 @@ async fn preexisting_exact_descriptor_is_retained_when_this_invocation_does_not_
 #[test]
 fn classifies_only_ordinary_desktop_and_cli_cmdlines() {
     assert_eq!(
-        classify_unattached_client(b"/opt/Codex\0--foo\0"),
-        Some("Desktop")
+        detect_running_unattached_clients_from_snapshot(
+            1000,
+            [(1000, b"/opt/Codex\0--foo\0".as_slice())]
+        ),
+        RunningClientFacts {
+            cli: false,
+            desktop: true,
+        }
     );
     assert_eq!(
-        classify_unattached_client(b"/usr/bin/codex\0resume\0"),
-        Some("CLI")
+        detect_running_unattached_clients_from_snapshot(
+            1000,
+            [(1000, b"/usr/bin/codex\0resume\0".as_slice())]
+        ),
+        RunningClientFacts {
+            cli: true,
+            desktop: false,
+        }
     );
     assert_eq!(
-        classify_unattached_client(b"/usr/bin/codex\0app-server\0--listen\0unix:///socket\0"),
-        None
-    );
-    assert_eq!(
-        classify_unattached_client(b"/usr/bin/codex\0--remote\0unix:///socket\0resume\0"),
-        None
-    );
-    assert_eq!(
-        classify_unattached_client(b"/usr/bin/codex-session-control\0"),
-        None
-    );
-    assert_eq!(classify_unattached_client(b"/usr/bin/sh\0"), None);
-    let mut stdout = String::new();
-    append_unattached_client_guidance(&mut stdout, &BTreeSet::from(["CLI", "Desktop"]));
-    assert_eq!(
-        stdout,
-        "Unattached running clients: CLI, Desktop\n\
-This running client was not attached or migrated.\n\
-Desktop: fully exit and restart Desktop to use the shared app-server.\n\
-CLI: exit and resume through codex-session-control codex.\n"
+        detect_running_unattached_clients_from_snapshot(
+            1000,
+            [
+                (
+                    1000,
+                    b"/usr/bin/codex\0app-server\0--listen\0unix:///socket\0".as_slice(),
+                ),
+                (
+                    1000,
+                    b"/usr/bin/codex\0--remote\0unix:///socket\0resume\0".as_slice(),
+                ),
+                (1000, b"/usr/bin/codex-session-control\0".as_slice()),
+                (1000, b"/usr/bin/sh\0".as_slice()),
+            ]
+        ),
+        RunningClientFacts::default()
     );
 }
 
@@ -677,7 +685,30 @@ fn process_snapshot_filters_uid_and_never_reads_the_operator_proc_tree() {
         ],
     );
 
-    assert_eq!(clients, BTreeSet::from(["CLI"]));
+    assert_eq!(
+        clients,
+        RunningClientFacts {
+            cli: true,
+            desktop: false,
+        }
+    );
+}
+
+#[test]
+fn running_client_facts_are_independent_of_desktop_availability() {
+    let euid = rustix::process::geteuid().as_raw();
+    let facts = detect_running_unattached_clients_from_snapshot(
+        euid,
+        [(euid, b"/usr/bin/codex\0resume\0".as_slice())],
+    );
+
+    assert_eq!(
+        facts,
+        RunningClientFacts {
+            cli: true,
+            desktop: false,
+        }
+    );
 }
 
 #[tokio::test]

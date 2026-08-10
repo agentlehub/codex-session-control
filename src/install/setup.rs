@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use crate::{
     app_server::TESTED_CODEX_VERSION,
+    cli_output::RunningClientFacts,
     desktop::{
         DescriptorState, DesktopAvailability, DesktopTarget, inspect_descriptor,
         preflight_descriptor_switch, probe_desktop_capability, probe_persisted_desktop_capability,
@@ -22,7 +23,8 @@ use crate::{
 };
 
 use super::{
-    CandidateRelease, DesktopAttachmentStatus, cleanup_changed_descriptor_after_start_failure,
+    CandidateRelease, DesktopAttachmentStatus, append_legacy_unattached_client_guidance,
+    cleanup_changed_descriptor_after_start_failure,
     evidence::{
         InstalledEvidenceCase, NativeProductState, ResolvedUserPaths, SelectedHomeEvidence,
         SelectedHomeOperation, classify_selected_home_evidence, require_selected_home_evidence,
@@ -41,8 +43,7 @@ use super::{
     release::RELEASE_REPOSITORY,
     render::{RenderedProjection, reconcile_projection, render_projection, render_unit},
     service::{
-        LifecycleTarget, append_unattached_client_guidance, detect_running_unattached_clients,
-        run_systemctl, verify_setup_service,
+        LifecycleTarget, detect_running_unattached_clients, run_systemctl, verify_setup_service,
     },
     sha256_bytes,
 };
@@ -312,7 +313,9 @@ pub(super) async fn setup_with_context(
     {
         let published = match publish_descriptor(&target.identity, descriptor) {
             Ok(published) => published,
-            Err(error) => return Err(progress.fail(SetupStage::Descriptor, error, &retry_setup)),
+            Err(failure) => {
+                return Err(progress.fail(SetupStage::Descriptor, failure.source, &retry_setup));
+            }
         };
         let identity_changed = preflight
             .desktop
@@ -408,11 +411,8 @@ pub(super) async fn setup_with_context(
         context.target,
         &retry_setup
     );
-    let unattached_clients = if preflight.desktop.status == DesktopAttachmentStatus::Available {
-        detect_running_unattached_clients(&context.target.client_process_source, paths.euid)
-    } else {
-        BTreeSet::new()
-    };
+    let running_clients =
+        detect_running_unattached_clients(&context.target.client_process_source, paths.euid);
 
     if let Err(error) = run_systemctl(&preflight.systemctl, ["--user", "daemon-reload"]) {
         return Err(fail_after_descriptor_publication(
@@ -550,7 +550,12 @@ New task required for guaranteed plugin convergence: yes\n",
             paths.home.join(".local/bin").display()
         ));
     }
-    append_unattached_client_guidance(&mut stdout, &unattached_clients);
+    let legacy_running_clients = if preflight.desktop.status == DesktopAttachmentStatus::Available {
+        running_clients
+    } else {
+        RunningClientFacts::default()
+    };
+    append_legacy_unattached_client_guidance(&mut stdout, &legacy_running_clients);
     Ok(SetupReport { stdout, stderr })
 }
 
@@ -736,7 +741,8 @@ fn fail_after_descriptor_publication(
         Err(cleanup) => progress.fail(
             stage,
             format!(
-                "{cause}; cleanup after changed Desktop descriptor could not complete: {cleanup}; Desktop routing state is unverified"
+                "{cause}; cleanup after changed Desktop descriptor could not complete: {}; Desktop routing state is unverified",
+                cleanup.source
             ),
             recovery,
         ),

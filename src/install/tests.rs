@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     ffi::{OsStr, OsString},
     fs,
     os::unix::fs::PermissionsExt,
@@ -13,6 +13,7 @@ use uzers::os::unix::UserExt;
 
 use crate::{
     app_server::{TESTED_CODEX_CLI_VERSION, TESTED_CODEX_CLI_VERSION_OUTPUT, TESTED_CODEX_VERSION},
+    cli_output::RunningClientFacts,
     desktop::render_descriptor,
     error::ControllerError,
     model::{DesktopAttachmentIdentity, InstalledRelease, ProductConfig},
@@ -46,10 +47,10 @@ use super::{
     render::{render_projection, render_unit},
     service::{
         CONTROL_SOCKET_READINESS_TIMEOUT, CallerUnitEvidence, CallerUnitInspection,
-        LifecycleTarget, ServiceActivity, ServiceEnablement, append_unattached_client_guidance,
-        cgroup_proves_self_hosted, classify_service_activity, classify_service_enablement,
-        classify_unattached_client, detect_running_unattached_clients_from_snapshot,
-        inspect_caller_unit, wait_for_control_socket,
+        LifecycleTarget, ServiceActivity, ServiceEnablement, cgroup_proves_self_hosted,
+        classify_service_activity, classify_service_enablement,
+        detect_running_unattached_clients_from_snapshot, inspect_caller_unit,
+        wait_for_control_socket,
     },
     setup::{SetupContext, setup_preflight, setup_with_context},
     status::{StatusContext, status_with_context},

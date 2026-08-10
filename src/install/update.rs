@@ -736,8 +736,9 @@ disable stops running turns; the final enable is needed only when the service sh
                     ));
                 }
                 DescriptorState::Absent if snapshot.enabled => {
-                    publish_descriptor(identity, &expected)
-                        .map_err(|error| progress.fail(UpdateStage::Descriptor, error, &retry))?
+                    publish_descriptor(identity, &expected).map_err(|failure| {
+                        progress.fail(UpdateStage::Descriptor, failure.source, &retry)
+                    })?
                 }
                 DescriptorState::Absent | DescriptorState::Expected => false,
             }

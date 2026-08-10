@@ -1,11 +1,8 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    ffi::OsString,
-    path::Path,
-};
+use std::{collections::BTreeMap, ffi::OsString, path::Path};
 
 use crate::{
     app_server::TESTED_CODEX_VERSION,
+    cli_output::RunningClientFacts,
     desktop::{
         DescriptorState, DesktopAvailability, DesktopTarget, inspect_descriptor,
         preflight_descriptor_switch, probe_persisted_desktop_capability, publish_descriptor,
@@ -17,8 +14,8 @@ use crate::{
 
 use super::{
     DESKTOP_DETACH_GUIDANCE, DesktopAttachmentStatus, LifecycleContext, LifecycleDesktopPlan,
-    LifecycleReceipt, LifecycleTarget, cleanup_changed_descriptor_after_start_failure,
-    display_command_for_paths,
+    LifecycleReceipt, LifecycleTarget, append_legacy_unattached_client_guidance,
+    cleanup_changed_descriptor_after_start_failure, display_command_for_paths,
     evidence::{ResolvedUserPaths, SelectedHomeOperation, require_selected_home_evidence},
     incomplete_descriptor_cleanup, lifecycle_context,
     native::{read_codex_version, resolve_named_executable},
@@ -27,8 +24,8 @@ use super::{
     render::render_unit,
     service::{
         CallerUnitEvidence, CallerUnitInspection, ServiceActivity,
-        append_unattached_client_guidance, detect_running_unattached_clients, inspect_caller_unit,
-        query_service_activity, run_systemctl, verify_disabled_service, verify_enabled_service,
+        detect_running_unattached_clients, inspect_caller_unit, query_service_activity,
+        run_systemctl, verify_disabled_service, verify_enabled_service,
     },
 };
 
@@ -176,7 +173,7 @@ pub(super) async fn enable_with_context(
         (&desktop.target, &desktop.descriptor)
     {
         let published = publish_descriptor(&target.identity, descriptor)
-            .map_err(|error| progress.fail(LifecycleStage::Descriptor, error, &retry))?;
+            .map_err(|failure| progress.fail(LifecycleStage::Descriptor, failure.source, &retry))?;
         if published {
             complete_lifecycle_stage!(progress, LifecycleStage::Descriptor, context.target, &retry);
         }
@@ -184,11 +181,8 @@ pub(super) async fn enable_with_context(
     } else {
         false
     };
-    let unattached_clients = if desktop.status == DesktopAttachmentStatus::Available {
-        detect_running_unattached_clients(&context.target.client_process_source, paths.euid)
-    } else {
-        BTreeSet::new()
-    };
+    let running_clients =
+        detect_running_unattached_clients(&context.target.client_process_source, paths.euid);
     run_systemctl(
         &systemctl,
         [
@@ -209,7 +203,8 @@ pub(super) async fn enable_with_context(
         .err()
         .map(|cleanup| {
             format!(
-                "{error}; cleanup after published Desktop descriptor failed: {cleanup}; Desktop routing state is unverified"
+                "{error}; cleanup after published Desktop descriptor failed: {}; Desktop routing state is unverified",
+                cleanup.source
             )
         })
         .unwrap_or_else(|| error.to_string());
@@ -235,7 +230,8 @@ pub(super) async fn enable_with_context(
             .err()
             .map(|cleanup| {
                 format!(
-                    "{error}; cleanup after published Desktop descriptor failed: {cleanup}; Desktop routing state is unverified"
+                    "{error}; cleanup after published Desktop descriptor failed: {}; Desktop routing state is unverified",
+                    cleanup.source
                 )
             })
             .unwrap_or_else(|| error.to_string());
@@ -270,7 +266,12 @@ Desktop restart required: {}\n",
     if desktop.setup_required {
         stdout.push_str("Run codex-session-control setup to attach Desktop.\n");
     }
-    append_unattached_client_guidance(&mut stdout, &unattached_clients);
+    let legacy_running_clients = if desktop.status == DesktopAttachmentStatus::Available {
+        running_clients
+    } else {
+        RunningClientFacts::default()
+    };
+    append_legacy_unattached_client_guidance(&mut stdout, &legacy_running_clients);
     Ok(LifecycleReceipt { stdout, stderr })
 }
 
@@ -280,7 +281,7 @@ fn cleanup_enable_descriptor(
     descriptor_intent_changed: bool,
     desktop: Option<&DesktopTarget>,
     descriptor: Option<&[u8]>,
-) -> Result<(), ControllerError> {
+) -> Result<(), crate::desktop::DescriptorPublicationFailure> {
     if descriptor_intent_changed {
         cleanup_changed_descriptor_after_start_failure(systemctl, target, desktop, descriptor)?;
     }

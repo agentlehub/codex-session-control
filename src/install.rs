@@ -5,7 +5,11 @@ use std::{
 };
 
 use crate::{
-    desktop::{DesktopTarget, remove_expected_descriptor, render_descriptor},
+    cli_output::RunningClientFacts,
+    desktop::{
+        DescriptorPublicationFailure, DescriptorPublicationResidue, DesktopTarget,
+        remove_expected_descriptor, render_descriptor,
+    },
     error::ControllerError,
 };
 use sha2::{Digest, Sha256};
@@ -29,6 +33,28 @@ use service::{ServiceActivity, query_service_activity, verify_absent_control_soc
 
 const DESKTOP_DETACH_GUIDANCE: &str =
     "Desktop: fully exit and restart Desktop to return to ordinary mode.\n";
+
+fn append_legacy_unattached_client_guidance(stdout: &mut String, facts: &RunningClientFacts) {
+    let mut clients = Vec::new();
+    if facts.cli {
+        clients.push("CLI");
+    }
+    if facts.desktop {
+        clients.push("Desktop");
+    }
+    if clients.is_empty() {
+        return;
+    }
+    stdout.push_str(&format!(
+        "Unattached running clients: {}\n",
+        clients.join(", ")
+    ));
+    stdout.push_str(
+        "This running client was not attached or migrated.\n\
+Desktop: fully exit and restart Desktop to use the shared app-server.\n\
+CLI: exit and resume through codex-session-control codex.\n",
+    );
+}
 
 fn display_command_for_paths(paths: &ResolvedUserPaths, path_environment: &OsStr) -> String {
     let install_bin = paths.home.join(".local/bin");
@@ -148,28 +174,31 @@ fn cleanup_changed_descriptor_after_start_failure(
     target: &LifecycleTarget,
     desktop: Option<&DesktopTarget>,
     descriptor: Option<&[u8]>,
-) -> Result<(), ControllerError> {
-    let (desktop, descriptor) = desktop.zip(descriptor).ok_or_else(|| {
-        ControllerError::Operational(
-            "changed Desktop descriptor cleanup has no exact descriptor identity".to_owned(),
-        )
-    })?;
+) -> Result<(), DescriptorPublicationFailure> {
+    let (desktop, descriptor) = desktop
+        .zip(descriptor)
+        .expect("changed Desktop descriptor has exact identity and bytes");
+    let residue = desktop.identity.descriptor_path.clone();
+    let failed = |source| DescriptorPublicationFailure {
+        source,
+        residue: Some(DescriptorPublicationResidue::Final(residue.clone())),
+    };
     match query_service_activity(systemctl, &target.unit_name) {
         ServiceActivity::Active => {
-            return Err(ControllerError::Operational(
+            return Err(failed(ControllerError::Operational(
                 "service is active; exact Desktop descriptor was retained".to_owned(),
-            ));
+            )));
         }
         ServiceActivity::Unproven => {
-            return Err(ControllerError::Operational(
+            return Err(failed(ControllerError::Operational(
                 "service activity could not be proven; exact Desktop descriptor was retained"
                     .to_owned(),
-            ));
+            )));
         }
         ServiceActivity::Inactive => {}
     }
-    verify_absent_control_socket(target)?;
-    remove_expected_descriptor(&desktop.identity, descriptor)?;
+    verify_absent_control_socket(target).map_err(&failed)?;
+    remove_expected_descriptor(&desktop.identity, descriptor).map_err(failed)?;
     Ok(())
 }
 

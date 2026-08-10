@@ -6,7 +6,7 @@ use std::{
         fd::AsFd,
         unix::fs::{MetadataExt, PermissionsExt},
     },
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -20,6 +20,35 @@ pub(crate) enum DescriptorState {
     Absent,
     Expected,
     Foreign,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum DescriptorPublicationResidue {
+    Stage(PathBuf),
+    Final(PathBuf),
+}
+
+#[derive(Debug)]
+pub(crate) struct DescriptorPublicationFailure {
+    pub(crate) source: ControllerError,
+    pub(crate) residue: Option<DescriptorPublicationResidue>,
+}
+
+impl DescriptorPublicationFailure {
+    fn clean(source: ControllerError) -> Self {
+        Self {
+            source,
+            residue: None,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DescriptorPublicationTestPoint {
+    BeforeStage,
+    AfterStage { cleanup_unverified: bool },
+    AfterRename,
 }
 
 pub(crate) fn render_descriptor(socket_path: &Path) -> Result<Vec<u8>, ControllerError> {
@@ -121,20 +150,64 @@ static DESCRIPTOR_TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub(crate) fn publish_descriptor(
     identity: &DesktopAttachmentIdentity,
     expected: &[u8],
-) -> Result<bool, ControllerError> {
-    identity.validate()?;
-    let expected_document = parse_descriptor(expected)?;
-    prepare_descriptor_parent(identity)?;
-    let parent = open_descriptor_parent(identity)?
-        .ok_or_else(|| desktop_error("descriptor parent disappeared after preparation"))?;
-    let file_name = identity
-        .descriptor_path
-        .file_name()
-        .ok_or_else(|| desktop_error("descriptor path has no file name"))?;
-    match inspect_open_descriptor(&parent, file_name, &expected_document)? {
+) -> Result<bool, DescriptorPublicationFailure> {
+    #[cfg(test)]
+    {
+        publish_descriptor_internal(identity, expected, None)
+    }
+    #[cfg(not(test))]
+    {
+        publish_descriptor_internal(identity, expected)
+    }
+}
+
+#[cfg(test)]
+pub(super) fn publish_descriptor_with_test_point(
+    identity: &DesktopAttachmentIdentity,
+    expected: &[u8],
+    test_point: DescriptorPublicationTestPoint,
+) -> Result<bool, DescriptorPublicationFailure> {
+    publish_descriptor_internal(identity, expected, Some(test_point))
+}
+
+fn publish_descriptor_internal(
+    identity: &DesktopAttachmentIdentity,
+    expected: &[u8],
+    #[cfg(test)] test_point: Option<DescriptorPublicationTestPoint>,
+) -> Result<bool, DescriptorPublicationFailure> {
+    identity
+        .validate()
+        .map_err(DescriptorPublicationFailure::clean)?;
+    let expected_document =
+        parse_descriptor(expected).map_err(DescriptorPublicationFailure::clean)?;
+    prepare_descriptor_parent(identity).map_err(DescriptorPublicationFailure::clean)?;
+    let parent = open_descriptor_parent(identity)
+        .map_err(DescriptorPublicationFailure::clean)?
+        .ok_or_else(|| {
+            DescriptorPublicationFailure::clean(desktop_error(
+                "descriptor parent disappeared after preparation",
+            ))
+        })?;
+    let file_name = identity.descriptor_path.file_name().ok_or_else(|| {
+        DescriptorPublicationFailure::clean(desktop_error("descriptor path has no file name"))
+    })?;
+    match inspect_open_descriptor(&parent, file_name, &expected_document)
+        .map_err(DescriptorPublicationFailure::clean)?
+    {
         DescriptorState::Expected => return Ok(false),
-        DescriptorState::Foreign => return Err(desktop_error("Desktop descriptor is foreign")),
+        DescriptorState::Foreign => {
+            return Err(DescriptorPublicationFailure::clean(desktop_error(
+                "Desktop descriptor is foreign",
+            )));
+        }
         DescriptorState::Absent => {}
+    }
+
+    #[cfg(test)]
+    if test_point == Some(DescriptorPublicationTestPoint::BeforeStage) {
+        return Err(DescriptorPublicationFailure::clean(desktop_error(
+            "injected failure before descriptor stage",
+        )));
     }
 
     let temporary = OsString::from(format!(
@@ -144,6 +217,11 @@ pub(crate) fn publish_descriptor(
         DESCRIPTOR_TEMPORARY_SEQUENCE.fetch_add(1, Ordering::Relaxed),
     ));
     let temporary_path = Path::new(&temporary);
+    let temporary_full_path = identity
+        .descriptor_path
+        .parent()
+        .expect("validated descriptor has a parent")
+        .join(temporary_path);
     let file = rustix::fs::openat(
         &parent,
         temporary_path,
@@ -151,7 +229,27 @@ pub(crate) fn publish_descriptor(
         Mode::RUSR | Mode::WUSR,
     )
     .map(File::from)
-    .map_err(|_| desktop_error("descriptor stage file cannot be created safely"))?;
+    .map_err(|_| {
+        DescriptorPublicationFailure::clean(desktop_error(
+            "descriptor stage file cannot be created safely",
+        ))
+    })?;
+
+    #[cfg(test)]
+    if let Some(DescriptorPublicationTestPoint::AfterStage { cleanup_unverified }) = test_point {
+        drop(file);
+        let residue = if cleanup_unverified {
+            Some(DescriptorPublicationResidue::Stage(temporary_full_path))
+        } else {
+            cleanup_descriptor_stage(&parent, temporary_path, &temporary_full_path)
+        };
+        return Err(DescriptorPublicationFailure {
+            source: desktop_error("injected failure after descriptor stage"),
+            residue,
+        });
+    }
+
+    let mut renamed = false;
     let result = (|| {
         let mut file = file;
         file.write_all(expected)
@@ -167,6 +265,11 @@ pub(crate) fn publish_descriptor(
             RenameFlags::NOREPLACE,
         )
         .map_err(|_| desktop_error("descriptor changed during publication"))?;
+        renamed = true;
+        #[cfg(test)]
+        if test_point == Some(DescriptorPublicationTestPoint::AfterRename) {
+            return Err(desktop_error("injected failure after descriptor rename"));
+        }
         parent
             .sync_all()
             .map_err(|_| desktop_error("descriptor parent cannot be synced"))?;
@@ -177,10 +280,49 @@ pub(crate) fn publish_descriptor(
             )),
         }
     })();
-    if result.is_err() {
-        let _ = rustix::fs::unlinkat(&parent, temporary_path, rustix::fs::AtFlags::empty());
+    match result {
+        Ok(changed) => Ok(changed),
+        Err(source) => {
+            let residue = if renamed {
+                Some(DescriptorPublicationResidue::Final(
+                    identity.descriptor_path.clone(),
+                ))
+            } else {
+                cleanup_descriptor_stage(&parent, temporary_path, &temporary_full_path)
+            };
+            Err(DescriptorPublicationFailure { source, residue })
+        }
     }
-    result
+}
+
+fn cleanup_descriptor_stage(
+    parent: &File,
+    temporary_path: &Path,
+    temporary_full_path: &Path,
+) -> Option<DescriptorPublicationResidue> {
+    let residue = || {
+        Some(DescriptorPublicationResidue::Stage(
+            temporary_full_path.to_owned(),
+        ))
+    };
+    if rustix::fs::unlinkat(parent, temporary_path, rustix::fs::AtFlags::empty()).is_err()
+        || parent.sync_all().is_err()
+    {
+        return residue();
+    }
+    match rustix::fs::openat(
+        parent,
+        temporary_path,
+        OFlags::RDONLY | OFlags::NOFOLLOW,
+        Mode::empty(),
+    ) {
+        Err(error) if error == rustix::io::Errno::NOENT => None,
+        Ok(file) => {
+            drop(file);
+            residue()
+        }
+        Err(_) => residue(),
+    }
 }
 
 pub(crate) fn remove_expected_descriptor(
