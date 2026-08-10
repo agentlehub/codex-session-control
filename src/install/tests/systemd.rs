@@ -995,7 +995,13 @@ exit "$status"
     let result: ManagedProbeResult =
         serde_json::from_slice(&fs::read(&managed_probe_result).unwrap()).unwrap();
 
-    assert!(result.no_restart_stdout.contains("Installed release:"));
+    assert_eq!(
+        result.no_restart_stdout,
+        format!(
+            "Codex Session Control was updated to {}.\n\nStart a new task to use the updated plugin.\n",
+            higher_test_release_version()
+        )
+    );
     assert!(
         result
             .no_restart_stderr
