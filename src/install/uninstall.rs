@@ -3,18 +3,25 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{app_server::TESTED_CODEX_VERSION, error::ControllerError};
+use crate::{
+    cli_output::{
+        IndependentTerminal, ManagedPaths, ManualCleanup, NativeCleanupCommand, OrdinaryFailure,
+        RollbackIncomplete, RollbackPrimary, StopThenRetry, TerminalPartialUninstall,
+        UninstallSuccess, UserFailure, UserSuccess,
+    },
+    diagnostics::{DiagnosticCause, DiagnosticEvent, DiagnosticTarget, Diagnostics},
+};
 
 use super::{
-    DESKTOP_DETACH_GUIDANCE, LifecycleContext, LifecycleTarget, display_command_for_paths,
+    LifecycleContext, LifecycleTarget,
     evidence::{
         ResolvedUserPaths, SelectedHomeOperation, classify_selected_home_evidence,
         require_selected_home_evidence,
     },
-    incomplete_descriptor_cleanup, lifecycle_context,
+    lifecycle_context,
     native::{
-        self, read_codex_version, remove_native_marketplace_if_present,
-        remove_native_plugin_if_present, resolve_named_executable,
+        self, remove_native_marketplace_if_present, remove_native_plugin_if_present,
+        resolve_named_executable,
     },
     paths::{remove_owned_empty_dir, remove_owned_file, remove_owned_tree},
     remove_persisted_desktop_descriptor,
@@ -24,12 +31,6 @@ use super::{
         verify_disabled_service,
     },
 };
-
-#[derive(Debug)]
-pub(crate) struct UninstallReceipt {
-    pub stdout: String,
-    pub stderr: String,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum UninstallStage {
@@ -46,7 +47,7 @@ enum UninstallStage {
 }
 
 impl UninstallStage {
-    const fn name(self) -> &'static str {
+    const fn diagnostic_name(self) -> &'static str {
         match self {
             Self::ServiceStop => "service-stop",
             Self::ServiceStopVerify => "service-stop-verify",
@@ -62,92 +63,138 @@ impl UninstallStage {
     }
 }
 
-#[derive(Default)]
-struct UninstallProgress {
-    completed: Vec<UninstallStage>,
+fn rollback_failure(primary: RollbackPrimary, first: PathBuf, rest: Vec<PathBuf>) -> UserFailure {
+    UserFailure::RollbackIncomplete(RollbackIncomplete::new(
+        primary,
+        ManagedPaths::new(first, rest),
+    ))
 }
 
-impl UninstallProgress {
-    fn complete(&mut self, stage: UninstallStage) {
-        self.completed.push(stage);
-    }
+fn installed_state_failure(paths: &ResolvedUserPaths) -> UserFailure {
+    rollback_failure(
+        RollbackPrimary::UninstallInstalledStateCheckStatus,
+        paths.config.clone(),
+        vec![paths.manifest.clone()],
+    )
+}
 
-    fn stderr(&self) -> String {
-        self.completed
-            .iter()
-            .map(|stage| format!("completed: {}\n", stage.name()))
-            .collect()
-    }
+fn cleanup_failure(path: PathBuf) -> UserFailure {
+    rollback_failure(RollbackPrimary::UninstallCleanupRetry, path, Vec::new())
+}
 
-    fn fail(
-        &self,
-        stage: UninstallStage,
-        cause: impl std::fmt::Display,
-        recovery: &str,
-    ) -> ControllerError {
-        ControllerError::Operational(format!(
-            "{}failed at {}: {cause}\n{recovery}",
-            self.stderr(),
-            stage.name()
-        ))
+fn manual_cleanup_failure(
+    command: NativeCleanupCommand,
+    paths: &ResolvedUserPaths,
+    codex: Option<&Path>,
+) -> UserFailure {
+    let codex_executable = codex
+        .filter(|path| native::valid_owned_executable(path, paths.euid))
+        .and_then(|path| {
+            super::shell_quote_path(path)
+                .ok()
+                .map(|_| path.to_path_buf())
+        });
+    UserFailure::ManualCleanup(ManualCleanup::new(
+        command,
+        paths.codex_home.clone(),
+        codex_executable,
+    ))
+}
+
+fn complete_uninstall_stage(
+    diagnostics: &mut Diagnostics,
+    stage: UninstallStage,
+    _target: &LifecycleTarget,
+) -> Result<(), UserFailure> {
+    diagnostics.completed(stage.diagnostic_name());
+    #[cfg(test)]
+    if _target.test_hooks.fail_after_completed_stage == Some(stage.diagnostic_name()) {
+        let failure = if stage == UninstallStage::ServiceStop {
+            UserFailure::StopThenRetry(StopThenRetry::UninstallServiceStateStopThenUninstall)
+        } else {
+            UserFailure::Ordinary(OrdinaryFailure::UninstallUnexpectedRetry)
+        };
+        return Err(super::fail_with_diagnostic(
+            diagnostics,
+            stage.diagnostic_name(),
+            DiagnosticCause::Unexpected,
+            failure,
+        ));
     }
+    Ok(())
 }
 
 pub(crate) async fn uninstall(
     target: LifecycleTarget,
-) -> Result<UninstallReceipt, ControllerError> {
-    uninstall_with_context(lifecycle_context(target)?).await
+    diagnostics: &mut Diagnostics,
+) -> Result<UserSuccess, UserFailure> {
+    diagnostics.emit(DiagnosticEvent::ControllerStarted {
+        version: semver::Version::parse(env!("CARGO_PKG_VERSION"))
+            .expect("package version is semantic"),
+        target: DiagnosticTarget::current(),
+    });
+    let context = lifecycle_context(target).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UninstallStage::ServiceStop.diagnostic_name(),
+            DiagnosticCause::Validation,
+            UserFailure::Ordinary(OrdinaryFailure::UninstallUnexpectedRetry),
+        )
+    })?;
+    uninstall_with_context_and_diagnostics(context, diagnostics).await
 }
 
+#[cfg(test)]
 pub(super) async fn uninstall_with_context(
     context: LifecycleContext,
-) -> Result<UninstallReceipt, ControllerError> {
-    let mut progress = UninstallProgress::default();
+) -> Result<UserSuccess, UserFailure> {
+    let mut diagnostics = Diagnostics::new(false, crate::diagnostics::DiagnosticCommand::Uninstall);
+    uninstall_with_context_and_diagnostics(context, &mut diagnostics).await
+}
+
+pub(super) async fn uninstall_with_context_and_diagnostics(
+    context: LifecycleContext,
+    diagnostics: &mut Diagnostics,
+) -> Result<UserSuccess, UserFailure> {
     let paths = &context.target.paths;
-    let display_command = display_command_for_paths(paths, &context.path_environment);
-    let retry = format!("retry: {display_command} uninstall\n");
     let systemctl = resolve_named_executable(&context.path_environment, &context.cwd, "systemctl")
-        .map_err(|error| progress.fail(UninstallStage::ServiceStop, error, &retry))?;
+        .map_err(|_| {
+            super::fail_with_diagnostic(
+                diagnostics,
+                UninstallStage::ServiceStop.diagnostic_name(),
+                DiagnosticCause::ServiceStop,
+                UserFailure::Ordinary(OrdinaryFailure::UninstallServiceStopRetry),
+            )
+        })?;
 
     match query_service_activity(&systemctl, &context.target.unit_name) {
         ServiceActivity::Inactive => {}
         ServiceActivity::Active => match inspect_caller_unit(&systemctl, &context.target) {
             CallerUnitInspection::Independent => {}
             CallerUnitInspection::SelfHosted(CallerUnitEvidence::WhoAmI) => {
-                let recovery =
-                    format!("run from an independent terminal:\n{display_command} uninstall\n");
-                return Err(progress.fail(
-                    UninstallStage::ServiceStop,
-                    "refusing uninstall: this command is running inside the managed app-server",
-                    &recovery,
+                return Err(super::fail_with_diagnostic(
+                    diagnostics,
+                    UninstallStage::ServiceStop.diagnostic_name(),
+                    DiagnosticCause::Validation,
+                    UserFailure::IndependentTerminal(IndependentTerminal::Uninstall),
                 ));
             }
             CallerUnitInspection::SelfHosted(CallerUnitEvidence::ControlGroup)
             | CallerUnitInspection::Unknown { .. } => {
-                let recovery = format!(
-                    "caller independence could not be proven; from an independent terminal:\n\
-                     systemctl --user stop {}\n\
-                     {display_command} uninstall\n",
-                    context.target.unit_name,
-                );
-                return Err(progress.fail(
-                    UninstallStage::ServiceStop,
-                    "refusing uninstall: caller independence cannot be proven",
-                    &recovery,
+                return Err(super::fail_with_diagnostic(
+                    diagnostics,
+                    UninstallStage::ServiceStop.diagnostic_name(),
+                    DiagnosticCause::Validation,
+                    UserFailure::StopThenRetry(StopThenRetry::UninstallUnsafeStopThenUninstall),
                 ));
             }
         },
         ServiceActivity::Unproven => {
-            let recovery = format!(
-                "service activity could not be proven; from an independent terminal:\n\
-                 systemctl --user stop {}\n\
-                 {display_command} uninstall\n",
-                context.target.unit_name,
-            );
-            return Err(progress.fail(
-                UninstallStage::ServiceStop,
-                "refusing uninstall: service activity cannot be proven",
-                &recovery,
+            return Err(super::fail_with_diagnostic(
+                diagnostics,
+                UninstallStage::ServiceStop.diagnostic_name(),
+                DiagnosticCause::ServiceState,
+                UserFailure::StopThenRetry(StopThenRetry::UninstallUnsafeStopThenUninstall),
             ));
         }
     }
@@ -162,168 +209,156 @@ pub(super) async fn uninstall_with_context(
         ],
     ) {
         Ok(()) => false,
-        Err(stop_error) => {
-            verify_absent_managed_unit_stop(&systemctl, &context.target).map_err(
-                |proof_error| {
-                    progress.fail(
-                        UninstallStage::ServiceStop,
-                        format!("{stop_error}; {proof_error}"),
-                        &retry,
-                    )
-                },
-            )?;
+        Err(_) => {
+            verify_absent_managed_unit_stop(&systemctl, &context.target).map_err(|_| {
+                super::fail_with_diagnostic(
+                    diagnostics,
+                    UninstallStage::ServiceStop.diagnostic_name(),
+                    DiagnosticCause::ServiceState,
+                    UserFailure::StopThenRetry(
+                        StopThenRetry::UninstallServiceStateStopThenUninstall,
+                    ),
+                )
+            })?;
             true
         }
     };
-    complete_lifecycle_stage!(
-        progress,
-        UninstallStage::ServiceStop,
-        context.target,
-        &retry
-    );
+    complete_uninstall_stage(diagnostics, UninstallStage::ServiceStop, &context.target)?;
 
     if !stopped_as_absent_unit {
-        verify_disabled_service(&systemctl, &context.target)
-            .map_err(|error| progress.fail(UninstallStage::ServiceStopVerify, error, &retry))?;
+        verify_disabled_service(&systemctl, &context.target).map_err(|_| {
+            super::fail_with_diagnostic(
+                diagnostics,
+                UninstallStage::ServiceStopVerify.diagnostic_name(),
+                DiagnosticCause::ServiceState,
+                UserFailure::StopThenRetry(StopThenRetry::UninstallServiceStateStopThenUninstall),
+            )
+        })?;
     }
-    complete_lifecycle_stage!(
-        progress,
+    complete_uninstall_stage(
+        diagnostics,
         UninstallStage::ServiceStopVerify,
-        context.target,
-        &retry
-    );
+        &context.target,
+    )?;
 
     let evidence = require_selected_home_evidence(paths, SelectedHomeOperation::Uninstall)
-        .map_err(|error| {
-            progress.fail(
-                UninstallStage::DescriptorRemove,
-                incomplete_descriptor_cleanup(error),
-                &retry,
+        .map_err(|_| {
+            super::fail_with_diagnostic(
+                diagnostics,
+                UninstallStage::DescriptorRemove.diagnostic_name(),
+                DiagnosticCause::Validation,
+                installed_state_failure(paths),
             )
         })?;
+    let descriptor_path = evidence
+        .manifest
+        .as_ref()
+        .and_then(|manifest| manifest.desktop_attachment.as_ref())
+        .map(|identity| identity.descriptor_path.clone());
     let desktop_intent_removed =
-        remove_persisted_desktop_descriptor(paths, &evidence).map_err(|error| {
-            progress.fail(
-                UninstallStage::DescriptorRemove,
-                incomplete_descriptor_cleanup(error),
-                &retry,
+        remove_persisted_desktop_descriptor(paths, &evidence).map_err(|_| {
+            super::fail_with_diagnostic(
+                diagnostics,
+                UninstallStage::DescriptorRemove.diagnostic_name(),
+                DiagnosticCause::DesktopIntegration,
+                rollback_failure(
+                    RollbackPrimary::UninstallDesktopCheckStatus,
+                    descriptor_path
+                        .clone()
+                        .unwrap_or_else(|| paths.manifest.clone()),
+                    Vec::new(),
+                ),
             )
         })?;
-    let retry = if desktop_intent_removed {
-        format!("{DESKTOP_DETACH_GUIDANCE}{retry}")
-    } else {
-        retry
-    };
-    complete_lifecycle_stage!(
-        progress,
+    complete_uninstall_stage(
+        diagnostics,
         UninstallStage::DescriptorRemove,
-        context.target,
-        &retry
-    );
+        &context.target,
+    )?;
 
     remove_owned_file(&paths.unit, paths.euid, 0o644)
         .and_then(|()| run_systemctl(&systemctl, ["--user", "daemon-reload"]))
-        .map_err(|error| progress.fail(UninstallStage::ServiceUnitRemove, error, &retry))?;
-    complete_lifecycle_stage!(
-        progress,
+        .map_err(|_| {
+            super::fail_with_diagnostic(
+                diagnostics,
+                UninstallStage::ServiceUnitRemove.diagnostic_name(),
+                DiagnosticCause::Cleanup,
+                cleanup_failure(paths.unit.clone()),
+            )
+        })?;
+    complete_uninstall_stage(
+        diagnostics,
         UninstallStage::ServiceUnitRemove,
-        context.target,
-        &retry
-    );
+        &context.target,
+    )?;
 
     let codex = cleanup_codex_executable(paths, &context.path_environment, &context.cwd);
-    let compatibility_warning = codex.as_ref().and_then(|codex| {
-        read_codex_version(codex, &paths.codex_home)
-            .ok()
-            .and_then(|(display, expected)| {
-                (expected != TESTED_CODEX_VERSION).then(|| {
-                    format!(
-                        "Compatibility warning: Codex app-server {display} has not been tested with codex-session-control {}; native results remain authoritative.\n",
-                        env!("CARGO_PKG_VERSION")
-                    )
-                })
-            })
-    });
-
     let codex = codex.ok_or_else(|| {
-        let recovery = manual_native_removal(&paths.codex_home, None, false);
-        let recovery = if desktop_intent_removed {
-            format!("{DESKTOP_DETACH_GUIDANCE}{recovery}")
-        } else {
-            recovery
-        };
-        progress.fail(
-            UninstallStage::PluginRemove,
-            "native plugin absence cannot be proven",
-            &recovery,
+        super::fail_with_diagnostic(
+            diagnostics,
+            UninstallStage::PluginRemove.diagnostic_name(),
+            DiagnosticCause::CliIntegration,
+            manual_cleanup_failure(NativeCleanupCommand::RemovePlugin, paths, None),
         )
     })?;
     remove_native_plugin_if_present(&codex, &paths.codex_home).map_err(|_| {
-        let recovery = manual_native_removal(&paths.codex_home, Some(&codex), false);
-        let recovery = if desktop_intent_removed {
-            format!("{DESKTOP_DETACH_GUIDANCE}{recovery}")
-        } else {
-            recovery
-        };
-        progress.fail(
-            UninstallStage::PluginRemove,
-            "native plugin absence cannot be proven",
-            &recovery,
+        super::fail_with_diagnostic(
+            diagnostics,
+            UninstallStage::PluginRemove.diagnostic_name(),
+            DiagnosticCause::CliIntegration,
+            manual_cleanup_failure(NativeCleanupCommand::RemovePlugin, paths, Some(&codex)),
         )
     })?;
-    complete_lifecycle_stage!(
-        progress,
-        UninstallStage::PluginRemove,
-        context.target,
-        &retry
-    );
+    complete_uninstall_stage(diagnostics, UninstallStage::PluginRemove, &context.target)?;
 
     remove_native_marketplace_if_present(&codex, &paths.codex_home).map_err(|_| {
-        let recovery = manual_native_removal(&paths.codex_home, Some(&codex), true);
-        let recovery = if desktop_intent_removed {
-            format!("{DESKTOP_DETACH_GUIDANCE}{recovery}")
-        } else {
-            recovery
-        };
-        progress.fail(
-            UninstallStage::MarketplaceRemove,
-            "native marketplace absence cannot be proven",
-            &recovery,
+        super::fail_with_diagnostic(
+            diagnostics,
+            UninstallStage::MarketplaceRemove.diagnostic_name(),
+            DiagnosticCause::CliIntegration,
+            manual_cleanup_failure(NativeCleanupCommand::RemoveMarketplace, paths, Some(&codex)),
         )
     })?;
-    complete_lifecycle_stage!(
-        progress,
+    complete_uninstall_stage(
+        diagnostics,
         UninstallStage::MarketplaceRemove,
-        context.target,
-        &retry
-    );
+        &context.target,
+    )?;
 
-    remove_owned_tree(&paths.marketplace, paths.euid)
-        .map_err(|error| progress.fail(UninstallStage::ProjectionRemove, error, &retry))?;
-    complete_lifecycle_stage!(
-        progress,
+    remove_owned_tree(&paths.marketplace, paths.euid).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UninstallStage::ProjectionRemove.diagnostic_name(),
+            DiagnosticCause::Cleanup,
+            cleanup_failure(paths.marketplace.clone()),
+        )
+    })?;
+    complete_uninstall_stage(
+        diagnostics,
         UninstallStage::ProjectionRemove,
-        context.target,
-        &retry
-    );
+        &context.target,
+    )?;
 
+    let config_root = paths
+        .config
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| paths.config.clone());
     remove_owned_file(&paths.config, paths.euid, 0o600)
-        .and_then(|()| {
-            remove_owned_empty_dir(
-                paths.config.parent().ok_or(ControllerError::InvalidData {
-                    field: "configuration",
-                    reason: "has no parent",
-                })?,
-                paths.euid,
+        .and_then(|()| remove_owned_empty_dir(&config_root, paths.euid))
+        .map_err(|_| {
+            super::fail_with_diagnostic(
+                diagnostics,
+                UninstallStage::ConfigurationRemove.diagnostic_name(),
+                DiagnosticCause::Cleanup,
+                cleanup_failure(config_root.clone()),
             )
-        })
-        .map_err(|error| progress.fail(UninstallStage::ConfigurationRemove, error, &retry))?;
-    complete_lifecycle_stage!(
-        progress,
+        })?;
+    complete_uninstall_stage(
+        diagnostics,
         UninstallStage::ConfigurationRemove,
-        context.target,
-        &retry
-    );
+        &context.target,
+    )?;
 
     #[cfg(test)]
     if matches!(
@@ -331,82 +366,78 @@ pub(super) async fn uninstall_with_context(
         Some("manifest-remove" | "binary-remove")
     ) {
         let stage = if context.target.test_hooks.fail_after_completed_stage
-            == Some(UninstallStage::ManifestRemove.name())
+            == Some(UninstallStage::ManifestRemove.diagnostic_name())
         {
             UninstallStage::ManifestRemove
         } else {
             UninstallStage::BinaryRemove
         };
-        return Err(progress.fail(
-            stage,
-            "injected failure before product identity removal",
-            &retry,
+        let failure = if stage == UninstallStage::ManifestRemove {
+            cleanup_failure(paths.manifest.clone())
+        } else {
+            UserFailure::Ordinary(OrdinaryFailure::UninstallUnexpectedRetry)
+        };
+        return Err(super::fail_with_diagnostic(
+            diagnostics,
+            stage.diagnostic_name(),
+            DiagnosticCause::Unexpected,
+            failure,
         ));
     }
 
-    remove_owned_file(&paths.manifest, paths.euid, 0o600)
-        .map_err(|error| progress.fail(UninstallStage::ManifestRemove, error, &retry))?;
+    remove_owned_file(&paths.manifest, paths.euid, 0o600).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UninstallStage::ManifestRemove.diagnostic_name(),
+            DiagnosticCause::Cleanup,
+            cleanup_failure(paths.manifest.clone()),
+        )
+    })?;
     let data_root_error = remove_owned_empty_dir(&paths.data_root, paths.euid).err();
     if data_root_error.is_none() {
-        progress.complete(UninstallStage::ManifestRemove);
+        complete_uninstall_stage(diagnostics, UninstallStage::ManifestRemove, &context.target)?;
     }
 
     let binary_error = remove_owned_file(&paths.binary, paths.euid, 0o755).err();
     match (data_root_error, binary_error) {
-        (None, None) => progress.complete(UninstallStage::BinaryRemove),
-        (None, Some(error)) => {
-            return Err(ControllerError::Operational(format!(
-                "{}failed at binary-remove: terminal partial uninstall: {error}\n\
-remaining product executable: {}\n\
-installed identity was removed; no fresh-process retry is available\n",
-                progress.stderr(),
-                paths.binary.display()
-            )));
+        (None, None) => {
+            complete_uninstall_stage(diagnostics, UninstallStage::BinaryRemove, &context.target)?
         }
-        (Some(error), None) => {
-            return Err(ControllerError::Operational(format!(
-                "{}failed at manifest-remove: terminal partial uninstall: {error}\n\
-remaining product root: {}\n\
-product executable and installed identity were removed; no fresh-process retry is available\n",
-                progress.stderr(),
-                paths.data_root.display()
-            )));
+        (None, Some(_)) => {
+            return Err(super::fail_with_diagnostic(
+                diagnostics,
+                UninstallStage::BinaryRemove.diagnostic_name(),
+                DiagnosticCause::Cleanup,
+                UserFailure::TerminalPartialUninstall(TerminalPartialUninstall::new(
+                    ManagedPaths::new(paths.binary.clone(), Vec::new()),
+                )),
+            ));
         }
-        (Some(data_root_error), Some(binary_error)) => {
-            return Err(ControllerError::Operational(format!(
-                "{}failed at manifest-remove: terminal partial uninstall: {data_root_error}; binary-remove also failed: {binary_error}\n\
-remaining product root: {}\n\
-remaining product executable: {}\n\
-installed identity was removed; no fresh-process retry is available\n",
-                progress.stderr(),
-                paths.data_root.display(),
-                paths.binary.display()
-            )));
+        (Some(_), None) => {
+            return Err(super::fail_with_diagnostic(
+                diagnostics,
+                UninstallStage::ManifestRemove.diagnostic_name(),
+                DiagnosticCause::Cleanup,
+                UserFailure::TerminalPartialUninstall(TerminalPartialUninstall::new(
+                    ManagedPaths::new(paths.data_root.clone(), Vec::new()),
+                )),
+            ));
+        }
+        (Some(_), Some(_)) => {
+            return Err(super::fail_with_diagnostic(
+                diagnostics,
+                UninstallStage::ManifestRemove.diagnostic_name(),
+                DiagnosticCause::Cleanup,
+                UserFailure::TerminalPartialUninstall(TerminalPartialUninstall::new(
+                    ManagedPaths::new(paths.data_root.clone(), vec![paths.binary.clone()]),
+                )),
+            ));
         }
     }
 
-    let mut stderr = progress.stderr();
-    if let Some(warning) = compatibility_warning {
-        stderr.push_str(&warning);
-    }
-    if desktop_intent_removed {
-        stderr.push_str(DESKTOP_DETACH_GUIDANCE);
-    }
-    Ok(UninstallReceipt {
-        stdout: format!(
-            "Codex app-server service: removed\n\
-Product descriptor: removed\n\
-Product projection: removed\n\
-Product configuration: removed\n\
-Product executable: removed\n\
-Codex home preserved: {}\n\
-Authentication preserved: yes\n\
-Tasks preserved: yes\n\
-Rollouts preserved: yes\n",
-            paths.codex_home.display()
-        ),
-        stderr,
-    })
+    Ok(UserSuccess::Uninstall(UninstallSuccess::new(
+        desktop_intent_removed,
+    )))
 }
 
 fn cleanup_codex_executable(
@@ -423,8 +454,4 @@ fn cleanup_codex_executable(
         path_environment,
         cwd,
     )
-}
-
-fn manual_native_removal(codex_home: &Path, codex: Option<&Path>, marketplace: bool) -> String {
-    native::manual_native_removal(codex_home, codex, marketplace)
 }

@@ -13,6 +13,7 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 use super::support::{FakeAuthority, Fixture};
 use super::*;
+use crate::cli_output::{IndependentTerminal, OrdinaryFailure, UserFailure};
 
 const ALL_SOURCE_KINDS: [&str; 10] = [
     "cli",
@@ -257,7 +258,7 @@ async fn page_and_decode_failures_abort_the_gate() {
         .await
         .unwrap_err();
 
-        assert_eq!(error.to_string(), "active task inspection failed");
+        assert_eq!(error, ActiveTurnGateFailure::Inspection);
         assert_eq!(authority.requests().len(), 1);
     }
 }
@@ -276,7 +277,7 @@ async fn initialize_failure_aborts_the_gate_before_listing() {
     .await
     .unwrap_err();
 
-    assert_eq!(error.to_string(), "active task inspection failed");
+    assert_eq!(error, ActiveTurnGateFailure::Inspection);
     assert!(authority.requests().is_empty());
 }
 
@@ -318,10 +319,7 @@ async fn noninteractive_and_declined_active_work_leave_the_gate_closed() {
     )
     .await
     .unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "active tasks require interactive restart approval"
-    );
+    assert_eq!(error, ActiveTurnGateFailure::InteractiveRequired);
     assert_eq!(noninteractive_authority.requests().len(), 1);
     drop(noninteractive_authority);
 
@@ -334,7 +332,7 @@ async fn noninteractive_and_declined_active_work_leave_the_gate_closed() {
     let error = baseline_active_turn_gate(&fixture.paths, TESTED_CODEX_VERSION, terminal)
         .await
         .unwrap_err();
-    assert_eq!(error.to_string(), "active task restart approval declined");
+    assert_eq!(error, ActiveTurnGateFailure::Cancelled);
     assert_eq!(prompt.contents(), expected_prompt(&[("thread-a", "Alpha")]));
     assert_eq!(declined_authority.requests().len(), 1);
 }
@@ -420,7 +418,16 @@ fn higher_candidate(fixture: &Fixture, name: &str) -> PathBuf {
 
 #[tokio::test]
 async fn every_gate_failure_keeps_installed_state_unchanged() {
-    for case in ["initialize", "page", "decode", "noninteractive"] {
+    for case in [
+        "initialize",
+        "page",
+        "decode",
+        "final",
+        "noninteractive",
+        "prompt-write",
+        "prompt-read",
+        "decline",
+    ] {
         let fixture = Fixture::new();
         let setup_authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
@@ -431,7 +438,11 @@ async fn every_gate_failure_keeps_installed_state_unchanged() {
                 vec![json!({"error": {"code": -32603, "message": "page failed"}})]
             }
             "decode" => vec![json!({"data": "not-an-array", "nextCursor": null})],
-            "noninteractive" => {
+            "final" => vec![
+                page(vec![active("thread-a", "Alpha")], None),
+                json!({"error": {"code": -32603, "message": "final page failed"}}),
+            ],
+            "noninteractive" | "prompt-write" | "prompt-read" | "decline" => {
                 vec![page(vec![active("thread-a", "Alpha")], None)]
             }
             _ => unreachable!(),
@@ -449,19 +460,56 @@ async fn every_gate_failure_keeps_installed_state_unchanged() {
         .await;
         let candidate = higher_candidate(&fixture, &format!("candidate-{case}"));
         let (mut context, _) = changed_update_context(&fixture, candidate);
-        if case == "noninteractive" {
-            context.terminal = TerminalState::noninteractive();
-        }
+        let mut prompt = None;
+        context.terminal = match case {
+            "noninteractive" => TerminalState::noninteractive(),
+            "prompt-write" => {
+                let (terminal, capture) =
+                    TerminalState::scripted_prompt_failure(RestartPromptTestFailure::Write);
+                prompt = Some(capture);
+                terminal
+            }
+            "prompt-read" => {
+                let (terminal, capture) =
+                    TerminalState::scripted_prompt_failure(RestartPromptTestFailure::Read);
+                prompt = Some(capture);
+                terminal
+            }
+            "decline" => {
+                let (terminal, capture) = TerminalState::scripted(["no"]);
+                prompt = Some(capture);
+                terminal
+            }
+            _ => context.terminal,
+        };
         let before_binary = fs::read(&fixture.paths.binary).unwrap();
         let before_manifest = fs::read(&fixture.paths.manifest).unwrap();
         fixture.clear_logs();
 
         let error = staged_update_with_context(context).await.unwrap_err();
 
-        assert!(
-            error.to_string().contains("failed at active-turn-gate:"),
-            "{case}: {error}"
+        assert_eq!(
+            error,
+            match case {
+                "noninteractive" | "prompt-write" | "prompt-read" => {
+                    UserFailure::InteractiveTerminal
+                }
+                "decline" => UserFailure::Cancellation,
+                _ => UserFailure::Ordinary(OrdinaryFailure::UpdateActiveTasksRetry),
+            },
+            "{case}"
         );
+        if let Some(prompt) = prompt {
+            assert_eq!(
+                prompt.contents(),
+                if case == "prompt-write" {
+                    String::new()
+                } else {
+                    expected_prompt(&[("thread-a", "Alpha")])
+                },
+                "{case}"
+            );
+        }
         assert_eq!(fs::read(&fixture.paths.binary).unwrap(), before_binary);
         assert_eq!(fs::read(&fixture.paths.manifest).unwrap(), before_manifest);
         assert!(!fixture.systemctl_log().contains("daemon-reload"));
@@ -492,11 +540,9 @@ async fn self_hosted_restart_required_update_refuses_before_active_turn_inspecti
 
     let error = staged_update_with_context(context).await.unwrap_err();
 
-    assert!(error.to_string().contains("failed at restart-inspection:"));
-    assert!(
-        error
-            .to_string()
-            .contains("run from an independent terminal")
+    assert_eq!(
+        error,
+        UserFailure::IndependentTerminal(IndependentTerminal::Update)
     );
     assert_eq!(authority.requests(), Vec::<Value>::new());
     assert_eq!(fixture.systemctl_log().matches("--user whoami").count(), 1);
@@ -548,7 +594,7 @@ async fn accepted_gate_has_no_second_handoff_and_restarts_only_the_service() {
     let restarted_authority = starter.await.unwrap();
 
     assert!(report.stdout.starts_with(&format!(
-        "Installed release: {}\n",
+        "Codex Session Control was updated to {}.\n",
         higher_test_release_version()
     )));
     assert_eq!(

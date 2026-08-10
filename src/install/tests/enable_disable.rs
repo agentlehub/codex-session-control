@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, os::unix::fs::PermissionsExt};
 
 use super::support::{FakeAuthority, Fixture};
 use super::*;
@@ -18,6 +18,232 @@ fn context(fixture: &Fixture) -> LifecycleContext {
         desktop_environment: setup.desktop_environment,
         cwd: setup.cwd,
     }
+}
+
+#[test]
+fn enable_guidance_precedence_is_exact() {
+    use crate::cli_output::{DesktopAvailability, EnableSuccess, RunningClientFacts, UserSuccess};
+
+    let cases = [
+        (
+            RunningClientFacts {
+                cli: true,
+                desktop: false,
+            },
+            DesktopAvailability::SetupRequired,
+            false,
+            "Codex CLI is already running without Codex Session Control.",
+        ),
+        (
+            RunningClientFacts {
+                cli: false,
+                desktop: true,
+            },
+            DesktopAvailability::Available,
+            false,
+            "Codex Desktop is already running without Codex Session Control.",
+        ),
+        (
+            RunningClientFacts {
+                cli: true,
+                desktop: true,
+            },
+            DesktopAvailability::Available,
+            true,
+            "Codex Desktop is already running without Codex Session Control.",
+        ),
+        (
+            RunningClientFacts::default(),
+            DesktopAvailability::Available,
+            true,
+            "If Codex Desktop is already running, restart it",
+        ),
+    ];
+    for (running, desktop, changed, expected) in cases {
+        let rendered =
+            UserSuccess::Enable(EnableSuccess::new(running, desktop, changed, Vec::new()).unwrap())
+                .render();
+        assert!(rendered.stdout.contains(expected));
+        assert_eq!(
+            rendered
+                .stdout
+                .matches("Codex CLI is already running without Codex Session Control.")
+                .count(),
+            usize::from(running.cli)
+        );
+        assert_eq!(
+            rendered
+                .stdout
+                .matches("Codex Desktop is already running without Codex Session Control.")
+                .count(),
+            usize::from(running.desktop)
+        );
+    }
+
+    for desktop in [
+        DesktopAvailability::Unavailable,
+        DesktopAvailability::CouldNotVerify,
+        DesktopAvailability::SetupRequired,
+    ] {
+        assert!(
+            EnableSuccess::new(RunningClientFacts::default(), desktop, true, Vec::new()).is_none()
+        );
+    }
+}
+
+#[test]
+fn enable_disable_pure_failure_mappings_are_exact() {
+    use crate::{
+        cli_output::{OrdinaryFailure, StopThenRetry, UserFailure},
+        desktop::{DescriptorPublicationFailure, DescriptorPublicationResidue},
+    };
+
+    assert_eq!(
+        enable_context_failure(),
+        UserFailure::Ordinary(OrdinaryFailure::EnableUnexpectedRetry)
+    );
+    assert_eq!(
+        disable_context_failure(),
+        UserFailure::Ordinary(OrdinaryFailure::DisableUnexpectedRetry)
+    );
+
+    assert_eq!(
+        enable_publication_failure(DescriptorPublicationFailure { residue: None }),
+        UserFailure::Ordinary(OrdinaryFailure::EnableDesktopIntegrationRetry)
+    );
+    for residue in [
+        DescriptorPublicationResidue::Stage(PathBuf::from("/managed/stage")),
+        DescriptorPublicationResidue::Final(PathBuf::from("/managed/final")),
+    ] {
+        assert!(matches!(
+            enable_publication_failure(DescriptorPublicationFailure {
+                residue: Some(residue),
+            }),
+            UserFailure::RollbackIncomplete(_)
+        ));
+    }
+    assert_eq!(
+        enable_service_failure(
+            StopThenRetry::EnableServiceStartStopThenEnable,
+            false,
+            Ok(()),
+        ),
+        UserFailure::StopThenRetry(StopThenRetry::EnableServiceStartStopThenEnable)
+    );
+    assert_eq!(
+        enable_service_failure(
+            StopThenRetry::EnableServiceStateStopThenEnable,
+            true,
+            Ok(()),
+        ),
+        UserFailure::Ordinary(OrdinaryFailure::EnableServiceStateRetry)
+    );
+    assert!(matches!(
+        enable_service_failure(
+            StopThenRetry::EnableServiceStateStopThenEnable,
+            true,
+            Err(DescriptorPublicationFailure {
+                residue: Some(DescriptorPublicationResidue::Final(PathBuf::from(
+                    "/managed/final",
+                ))),
+            }),
+        ),
+        UserFailure::RollbackIncomplete(_)
+    ));
+}
+
+#[tokio::test]
+async fn enable_default_and_verbose_are_behaviorally_identical() {
+    use crate::diagnostics::{DiagnosticCommand, Diagnostics};
+
+    let default_fixture = Fixture::new();
+    let verbose_fixture = Fixture::new();
+    let _default_authority =
+        FakeAuthority::start(&default_fixture.paths, TESTED_CODEX_VERSION).await;
+    let _verbose_authority =
+        FakeAuthority::start(&verbose_fixture.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(default_fixture.context(true))
+        .await
+        .unwrap();
+    setup_with_context(verbose_fixture.context(true))
+        .await
+        .unwrap();
+    default_fixture.clear_logs();
+    verbose_fixture.clear_logs();
+    let mut off = Diagnostics::new(false, DiagnosticCommand::Enable);
+    let mut verbose = Diagnostics::record(DiagnosticCommand::Enable);
+
+    let default = enable_with_context_and_diagnostics(context(&default_fixture), &mut off)
+        .await
+        .unwrap()
+        .render();
+    let recorded = enable_with_context_and_diagnostics(context(&verbose_fixture), &mut verbose)
+        .await
+        .unwrap()
+        .render();
+
+    let recorded = with_recorded_diagnostics(recorded, &verbose);
+
+    assert_default_verbose_parity(&default, &recorded, &verbose, "[verbose] enable:");
+    assert_eq!(
+        default_fixture.systemctl_log(),
+        verbose_fixture.systemctl_log()
+    );
+    assert_eq!(
+        default_fixture.enabled.exists(),
+        verbose_fixture.enabled.exists()
+    );
+    assert_eq!(
+        default_fixture.active.exists(),
+        verbose_fixture.active.exists()
+    );
+}
+
+#[tokio::test]
+async fn disable_default_and_verbose_are_behaviorally_identical() {
+    use crate::diagnostics::{DiagnosticCommand, Diagnostics};
+
+    let default_fixture = Fixture::new();
+    let verbose_fixture = Fixture::new();
+    let _default_authority =
+        FakeAuthority::start(&default_fixture.paths, TESTED_CODEX_VERSION).await;
+    let _verbose_authority =
+        FakeAuthority::start(&verbose_fixture.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(default_fixture.context(true))
+        .await
+        .unwrap();
+    setup_with_context(verbose_fixture.context(true))
+        .await
+        .unwrap();
+    default_fixture.clear_logs();
+    verbose_fixture.clear_logs();
+    let mut off = Diagnostics::new(false, DiagnosticCommand::Disable);
+    let mut verbose = Diagnostics::record(DiagnosticCommand::Disable);
+
+    let default = disable_with_context_and_diagnostics(context(&default_fixture), &mut off)
+        .await
+        .unwrap()
+        .render();
+    let recorded = disable_with_context_and_diagnostics(context(&verbose_fixture), &mut verbose)
+        .await
+        .unwrap()
+        .render();
+
+    let recorded = with_recorded_diagnostics(recorded, &verbose);
+
+    assert_default_verbose_parity(&default, &recorded, &verbose, "[verbose] disable:");
+    assert_eq!(
+        default_fixture.systemctl_log(),
+        verbose_fixture.systemctl_log()
+    );
+    assert_eq!(
+        default_fixture.enabled.exists(),
+        verbose_fixture.enabled.exists()
+    );
+    assert_eq!(
+        default_fixture.active.exists(),
+        verbose_fixture.active.exists()
+    );
 }
 
 fn apply_state(
@@ -65,7 +291,10 @@ async fn enable_converges_every_service_state_with_exact_receipt_and_argv() {
             }))
         };
 
-        let report = enable_with_context(context(&fixture)).await.unwrap();
+        let report = enable_with_context(context(&fixture))
+            .await
+            .unwrap()
+            .render();
         let started_authority = match starter {
             Some(starter) => Some(starter.await.unwrap()),
             None => None,
@@ -73,17 +302,12 @@ async fn enable_converges_every_service_state_with_exact_receipt_and_argv() {
 
         assert_eq!(
             report.stdout,
-            "Codex app-server service: enabled, active\n\
-CLI attachment: available through codex-session-control codex\n\
-Desktop attachment: unavailable\n\
-Desktop restart required: no\n\
-Run codex-session-control setup to attach Desktop.\n",
+            "Codex Session Control is running and will start automatically.\n\n\
+Codex Desktop integration is unavailable.\n\
+Run `codex-session-control setup` to set it up.\n",
             "{name}"
         );
-        assert_eq!(
-            report.stderr, "completed: service-enable\ncompleted: service-verify\n",
-            "{name}"
-        );
+        assert!(report.stderr.is_empty(), "{name}");
         assert!(fixture.enabled.is_file(), "{name}");
         assert!(fixture.active.is_file(), "{name}");
         assert!(fixture.paths.socket.exists(), "{name}");
@@ -118,16 +342,13 @@ async fn enable_verification_reports_untrustworthy_systemctl_state_as_operationa
 
         let error = enable_with_context(context(&fixture)).await.unwrap_err();
 
-        assert_eq!(error.exit_code(), 1, "{operation}");
-        assert_eq!(
-            error.to_string(),
-            format!(
-                "completed: service-enable\n\
-failed at service-verify: systemctl {operation} could not provide trustworthy service state\n\
-retry: codex-session-control enable\n"
-            ),
-            "{operation}"
-        );
+        assert_eq!(error.render().exit_code, 1, "{operation}");
+        assert!(matches!(
+            error,
+            crate::cli_output::UserFailure::StopThenRetry(
+                crate::cli_output::StopThenRetry::EnableServiceStateStopThenEnable
+            )
+        ));
         let active_query = if operation == "is-active" {
             "--user is-active codex-session-control-test-Setup1.service\n"
         } else {
@@ -173,15 +394,17 @@ async fn enable_with_null_attachment_does_not_auto_select_desktop() {
     .unwrap();
     fixture.clear_logs();
 
-    let report = enable_with_context(context(&fixture)).await.unwrap();
+    let report = enable_with_context(context(&fixture))
+        .await
+        .unwrap()
+        .render();
 
-    assert!(report.stdout.contains("Desktop attachment: unavailable\n"));
-    assert!(report.stdout.contains("Desktop restart required: no\n"));
     assert!(
         report
             .stdout
-            .contains("Run codex-session-control setup to attach Desktop.\n")
+            .contains("Codex Desktop integration is unavailable.")
     );
+    assert!(report.stdout.contains("Run `codex-session-control setup`"));
     assert!(!descriptor.exists());
     assert!(
         fixture
@@ -192,7 +415,7 @@ async fn enable_with_null_attachment_does_not_auto_select_desktop() {
 }
 
 #[tokio::test]
-async fn enable_publishes_a_verified_persisted_descriptor_before_service_enable() {
+async fn enable_publishes_a_verified_descriptor_and_disable_reports_exact_residue() {
     let fixture = Fixture::new();
     let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
@@ -224,18 +447,32 @@ async fn enable_publishes_a_verified_persisted_descriptor_before_service_enable(
     .unwrap();
     fixture.clear_logs();
 
-    let report = enable_with_context(context(&fixture)).await.unwrap();
+    let report = enable_with_context(context(&fixture))
+        .await
+        .unwrap()
+        .render();
 
     assert_eq!(
         fs::read(&descriptor).unwrap(),
         render_descriptor(&fixture.paths.socket).unwrap(),
     );
-    assert!(report.stdout.contains("Desktop attachment: available\n"));
-    assert!(report.stdout.contains("Desktop restart required: yes\n"));
-    let stages = report.stderr;
+    assert!(report.stdout.contains(
+        "If Codex Desktop is already running, restart it to make Codex Session Control available there."
+    ));
+
+    fs::set_permissions(&descriptor, fs::Permissions::from_mode(0o644)).unwrap();
+    fixture.clear_logs();
+    let error = disable_with_context(context(&fixture)).await.unwrap_err();
+
+    assert!(matches!(
+        &error,
+        crate::cli_output::UserFailure::PartialDisable(_)
+    ));
     assert!(
-        stages.find("completed: descriptor\n").unwrap()
-            < stages.find("completed: service-enable\n").unwrap()
+        error
+            .render()
+            .stderr
+            .contains(&descriptor.display().to_string())
     );
 }
 
@@ -278,7 +515,12 @@ async fn enable_start_failure_preserves_service_state_and_cleans_a_published_des
 
     let error = enable_with_context(context(&fixture)).await.unwrap_err();
 
-    assert!(error.to_string().contains("failed at service-enable:"));
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::EnableServiceStartRetry
+        )
+    ));
     assert!(fixture.enabled.exists());
     assert!(!fixture.active.exists());
     assert!(!fixture.paths.socket.exists());
@@ -318,7 +560,12 @@ async fn enable_inspects_a_known_descriptor_before_service_mutation_when_launche
 
         let error = enable_with_context(context(&fixture)).await.unwrap_err();
 
-        assert!(error.to_string().contains("Desktop descriptor"));
+        assert!(matches!(
+            error,
+            crate::cli_output::UserFailure::Ordinary(
+                crate::cli_output::OrdinaryFailure::EnableDesktopIntegrationCheckStatus
+            )
+        ));
         assert!(fixture.systemctl_log().is_empty());
     }
 }
@@ -338,7 +585,20 @@ async fn enable_rejects_config_or_unit_drift_before_service_mutation() {
 
         let error = enable_with_context(context(&fixture)).await.unwrap_err();
 
-        assert!(error.to_string().contains(&format!("failed at {drift}:")));
+        assert!(matches!(
+            (drift, error),
+            (
+                "configuration",
+                crate::cli_output::UserFailure::Ordinary(
+                    crate::cli_output::OrdinaryFailure::EnableInstalledStateRepairSetup
+                )
+            ) | (
+                "service-unit",
+                crate::cli_output::UserFailure::Ordinary(
+                    crate::cli_output::OrdinaryFailure::EnableServiceConfigurationRepairSetup
+                )
+            )
+        ));
         assert!(fixture.systemctl_log().is_empty());
     }
 }
@@ -356,14 +616,16 @@ async fn enable_prints_only_the_approved_compatibility_advisory() {
     setup_with_context(fixture.context(true)).await.unwrap();
     fixture.clear_logs();
 
-    let report = enable_with_context(context(&fixture)).await.unwrap();
+    let report = enable_with_context(context(&fixture))
+        .await
+        .unwrap()
+        .render();
 
     assert_eq!(
         report.stderr,
         format!(
-            "completed: service-enable\n\
-completed: service-verify\n\
-Compatibility warning: Codex app-server {untested_version} has not been tested with codex-session-control {}; native results remain authoritative.\n",
+            "Warning: Codex {untested_version} has not been tested with Codex Session Control {}.\n\
+Some features may not work as expected.\n",
             env!("CARGO_PKG_VERSION"),
         )
     );
@@ -389,12 +651,8 @@ async fn disable_without_install_metadata_stops_safely_and_reports_incomplete_de
         let error = disable_with_context(context(&fixture)).await.unwrap_err();
 
         assert!(
-            error.to_string().contains(
-                "completed: service-disable\n\
-completed: service-verify\n\
-failed at descriptor-remove: Desktop descriptor cleanup is incomplete:"
-            ),
-            "{name}: {error}"
+            matches!(error, crate::cli_output::UserFailure::PartialDisable(_)),
+            "{name}: {error:?}"
         );
         assert!(!fixture.enabled.exists(), "{name}");
         assert!(!fixture.active.exists(), "{name}");
@@ -419,7 +677,23 @@ failed at descriptor-remove: Desktop descriptor cleanup is incomplete:"
 }
 
 #[tokio::test]
-async fn lifecycle_stage_failure_has_exact_exit_one_error_and_no_false_receipt() {
+async fn disable_producer_failures_have_exact_typed_results_and_preserve_state() {
+    let resolution = Fixture::new();
+    let _authority = FakeAuthority::start(&resolution.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(resolution.context(true)).await.unwrap();
+    let empty_bin = resolution._root.path().join("empty-bin");
+    fs::create_dir(&empty_bin).unwrap();
+    let mut resolution_context = context(&resolution);
+    resolution_context.path_environment = std::env::join_paths([empty_bin]).unwrap();
+    assert_eq!(
+        disable_with_context(resolution_context).await.unwrap_err(),
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::DisableServiceStopRetry
+        )
+    );
+    assert!(resolution.enabled.exists());
+    assert!(resolution.active.exists());
+
     let fixture = Fixture::new();
     let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
@@ -432,13 +706,30 @@ async fn lifecycle_stage_failure_has_exact_exit_one_error_and_no_false_receipt()
 
     let error = disable_with_context(context(&fixture)).await.unwrap_err();
 
-    assert_eq!(error.exit_code(), 1);
-    assert_eq!(
-        error.to_string(),
-        "failed at service-disable: systemctl command failed\n\
-retry: codex-session-control disable\n"
-    );
+    assert_eq!(error.render().exit_code, 1);
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::StopThenRetry(
+            crate::cli_output::StopThenRetry::DisableServiceStopThenDisable
+        )
+    ));
     assert!(fixture.enabled.is_file());
     assert!(fixture.active.is_file());
     assert!(fixture.paths.socket.exists());
+
+    let completed = Fixture::new();
+    let _authority = FakeAuthority::start(&completed.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(completed.context(true)).await.unwrap();
+    let mut completed_context = context(&completed);
+    completed_context.target = completed_context
+        .target
+        .fail_after_completed_stage("descriptor-remove");
+    assert_eq!(
+        disable_with_context(completed_context).await.unwrap_err(),
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::DisableUnexpectedCheckStatus
+        )
+    );
+    assert!(!completed.enabled.exists());
+    assert!(!completed.active.exists());
 }

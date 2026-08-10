@@ -844,15 +844,16 @@ pub(super) fn assert_shutdown_precedes_descriptor_removal(
 ) -> Result<(), Box<dyn Error>> {
     let stages = String::from_utf8_lossy(&output.stderr);
     let shutdown_stage = match operation {
-        "disable" => "service-disable",
-        "uninstall" => "service-stop",
+        "disable" => "[verbose] disable: completed service-disable\n",
+        "uninstall" => "[verbose] uninstall: completed service-stop\n",
         _ => return Err(format!("unsupported shutdown operation: {operation}").into()),
     };
     let stop = stages
-        .find(&format!("completed: {shutdown_stage}\n"))
+        .find(shutdown_stage)
         .ok_or_else(|| format!("{operation} did not complete service shutdown"))?;
+    let descriptor_stage = format!("[verbose] {operation}: completed descriptor-remove\n");
     let remove = stages
-        .find("completed: descriptor-remove\n")
+        .find(&descriptor_stage)
         .ok_or_else(|| format!("{operation} did not complete descriptor removal"))?;
     if stop >= remove {
         return Err(format!("{operation} removed the descriptor before service shutdown").into());

@@ -15,7 +15,7 @@ pub(super) async fn run_disposable_systemd_user() {
     use tokio::net::UnixListener;
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
-    use crate::install::{display_command_for_paths, service::run_systemctl};
+    use crate::install::service::run_systemctl;
 
     use super::*;
 
@@ -130,6 +130,19 @@ pub(super) async fn run_disposable_systemd_user() {
         }
     }
 
+    async fn run_verbose_staged_update(
+        context: UpdateContext,
+    ) -> Result<crate::cli_output::RenderedCli, crate::cli_output::UserFailure> {
+        let mut diagnostics =
+            crate::diagnostics::Diagnostics::record(crate::diagnostics::DiagnosticCommand::Update);
+        diagnostics.set_phase(crate::diagnostics::UpdatePhase::Apply);
+        diagnostics.emit(crate::diagnostics::DiagnosticEvent::StagedMarkerAccepted);
+        let rendered = staged_update_with_context_and_diagnostics(context, &mut diagnostics)
+            .await?
+            .render();
+        Ok(with_recorded_diagnostics(rendered, &diagnostics))
+    }
+
     if std::env::var_os(MANAGED_PROBE).as_deref() == Some(std::ffi::OsStr::new("1")) {
         let euid = rustix::process::geteuid().as_raw();
         let home = PathBuf::from(std::env::var_os("HOME").expect("managed probe HOME is required"));
@@ -213,7 +226,7 @@ pub(super) async fn run_disposable_systemd_user() {
         assert!(setup_manifest.get("codexVersion").is_none());
         let descriptor_before_no_restart = fs::read(&desktop_descriptor).unwrap();
 
-        let no_restart = staged_update_with_context(UpdateContext {
+        let no_restart = run_verbose_staged_update(UpdateContext {
             lifecycle: base_lifecycle.clone(),
             candidate: no_restart_candidate,
             terminal: TerminalState::noninteractive(),
@@ -251,7 +264,8 @@ pub(super) async fn run_disposable_systemd_user() {
         })
         .await
         .unwrap_err()
-        .to_string();
+        .render()
+        .stderr;
         assert_eq!(
             snapshot_live_guarded_state(&target.paths, &desktop_descriptor),
             guarded
@@ -261,7 +275,8 @@ pub(super) async fn run_disposable_systemd_user() {
         let disable_error = disable_with_context(base_lifecycle.clone())
             .await
             .unwrap_err()
-            .to_string();
+            .render()
+            .stderr;
         assert_eq!(
             snapshot_live_guarded_state(&target.paths, &desktop_descriptor),
             guarded
@@ -271,7 +286,8 @@ pub(super) async fn run_disposable_systemd_user() {
         let uninstall_error = uninstall_with_context(base_lifecycle.clone())
             .await
             .unwrap_err()
-            .to_string();
+            .render()
+            .stderr;
         assert_eq!(
             snapshot_live_guarded_state(&target.paths, &desktop_descriptor),
             guarded
@@ -294,7 +310,8 @@ pub(super) async fn run_disposable_systemd_user() {
         })
         .await
         .unwrap_err()
-        .to_string();
+        .render()
+        .stderr;
         assert_eq!(
             snapshot_live_guarded_state(&target.paths, &desktop_descriptor),
             guarded
@@ -303,7 +320,8 @@ pub(super) async fn run_disposable_systemd_user() {
         let unavailable_disable_error = disable_with_context(base_lifecycle.clone())
             .await
             .unwrap_err()
-            .to_string();
+            .render()
+            .stderr;
         assert_eq!(
             snapshot_live_guarded_state(&target.paths, &desktop_descriptor),
             guarded
@@ -312,7 +330,8 @@ pub(super) async fn run_disposable_systemd_user() {
         let unavailable_uninstall_error = uninstall_with_context(base_lifecycle)
             .await
             .unwrap_err()
-            .to_string();
+            .render()
+            .stderr;
         assert_eq!(
             snapshot_live_guarded_state(&target.paths, &desktop_descriptor),
             guarded
@@ -976,63 +995,64 @@ exit "$status"
     let result: ManagedProbeResult =
         serde_json::from_slice(&fs::read(&managed_probe_result).unwrap()).unwrap();
 
-    let display_command = display_command_for_paths(&paths, &path_environment);
-    assert!(result.no_restart_stdout.contains("Installed release:"));
+    assert_eq!(
+        result.no_restart_stdout,
+        format!(
+            "Codex Session Control was updated to {}.\n\nStart a new task to use the updated plugin.\n",
+            higher_test_release_version()
+        )
+    );
     assert!(
         result
             .no_restart_stderr
-            .find("completed: service-verify")
+            .find("[verbose] update/apply: completed service-verify\n")
             .unwrap()
             < result
                 .no_restart_stderr
-                .find("completed: manifest")
+                .find("[verbose] update/apply: completed manifest\n")
                 .unwrap()
     );
     assert_eq!(result.whoami_evidence, "SelfHosted(WhoAmI)");
     assert_eq!(result.fallback_evidence, "SelfHosted(ControlGroup)");
-    for error in [
-        &result.restart_error,
-        &result.disable_error,
-        &result.uninstall_error,
-    ] {
-        assert!(
-            error.contains("running inside the managed app-server"),
-            "{error}"
-        );
-        assert!(
-            error.contains("run from an independent terminal"),
-            "{error}"
-        );
-    }
-    assert!(
-        result
-            .restart_error
-            .contains(&format!("{display_command} update"))
+    let independent_update = crate::cli_output::UserFailure::IndependentTerminal(
+        crate::cli_output::IndependentTerminal::Update,
+    )
+    .render()
+    .stderr;
+    assert_eq!(result.restart_error, independent_update);
+    assert_eq!(result.unavailable_update_error, independent_update);
+    assert_eq!(
+        result.disable_error,
+        crate::cli_output::UserFailure::IndependentTerminal(
+            crate::cli_output::IndependentTerminal::Disable,
+        )
+        .render()
+        .stderr
     );
-    assert!(
-        result
-            .disable_error
-            .contains(&format!("{display_command} disable"))
+    assert_eq!(
+        result.uninstall_error,
+        crate::cli_output::UserFailure::IndependentTerminal(
+            crate::cli_output::IndependentTerminal::Uninstall,
+        )
+        .render()
+        .stderr
     );
-    assert!(
-        result
-            .uninstall_error
-            .contains(&format!("{display_command} uninstall"))
+    assert_eq!(
+        result.unavailable_disable_error,
+        crate::cli_output::UserFailure::StopThenRetry(
+            crate::cli_output::StopThenRetry::DisableUnsafeStopThenDisable,
+        )
+        .render()
+        .stderr
     );
-    assert!(result.unavailable_update_error.contains("systemd"));
-    assert!(result.unavailable_update_error.contains("repair"));
-    assert!(
-        !result
-            .unavailable_update_error
-            .contains("systemctl --user stop")
+    assert_eq!(
+        result.unavailable_uninstall_error,
+        crate::cli_output::UserFailure::StopThenRetry(
+            crate::cli_output::StopThenRetry::UninstallUnsafeStopThenUninstall,
+        )
+        .render()
+        .stderr
     );
-    assert!(!result.unavailable_update_error.contains(" disable\n"));
-    assert!(result.unavailable_disable_error.contains(&format!(
-        "systemctl --user stop {unit_name}\n{display_command} disable"
-    )));
-    assert!(result.unavailable_uninstall_error.contains(&format!(
-        "systemctl --user stop {unit_name}\n{display_command} uninstall"
-    )));
     assert_eq!(main_pid(&real_systemctl, &unit_name), first_pid);
     assert!(Path::new(&format!("/proc/{first_pid}")).exists());
     assert_eq!(
@@ -1083,7 +1103,7 @@ exit "$status"
         cwd: home.clone(),
     };
     let restart_log_before = fs::read_to_string(&systemctl_log).unwrap();
-    let restart_receipt = staged_update_with_context(UpdateContext {
+    let restart_receipt = run_verbose_staged_update(UpdateContext {
         lifecycle: restart_lifecycle,
         candidate: restart_candidate.clone(),
         terminal: TerminalState::noninteractive(),
@@ -1111,9 +1131,22 @@ exit "$status"
     assert!(
         restart_receipt
             .stderr
-            .find("completed: service-verify")
+            .find("[verbose] update/apply: completed service-restart\n")
             .unwrap()
-            < restart_receipt.stderr.find("completed: manifest").unwrap()
+            < restart_receipt
+                .stderr
+                .find("[verbose] update/apply: completed service-verify\n")
+                .unwrap()
+    );
+    assert!(
+        restart_receipt
+            .stderr
+            .find("[verbose] update/apply: completed service-verify\n")
+            .unwrap()
+            < restart_receipt
+                .stderr
+                .find("[verbose] update/apply: completed manifest\n")
+                .unwrap()
     );
     let manifest: Value = serde_json::from_slice(&fs::read(&paths.manifest).unwrap()).unwrap();
     assert_eq!(manifest["schemaVersion"], 3);

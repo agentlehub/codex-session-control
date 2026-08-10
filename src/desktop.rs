@@ -9,8 +9,9 @@ pub(crate) use crate::model::DESKTOP_ATTACHMENT_DESCRIPTOR_FILE_NAME as DESCRIPT
 #[cfg(test)]
 pub(crate) use descriptor::prepare_descriptor_parent;
 pub(crate) use descriptor::{
-    DescriptorState, inspect_descriptor, preflight_descriptor_switch, publish_descriptor,
-    remove_expected_descriptor, render_descriptor,
+    DescriptorInspectionFailure, DescriptorPublicationFailure, DescriptorPublicationResidue,
+    DescriptorState, inspect_descriptor, inspect_descriptor_classified,
+    preflight_descriptor_switch, publish_descriptor, remove_expected_descriptor, render_descriptor,
 };
 pub(crate) use discovery::{
     DesktopAvailability, DesktopStructure, DesktopTarget, inspect_desktop_structure,

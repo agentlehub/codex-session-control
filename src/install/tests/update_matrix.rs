@@ -4,6 +4,8 @@ use std::{
     os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
 };
 
+use crate::cli_output::{IndependentTerminal, OrdinaryFailure, StopThenRetry, UserFailure};
+use crate::diagnostics::{DiagnosticCommand, DiagnosticEvent, Diagnostics, UpdatePhase};
 use crate::install::sha256_bytes;
 use serde_json::Value;
 
@@ -287,30 +289,155 @@ async fn setup_attached(fixture: &Fixture) -> (FakeAuthority, DesktopAttachmentI
     (authority, attachment)
 }
 
+#[test]
+fn update_producer_boundaries_select_complete_failures() {
+    use crate::{
+        cli_output::{ManagedPaths, RollbackIncomplete, RollbackPrimary},
+        desktop::{DescriptorPublicationFailure, DescriptorPublicationResidue},
+    };
+
+    assert_eq!(
+        active_turn_gate_failure(ActiveTurnGateFailure::Inspection),
+        UserFailure::Ordinary(OrdinaryFailure::UpdateActiveTasksRetry)
+    );
+    assert_eq!(
+        active_turn_gate_failure(ActiveTurnGateFailure::InteractiveRequired),
+        UserFailure::InteractiveTerminal
+    );
+    assert_eq!(
+        active_turn_gate_failure(ActiveTurnGateFailure::Cancelled),
+        UserFailure::Cancellation
+    );
+
+    assert_eq!(
+        update_cli_reconciliation_failure(&ControllerError::Operational("sentinel".to_owned())),
+        UserFailure::Ordinary(OrdinaryFailure::UpdateCliIntegrationRetry)
+    );
+    assert_eq!(
+        update_cli_reconciliation_failure(&ControllerError::InvalidData {
+            field: "sentinel",
+            reason: "sentinel",
+        }),
+        UserFailure::Ordinary(OrdinaryFailure::UpdateCliIntegrationCheckStatus)
+    );
+
+    assert_eq!(
+        update_descriptor_publication_failure(DescriptorPublicationFailure { residue: None }),
+        UserFailure::Ordinary(OrdinaryFailure::UpdateDesktopIntegrationRetry)
+    );
+    for residue in [
+        DescriptorPublicationResidue::Stage(PathBuf::from("/managed/stage")),
+        DescriptorPublicationResidue::Final(PathBuf::from("/managed/final")),
+    ] {
+        let path = match &residue {
+            DescriptorPublicationResidue::Stage(path)
+            | DescriptorPublicationResidue::Final(path) => path.clone(),
+        };
+        assert_eq!(
+            update_descriptor_publication_failure(DescriptorPublicationFailure {
+                residue: Some(residue),
+            }),
+            UserFailure::RollbackIncomplete(RollbackIncomplete::new(
+                RollbackPrimary::UpdateDesktopRetry,
+                ManagedPaths::new(path, Vec::new()),
+            ))
+        );
+    }
+}
+
+#[tokio::test]
+async fn update_default_and_verbose_are_behaviorally_identical() {
+    let default_fixture = Fixture::new();
+    let verbose_fixture = Fixture::new();
+    let _default_authority =
+        FakeAuthority::start(&default_fixture.paths, TESTED_CODEX_VERSION).await;
+    let _verbose_authority =
+        FakeAuthority::start(&verbose_fixture.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(default_fixture.context(true))
+        .await
+        .unwrap();
+    setup_with_context(verbose_fixture.context(true))
+        .await
+        .unwrap();
+    let default_candidate = higher_candidate(&default_fixture, "candidate-parity");
+    let verbose_candidate = higher_candidate(&verbose_fixture, "candidate-parity");
+    default_fixture.clear_logs();
+    verbose_fixture.clear_logs();
+    let mut default_diagnostics = Diagnostics::new(false, DiagnosticCommand::Update);
+    default_diagnostics.set_phase(UpdatePhase::Apply);
+    default_diagnostics.emit(DiagnosticEvent::StagedMarkerAccepted);
+    let mut verbose_diagnostics = Diagnostics::record(DiagnosticCommand::Update);
+    verbose_diagnostics.set_phase(UpdatePhase::Apply);
+    verbose_diagnostics.emit(DiagnosticEvent::StagedMarkerAccepted);
+
+    let default = staged_update_with_context_and_diagnostics(
+        context(&default_fixture, default_candidate, None),
+        &mut default_diagnostics,
+    )
+    .await
+    .unwrap()
+    .render();
+    let verbose = staged_update_with_context_and_diagnostics(
+        context(&verbose_fixture, verbose_candidate, None),
+        &mut verbose_diagnostics,
+    )
+    .await
+    .unwrap()
+    .render();
+    let verbose = with_recorded_diagnostics(verbose, &verbose_diagnostics);
+
+    assert_default_verbose_parity(
+        &default,
+        &verbose,
+        &verbose_diagnostics,
+        "[verbose] update/apply:",
+    );
+    for fixture in [&default_fixture, &verbose_fixture] {
+        assert_eq!(
+            manifest(&fixture.paths).product_version,
+            higher_test_release_version()
+        );
+        assert!(fixture.paths.binary.exists());
+        assert!(fixture.paths.config.exists());
+        assert!(fixture.paths.manifest.exists());
+        assert!(fixture.enabled.exists());
+        assert!(fixture.active.exists());
+        assert!(fixture.paths.socket.exists());
+    }
+    assert_eq!(
+        default_fixture.systemctl_log(),
+        verbose_fixture.systemctl_log()
+    );
+    assert_eq!(
+        default_fixture
+            .codex_log()
+            .lines()
+            .map(|line| line.split('|').next().unwrap())
+            .collect::<Vec<_>>(),
+        verbose_fixture
+            .codex_log()
+            .lines()
+            .map(|line| line.split('|').next().unwrap())
+            .collect::<Vec<_>>()
+    );
+}
+
 #[tokio::test]
 async fn candidate_identity_and_semver_rejections_precede_all_mutation() {
-    for (name, product, version, target, expected) in [
+    for (name, product, version, target) in [
         (
             "wrong-product",
             "other-product",
             env!("CARGO_PKG_VERSION"),
             product_target(),
-            "candidate-preflight",
         ),
         (
             "wrong-target",
             "codex-session-control",
             env!("CARGO_PKG_VERSION"),
             "other-unknown-linux-gnu",
-            "candidate-preflight",
         ),
-        (
-            "lower",
-            "codex-session-control",
-            "0.0.9",
-            product_target(),
-            "candidate-preflight",
-        ),
+        ("lower", "codex-session-control", "0.0.9", product_target()),
     ] {
         let fixture = Fixture::new();
         let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
@@ -324,10 +451,9 @@ async fn candidate_identity_and_semver_rejections_precede_all_mutation() {
             .await
             .unwrap_err();
 
-        assert!(
-            error
-                .to_string()
-                .contains(&format!("failed at {expected}:"))
+        assert_eq!(
+            error,
+            UserFailure::Ordinary(OrdinaryFailure::UpdateChecksumRetry)
         );
         assert_eq!(fs::read(&fixture.paths.binary).unwrap(), before_binary);
         assert_eq!(fs::read(&fixture.paths.manifest).unwrap(), before_manifest);
@@ -361,9 +487,10 @@ async fn invalid_persisted_desktop_identity_rejects_update_before_every_mutation
             .await
             .unwrap_err();
 
-        assert!(
-            error.to_string().contains("failed at candidate-preflight:"),
-            "{case}: {error}"
+        assert_eq!(
+            error,
+            UserFailure::Ordinary(OrdinaryFailure::UpdateInstalledStateCheckStatus),
+            "{case}"
         );
         assert_eq!(snapshot_guarded_state(&fixture), before, "{case}");
         assert_eq!(
@@ -394,9 +521,9 @@ async fn coherent_equal_candidate_reports_current_only_after_state_proof() {
     assert_eq!(
         report.stdout,
         format!(
-            "Already current: {}\nDurable and running state: coherent\n",
+            "Codex Session Control {} is already up to date.\n",
             env!("CARGO_PKG_VERSION")
-        )
+        ),
     );
     assert!(report.stderr.is_empty());
     assert!(fixture.systemctl_log().contains("--user is-enabled"));
@@ -447,20 +574,10 @@ async fn self_hosted_restart_required_update_refuses_with_every_reason_before_mu
     .await
     .unwrap_err();
 
-    let message = error.to_string();
-    assert!(message.contains("running Codex version differs"));
-    assert!(message.contains("resolved Codex executable path differs"));
-    assert!(message.contains("rendered systemd unit differs"));
-    assert!(
-        message.find("running Codex version").unwrap()
-            < message.find("resolved Codex executable path").unwrap()
+    assert_eq!(
+        error,
+        UserFailure::IndependentTerminal(IndependentTerminal::Update)
     );
-    assert!(
-        message.find("resolved Codex executable path").unwrap()
-            < message.find("rendered systemd unit").unwrap()
-    );
-    assert!(message.contains("run from an independent terminal"));
-    assert!(message.contains("running inside the managed app-server"));
     assert_eq!(snapshot_guarded_state(&fixture), before);
     assert!(!fixture.systemctl_log().contains("daemon-reload"));
     assert!(!fixture.systemctl_log().contains(" restart "));
@@ -493,11 +610,10 @@ async fn unproven_self_hosted_restart_refuses_without_stop_recovery() {
     .await
     .unwrap_err();
 
-    let message = error.to_string();
-    assert!(message.contains("failed at restart-inspection:"));
-    assert!(message.contains("repair or upgrade the systemd user environment"));
-    assert!(!message.contains("systemctl --user stop"));
-    assert!(!message.contains("codex-session-control disable\ncodex-session-control update"));
+    assert_eq!(
+        error,
+        UserFailure::IndependentTerminal(IndependentTerminal::Update)
+    );
     assert_eq!(snapshot_guarded_state(&fixture), before);
     assert!(!fixture.systemctl_log().contains("daemon-reload"));
     assert!(!fixture.systemctl_log().contains(" restart "));
@@ -506,18 +622,16 @@ async fn unproven_self_hosted_restart_refuses_without_stop_recovery() {
 
 #[tokio::test]
 async fn service_snapshot_rejects_unproven_and_contradictory_state_before_caller_inspection() {
-    for (name, enablement, activity, expected) in [
+    for (name, enablement, activity) in [
         (
             "snapshot-command-failure",
             "exit 1",
             "printf 'inactive\\n'; exit 3",
-            "service enablement cannot be proven",
         ),
         (
             "snapshot-activating",
             "printf 'enabled\\n'; exit 0",
             "printf 'activating\\n'; exit 0",
-            "service activity cannot be proven",
         ),
     ] {
         let fixture = Fixture::new();
@@ -536,11 +650,11 @@ async fn service_snapshot_rejects_unproven_and_contradictory_state_before_caller
         );
         let error = staged_update_with_context(context).await.unwrap_err();
 
-        assert!(
-            error.to_string().contains("failed at service-snapshot:"),
+        assert_eq!(
+            error,
+            UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStateCheckStatus),
             "{name}"
         );
-        assert!(error.to_string().contains(expected), "{name}: {error}");
         assert_eq!(snapshot_guarded_state(&fixture), before, "{name}");
         let log = fs::read_to_string(systemctl_log).unwrap();
         assert!(!log.contains("--user whoami"), "{name}");
@@ -569,7 +683,7 @@ async fn absent_inactive_service_update_repairs_files_without_starting_the_servi
     .unwrap();
 
     assert!(report.stdout.starts_with(&format!(
-        "Installed release: {}\n",
+        "Codex Session Control was updated to {}.\n",
         higher_test_release_version()
     )));
     assert!(fixture.paths.unit.exists());
@@ -624,7 +738,7 @@ async fn higher_candidate_preserves_all_three_desired_service_states() {
 
         assert!(
             report.stdout.starts_with(&format!(
-                "Installed release: {}\n",
+                "Codex Session Control was updated to {}.\n",
                 higher_test_release_version()
             )),
             "{name}"
@@ -666,12 +780,20 @@ async fn equal_projection_drift_preserves_desktop_and_running_authority() {
     let candidate = equal_candidate(&fixture, "candidate-equal-drift");
     fixture.clear_logs();
 
-    let report = staged_update_with_context(context(&fixture, candidate, None))
-        .await
-        .unwrap();
+    let mut diagnostics = Diagnostics::record(DiagnosticCommand::Update);
+    diagnostics.set_phase(UpdatePhase::Apply);
+    diagnostics.emit(DiagnosticEvent::StagedMarkerAccepted);
+    let report = staged_update_with_context_and_diagnostics(
+        context(&fixture, candidate, None),
+        &mut diagnostics,
+    )
+    .await
+    .unwrap()
+    .render();
+    let report = with_recorded_diagnostics(report, &diagnostics);
 
     assert!(report.stdout.starts_with(&format!(
-        "Installed release: {}\n",
+        "Codex Session Control was updated to {}.\n",
         env!("CARGO_PKG_VERSION")
     )));
     assert_eq!(
@@ -686,23 +808,38 @@ async fn equal_projection_drift_preserves_desktop_and_running_authority() {
     );
     assert!(!fixture.systemctl_log().contains("--user whoami"));
     assert!(!fixture.systemctl_log().contains(" restart "));
-    assert!(report.stdout.contains("Desktop attachment: available\n"));
-    assert!(report.stdout.contains("Desktop restart required: no\n"));
+    assert!(
+        !report
+            .stdout
+            .contains("restart it to use the updated version")
+    );
     let stages = &report.stderr;
     assert!(
-        stages.find("completed: plugin-install\n").unwrap()
-            < stages.find("completed: desktop-discovery\n").unwrap()
+        stages
+            .find("[verbose] update/apply: completed plugin-install\n")
+            .unwrap()
+            < stages
+                .find("[verbose] update/apply: completed desktop-discovery\n")
+                .unwrap()
     );
     assert!(
-        stages.find("completed: desktop-discovery\n").unwrap()
-            < stages.find("completed: descriptor\n").unwrap()
+        stages
+            .find("[verbose] update/apply: completed desktop-discovery\n")
+            .unwrap()
+            < stages
+                .find("[verbose] update/apply: completed descriptor\n")
+                .unwrap()
     );
     assert!(
-        stages.find("completed: descriptor\n").unwrap()
-            < stages.find("completed: service-unit\n").unwrap()
+        stages
+            .find("[verbose] update/apply: completed descriptor\n")
+            .unwrap()
+            < stages
+                .find("[verbose] update/apply: completed service-unit\n")
+                .unwrap()
     );
     assert!(
-        stages.trim_end().ends_with("completed: manifest"),
+        stages.contains("[verbose] update/apply: completed manifest\n"),
         "{stages}"
     );
     let receipt: Value =
@@ -739,7 +876,7 @@ async fn equal_healthy_attached_candidate_is_current_without_full_pipeline() {
     assert_eq!(
         report.stdout,
         format!(
-            "Already current: {}\nDurable and running state: coherent\n",
+            "Codex Session Control {} is already up to date.\n",
             env!("CARGO_PKG_VERSION")
         )
     );
@@ -778,8 +915,11 @@ async fn disabled_update_retains_desktop_identity_without_publishing_then_enable
     assert!(!attachment.descriptor_path.exists());
     assert!(!fixture.enabled.exists());
     assert!(!fixture.active.exists());
-    assert!(update.stdout.contains("Desktop attachment: available\n"));
-    assert!(update.stdout.contains("Desktop restart required: no\n"));
+    assert!(
+        !update
+            .stdout
+            .contains("restart it to use the updated version")
+    );
 
     fs::write(
         &fixture.required_descriptor,
@@ -804,14 +944,17 @@ async fn disabled_update_retains_desktop_identity_without_publishing_then_enable
         cwd: setup.cwd,
     })
     .await
-    .unwrap();
+    .unwrap()
+    .render();
     let authority = starter.await.unwrap();
 
     assert_eq!(
         fs::read(&attachment.descriptor_path).unwrap(),
         render_descriptor(&fixture.paths.socket).unwrap()
     );
-    assert!(enabled.stdout.contains("Desktop restart required: yes\n"));
+    assert!(enabled.stdout.contains(
+        "If Codex Desktop is already running, restart it to make Codex Session Control available there."
+    ));
     drop(authority);
 }
 
@@ -849,8 +992,11 @@ async fn null_desktop_update_never_auto_selects_a_new_compatible_launcher() {
 
     assert_eq!(manifest(&fixture.paths).desktop_attachment, None);
     assert!(!descriptor.exists());
-    assert!(report.stdout.contains("Desktop attachment: unavailable\n"));
-    assert!(report.stdout.contains("Desktop restart required: no\n"));
+    assert!(
+        !report
+            .stdout
+            .contains("restart it to use the updated version")
+    );
     assert!(!fixture.systemctl_log().contains(" restart "));
     drop(authority);
 }
@@ -876,9 +1022,12 @@ async fn temporarily_unavailable_desktop_retains_exact_routing_and_warns_unverif
         Some(attachment.clone())
     );
     assert_eq!(fs::read(&attachment.descriptor_path).unwrap(), descriptor);
-    assert!(report.stdout.contains("Desktop attachment: unverified\n"));
-    assert!(report.stdout.contains("Desktop restart required: yes\n"));
-    assert!(report.stderr.contains("Desktop attachment unavailable:"));
+    assert!(report.stdout.contains(
+        "If Codex Desktop is already running, restart it to use the updated version of Codex Session Control."
+    ));
+    assert!(report.stderr.contains(
+        "Codex Desktop integration is unavailable because a compatible Desktop launcher was not found."
+    ));
     assert_eq!(
         fs::symlink_metadata(&fixture.paths.socket).unwrap().ino(),
         socket_inode
@@ -909,8 +1058,9 @@ async fn running_update_republishes_a_missing_expected_descriptor_without_restar
         socket_inode
     );
     assert!(!fixture.systemctl_log().contains(" restart "));
-    assert!(report.stdout.contains("Desktop attachment: available\n"));
-    assert!(report.stdout.contains("Desktop restart required: yes\n"));
+    assert!(report.stdout.contains(
+        "If Codex Desktop is already running, restart it to use the updated version of Codex Session Control."
+    ));
     drop(authority);
 }
 
@@ -941,17 +1091,10 @@ async fn unsafe_or_foreign_desktop_descriptor_stops_update_at_descriptor_stage()
             .await
             .unwrap_err();
 
-        assert!(
-            error.to_string().contains("failed at descriptor:"),
-            "{case}: {error}"
-        );
-        assert!(
-            error.to_string().contains(if case == "unsafe" {
-                "Desktop descriptor safety error"
-            } else {
-                "Desktop descriptor is foreign"
-            }),
-            "{case}: {error}"
+        assert_eq!(
+            error,
+            UserFailure::Ordinary(OrdinaryFailure::UpdateDesktopIntegrationCheckStatus),
+            "{case}"
         );
         assert_eq!(fs::read(&attachment.descriptor_path).unwrap(), descriptor);
         assert_eq!(fs::read(&fixture.paths.manifest).unwrap(), manifest);
@@ -986,22 +1129,12 @@ async fn disabled_active_and_unknown_restart_evidence_fail_before_mutation() {
             .await
             .unwrap_err();
 
-        let stage = if case == "disabled-active" {
-            "service-snapshot"
+        let expected = if case == "disabled-active" {
+            UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStateCheckStatus)
         } else {
-            "restart-inspection"
+            UserFailure::StopThenRetry(StopThenRetry::UpdateServiceStateDisableUpdateEnable)
         };
-        assert!(error.to_string().contains(&format!("failed at {stage}:")));
-        if case == "unknown-unit" {
-            assert!(
-                error
-                    .to_string()
-                    .contains("installed service unit does not match last coherent manifest")
-            );
-            assert!(error.to_string().contains(
-                        "codex-session-control disable\ncodex-session-control update\ncodex-session-control enable"
-                    ));
-        }
+        assert_eq!(error, expected, "{case}");
         assert_eq!(snapshot_guarded_state(&fixture), before, "{case}");
         if case == "disabled-active" {
             assert!(!fixture.systemctl_log().contains("--user whoami"));
@@ -1048,7 +1181,7 @@ async fn running_changed_authority_inspects_then_restarts_exactly_once() {
     let new_authority = starter.await.unwrap();
 
     assert!(report.stdout.starts_with(&format!(
-        "Installed release: {}\n",
+        "Codex Session Control was updated to {}.\n",
         higher_test_release_version()
     )));
     assert_eq!(manifest(&fixture.paths).codex_executable, new_codex);
@@ -1091,7 +1224,7 @@ async fn independently_changed_codex_version_does_not_depend_on_installed_receip
             .unwrap();
 
         assert!(report.stdout.starts_with(&format!(
-            "Installed release: {}\n",
+            "Codex Session Control was updated to {}.\n",
             higher_test_release_version()
         )));
         assert_eq!(fixture.systemctl_log().matches(" restart ").count(), 0);
@@ -1133,7 +1266,7 @@ async fn stale_running_codex_is_restarted_to_match_the_current_executable() {
     let restarted_authority = starter.await.unwrap();
 
     assert!(report.stdout.starts_with(&format!(
-        "Installed release: {}\n",
+        "Codex Session Control was updated to {}.\n",
         higher_test_release_version()
     )));
     assert_eq!(fixture.systemctl_log().matches(" restart ").count(), 1);
@@ -1157,7 +1290,10 @@ async fn retry_uses_last_manifest_after_partial_candidate_files() {
         .await
         .unwrap_err();
 
-    assert!(error.to_string().contains("failed at daemon-reload:"));
+    assert_eq!(
+        error,
+        UserFailure::Ordinary(OrdinaryFailure::UpdateServiceConfigurationLogs)
+    );
     assert_eq!(
         manifest(&fixture.paths).product_version,
         env!("CARGO_PKG_VERSION")
@@ -1172,7 +1308,7 @@ async fn retry_uses_last_manifest_after_partial_candidate_files() {
         .await
         .unwrap();
     assert!(report.stdout.starts_with(&format!(
-        "Installed release: {}\n",
+        "Codex Session Control was updated to {}.\n",
         higher_test_release_version()
     )));
     assert_eq!(
@@ -1214,20 +1350,25 @@ async fn tested_untested_and_unparseable_versions_only_change_update_advisory() 
             .unwrap();
 
         assert!(report.stdout.starts_with(&format!(
-            "Installed release: {}\n",
+            "Codex Session Control was updated to {}.\n",
             higher_test_release_version()
         )));
         assert_eq!(
-            report.stderr.contains("Compatibility warning:"),
+            report.stderr.contains("Warning: Codex "),
             warning.is_some(),
             "{version_output}"
         );
         if let Some(version) = warning {
-            assert!(report.stderr.ends_with(&format!(
-                        "Compatibility warning: Codex app-server {version} has not been tested with codex-session-control {}; native results remain authoritative.\n",
-                        env!("CARGO_PKG_VERSION")
-                    )));
-            assert_eq!(report.stderr.matches("Compatibility warning:").count(), 1);
+            let version = semver::Version::parse(&version)
+                .map(|version| version.to_string())
+                .unwrap_or_else(|_| super::super::UNKNOWN_CODEX_VERSION.to_owned());
+            assert_eq!(
+                report.stderr,
+                format!(
+                    "Warning: Codex {version} has not been tested with Codex Session Control {}.\nSome features may not work as expected.\n",
+                    higher_test_release_version()
+                )
+            );
         }
         let receipt: Value =
             serde_json::from_slice(&fs::read(&fixture.paths.manifest).unwrap()).unwrap();
@@ -1237,24 +1378,142 @@ async fn tested_untested_and_unparseable_versions_only_change_update_advisory() 
 }
 
 #[test]
-fn candidate_apply_sets_only_the_private_staged_marker() {
-    let root = crate::test_support::private_tempdir();
-    let log = root.path().join("candidate.log");
-    let executable = root.path().join("candidate");
-    super::write_executable_fixture(
-        &executable,
-        format!(
-            "#!/bin/sh\nprintf 'argv=%s|marker=%s\\n' \"$*\" \"$CODEX_SESSION_CONTROL_STAGED_UPDATE\" > '{}'\n",
-            log.display()
-        ),
+fn candidate_wait_classifies_error_signal_and_normal_exit() {
+    use std::{io, os::unix::process::ExitStatusExt, process::ExitStatus};
+
+    assert_eq!(
+        classify_candidate_wait(Ok(ExitStatus::from_raw(0))),
+        CandidateApplyResult::Exit0
     );
+    assert_eq!(
+        classify_candidate_wait(Ok(ExitStatus::from_raw(1 << 8))),
+        CandidateApplyResult::Exit1
+    );
+    assert_eq!(
+        classify_candidate_wait(Err(io::Error::other("injected wait failure"))),
+        CandidateApplyResult::CompletionUnknown
+    );
+    assert_eq!(
+        classify_candidate_wait(Ok(ExitStatus::from_raw(9))),
+        CandidateApplyResult::CompletionUnknown
+    );
+    assert_eq!(
+        classify_candidate_wait(Ok(ExitStatus::from_raw(2 << 8))),
+        CandidateApplyResult::CompletionUnknown
+    );
+}
+
+#[test]
+fn candidate_apply_routes_spawn_and_post_spawn_completion() {
+    let root = crate::test_support::private_tempdir();
+    let started = root.path().join("started");
+    let candidate = |name: &str, body: &str| {
+        let executable = root.path().join(name);
+        super::write_executable_fixture(&executable, format!("#!/bin/sh\n{body}\n"));
+        CandidateRelease {
+            executable,
+            product_version: env!("CARGO_PKG_VERSION").to_owned(),
+            target: product_target().to_owned(),
+        }
+    };
+
+    assert_eq!(
+        run_candidate_apply_with_wait_hook(
+            &CandidateRelease {
+                executable: root.path().join("missing"),
+                product_version: env!("CARGO_PKG_VERSION").to_owned(),
+                target: product_target().to_owned(),
+            },
+            false,
+            CandidateWaitHook::Real,
+        ),
+        CandidateApplyResult::SpawnFailed
+    );
+    assert_eq!(
+        run_candidate_apply_with_wait_hook(
+            &candidate(
+                "wait-failure",
+                &format!("touch '{}'; exit 0", started.display()),
+            ),
+            false,
+            CandidateWaitHook::FailAfterSuccessfulSpawn,
+        ),
+        CandidateApplyResult::CompletionUnknown
+    );
+    assert!(started.exists());
+
+    for (name, body, expected) in [
+        ("exit-0", "exit 0", CandidateApplyResult::Exit0),
+        ("exit-1", "exit 1", CandidateApplyResult::Exit1),
+        (
+            "signal",
+            "kill -9 $$",
+            CandidateApplyResult::CompletionUnknown,
+        ),
+        ("exit-2", "exit 2", CandidateApplyResult::CompletionUnknown),
+    ] {
+        assert_eq!(
+            run_candidate_apply_with_wait_hook(
+                &candidate(name, body),
+                false,
+                CandidateWaitHook::Real,
+            ),
+            expected,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn outer_candidate_ownership_is_exact() {
+    let root = crate::test_support::private_tempdir();
+    for exit_code in [0, 1] {
+        let log = root.path().join(format!("candidate-{exit_code}.log"));
+        let executable = root.path().join(format!("candidate-{exit_code}"));
+        super::write_executable_fixture(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf 'argv=%s|marker=%s\\n' \"$*\" \"$CODEX_SESSION_CONTROL_STAGED_UPDATE\" > '{}'\nprintf '[verbose] update/apply: staged marker accepted\\ncandidate-owned friendly result\\n' >&2\nexit {exit_code}\n",
+                log.display()
+            ),
+        );
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("install::tests::update_matrix::outer_candidate_process_entry")
+            .args(["--exact", "--nocapture"])
+            .env("CSC_TEST_OUTER_CANDIDATE", &executable)
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(exit_code));
+        assert_eq!(
+            fs::read_to_string(log).unwrap(),
+            "argv=--verbose update|marker=1\n"
+        );
+        let mut expected = concat!(
+            "[verbose] update/outer: starting staged candidate\n",
+            "[verbose] update/apply: staged marker accepted\n",
+            "candidate-owned friendly result\n",
+        )
+        .to_owned();
+        if exit_code == 0 {
+            expected.push_str("[verbose] update/outer: staged candidate exited successfully\n");
+        }
+        assert_eq!(String::from_utf8(output.stderr).unwrap(), expected);
+    }
+}
+
+#[test]
+fn outer_candidate_process_entry() {
+    let Some(executable) = std::env::var_os("CSC_TEST_OUTER_CANDIDATE") else {
+        return;
+    };
     let candidate = CandidateRelease {
-        executable,
+        executable: executable.into(),
         product_version: env!("CARGO_PKG_VERSION").to_owned(),
         target: product_target().to_owned(),
     };
-
-    run_candidate_apply(&candidate).unwrap();
-
-    assert_eq!(fs::read_to_string(log).unwrap(), "argv=update|marker=1\n");
+    let mut diagnostics = Diagnostics::new(true, DiagnosticCommand::Update);
+    diagnostics.set_phase(UpdatePhase::Outer);
+    let exit = run_outer_candidate(&candidate, true, &mut diagnostics).unwrap();
+    std::process::exit(exit.code().into());
 }

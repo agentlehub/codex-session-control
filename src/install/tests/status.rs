@@ -19,10 +19,16 @@ fn context(fixture: &Fixture) -> StatusContext {
     let setup = fixture.context(true);
     StatusContext {
         target: setup.target,
-        path_environment: setup.path_environment,
+        path_environment: Some(setup.path_environment),
         desktop_environment: setup.desktop_environment,
-        cwd: setup.cwd,
+        cwd: Some(setup.cwd),
     }
+}
+
+async fn inspect_status(context: StatusContext) -> StatusResult {
+    let mut diagnostics =
+        crate::diagnostics::Diagnostics::new(false, crate::diagnostics::DiagnosticCommand::Status);
+    status_with_context(context, &mut diagnostics).await
 }
 
 fn assert_read_only_logs(fixture: &Fixture) {
@@ -49,6 +55,244 @@ fn assert_read_only_logs(fixture: &Fixture) {
     }
 }
 
+fn render_status(result: StatusResult) -> crate::cli_output::RenderedCli {
+    UserSuccess::Status(result).render()
+}
+
+#[tokio::test]
+async fn pre_context_failures_still_render_one_four_state_status_result() {
+    use crate::{diagnostics::DiagnosticCommand, error::ControllerError};
+
+    let mut diagnostics = crate::diagnostics::Diagnostics::record(DiagnosticCommand::Status);
+    let result = status_from_paths(
+        Err(ControllerError::InvalidData {
+            field: "effective user",
+            reason: "sentinel context failure",
+        }),
+        &mut diagnostics,
+    )
+    .await;
+
+    assert_eq!(
+        result,
+        StatusResult::new(
+            StatusState::Unhealthy,
+            None,
+            Some(ServiceSummary::CouldNotVerify),
+            IntegrationState::CouldNotVerify,
+            IntegrationState::CouldNotVerify,
+            vec![StatusProblem::InstalledStateCouldNotBeVerified],
+        )
+    );
+    assert_eq!(
+        render_status(result),
+        crate::cli_output::RenderedCli {
+            stdout: concat!(
+                "Status: unhealthy\n",
+                "Service: could not verify\n",
+                "Codex CLI integration: could not verify\n",
+                "Codex Desktop integration: could not verify\n\n",
+                "Problems:\n",
+                "- The installed Codex Session Control state could not be verified.\n\n",
+                "Check what needs attention:\n",
+                "  codex-session-control status\n",
+            )
+            .to_owned(),
+            stderr: String::new(),
+            exit_code: 1,
+        }
+    );
+    assert_eq!(
+        diagnostics.recorded_lines(),
+        ["[verbose] status: failed preflight (validation failed)\n"]
+    );
+}
+
+#[tokio::test]
+async fn missing_invocation_evidence_becomes_typed_inconclusive_status() {
+    let fixture = Fixture::new();
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(fixture.context(true)).await.unwrap();
+    fixture.clear_logs();
+    let mut missing = context(&fixture);
+    missing.path_environment = None;
+    missing.cwd = None;
+
+    let result = inspect_status(missing).await;
+
+    assert_eq!(
+        result,
+        StatusResult::new(
+            StatusState::Unhealthy,
+            Some(semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap()),
+            Some(ServiceSummary::CouldNotVerify),
+            IntegrationState::CouldNotVerify,
+            IntegrationState::Unavailable,
+            vec![
+                StatusProblem::InvocationContextCouldNotBeVerified,
+                StatusProblem::ServiceEnablementCouldNotBeVerified,
+                StatusProblem::ServiceActivityCouldNotBeVerified,
+            ],
+        )
+    );
+    assert!(fixture.systemctl_log().is_empty());
+    assert_read_only_logs(&fixture);
+}
+
+#[tokio::test]
+async fn not_installed_status_is_exact_and_read_only() {
+    let fixture = Fixture::new();
+    fixture.clear_logs();
+
+    let result = inspect_status(context(&fixture)).await;
+
+    assert_eq!(
+        result,
+        StatusResult::new(
+            StatusState::NotInstalled,
+            None,
+            None,
+            IntegrationState::Unavailable,
+            IntegrationState::Unavailable,
+            Vec::new(),
+        )
+    );
+    assert_eq!(render_status(result).exit_code, 1);
+    assert_read_only_logs(&fixture);
+    assert!(fixture.codex_log().is_empty());
+}
+
+#[tokio::test]
+async fn status_default_and_verbose_are_behaviorally_identical() {
+    use crate::diagnostics::{DiagnosticCommand, Diagnostics};
+
+    let default_fixture = Fixture::new();
+    let verbose_fixture = Fixture::new();
+    let _default_authority =
+        FakeAuthority::start(&default_fixture.paths, TESTED_CODEX_VERSION).await;
+    let _verbose_authority =
+        FakeAuthority::start(&verbose_fixture.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(default_fixture.context(true))
+        .await
+        .unwrap();
+    setup_with_context(verbose_fixture.context(true))
+        .await
+        .unwrap();
+    default_fixture.clear_logs();
+    verbose_fixture.clear_logs();
+    let mut off = Diagnostics::new(false, DiagnosticCommand::Status);
+    let mut verbose = Diagnostics::record(DiagnosticCommand::Status);
+
+    let default = render_status(status_with_context(context(&default_fixture), &mut off).await);
+    let recorded =
+        render_status(status_with_context(context(&verbose_fixture), &mut verbose).await);
+    let recorded = with_recorded_diagnostics(recorded, &verbose);
+
+    assert_default_verbose_parity(&default, &recorded, &verbose, "[verbose] status:");
+    assert_read_only_logs(&default_fixture);
+    assert_read_only_logs(&verbose_fixture);
+    assert_eq!(
+        default_fixture.systemctl_log(),
+        verbose_fixture.systemctl_log()
+    );
+    assert_eq!(
+        default_fixture
+            .codex_log()
+            .lines()
+            .map(|line| line.split('|').next().unwrap())
+            .collect::<Vec<_>>(),
+        verbose_fixture
+            .codex_log()
+            .lines()
+            .map(|line| line.split('|').next().unwrap())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn native_registration_distinguishes_fault_from_could_not_verify() {
+    let fixture = Fixture::new();
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(fixture.context(true)).await.unwrap();
+    let expected_plugin = fs::read(&fixture.plugin_state).unwrap();
+    fixture.clear_logs();
+
+    fs::write(&fixture.plugin_state, b"/wrong/plugin").unwrap();
+    let fault = inspect_status(context(&fixture)).await;
+    assert_eq!(
+        fault,
+        StatusResult::new(
+            StatusState::Unhealthy,
+            Some(semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap()),
+            Some(ServiceSummary::RunningAutomatic),
+            IntegrationState::Unhealthy,
+            IntegrationState::Unavailable,
+            vec![StatusProblem::NativeRegistrationFault],
+        )
+    );
+
+    fs::write(&fixture.plugin_state, expected_plugin).unwrap();
+    fs::write(&fixture.codex_fail, "plugin list --json").unwrap();
+    fixture.clear_logs();
+    let unverified = inspect_status(context(&fixture)).await;
+    assert_eq!(
+        unverified,
+        StatusResult::new(
+            StatusState::Unhealthy,
+            Some(semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap()),
+            Some(ServiceSummary::RunningAutomatic),
+            IntegrationState::CouldNotVerify,
+            IntegrationState::Unavailable,
+            vec![StatusProblem::NativeRegistrationCouldNotBeVerified],
+        )
+    );
+    assert_read_only_logs(&fixture);
+}
+
+#[tokio::test]
+async fn projection_distinguishes_fault_from_could_not_verify() {
+    let fixture = Fixture::new();
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(fixture.context(true)).await.unwrap();
+    let mcp = fixture
+        .paths
+        .marketplace
+        .join("plugins/codex-session-control/.mcp.json");
+    let expected_mcp = fs::read(&mcp).unwrap();
+    fixture.clear_logs();
+
+    fs::write(&mcp, b"projection drift").unwrap();
+    let fault = inspect_status(context(&fixture)).await;
+    assert_eq!(
+        fault,
+        StatusResult::new(
+            StatusState::Unhealthy,
+            Some(semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap()),
+            Some(ServiceSummary::RunningAutomatic),
+            IntegrationState::Unhealthy,
+            IntegrationState::Unavailable,
+            vec![StatusProblem::ProjectionFault],
+        )
+    );
+
+    fs::write(&mcp, expected_mcp).unwrap();
+    fs::set_permissions(&mcp, fs::Permissions::from_mode(0o000)).unwrap();
+    fixture.clear_logs();
+    let unverified = inspect_status(context(&fixture)).await;
+    assert_eq!(
+        unverified,
+        StatusResult::new(
+            StatusState::Unhealthy,
+            Some(semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap()),
+            Some(ServiceSummary::RunningAutomatic),
+            IntegrationState::CouldNotVerify,
+            IntegrationState::Unavailable,
+            vec![StatusProblem::ProjectionCouldNotBeVerified],
+        )
+    );
+    assert_read_only_logs(&fixture);
+}
+
 #[tokio::test]
 async fn service_state_table_has_exact_health_stdout_and_read_only_argv() {
     for (name, enabled, active, socket) in SERVICE_STATES {
@@ -70,64 +314,50 @@ async fn service_state_table_has_exact_health_stdout_and_read_only_argv() {
             None
         };
 
-        let report = status_with_context(context(&fixture)).await.unwrap();
+        let report = inspect_status(context(&fixture)).await;
 
-        let service = format!(
-            "{}, {}",
-            if enabled { "enabled" } else { "disabled" },
-            if active { "active" } else { "inactive" }
-        );
-        let healthy = enabled == active && active == socket;
-        let expected = if healthy && !enabled {
-            format!(
-                "Status: healthy\n\
-Installed release: {version}\n\
-Codex app-server service: {service}\n\
-CLI attachment: available through codex-session-control codex\n\
-Desktop configuration: unavailable\n\
-Loaded task state: not_verified\n\
-Availability: codex-session-control enable\n",
-                version = env!("CARGO_PKG_VERSION")
-            )
-        } else if healthy {
-            format!(
-                "Status: healthy\n\
-Installed release: {version}\n\
-Codex app-server service: {service}\n\
-CLI attachment: available through codex-session-control codex\n\
-Desktop configuration: unavailable\n\
-Loaded task state: not_verified\n",
-                version = env!("CARGO_PKG_VERSION")
-            )
-        } else {
-            let detail = if enabled {
-                "enabled service is not active"
-            } else {
-                "disabled service is active"
-            };
-            let mut expected = format!(
-                "Status: drifted\n\
-Installed release: {version}\n\
-Codex app-server service: {service}\n\
-CLI attachment: available through codex-session-control codex\n\
-Desktop configuration: unavailable\n\
-Loaded task state: not_verified\n\
-Failed checks:\n\
-- service-state: {detail}\n\
-{indent}action: journalctl --user -u codex-session-control-test-Setup1.service\n",
-                indent = "  ",
-                version = env!("CARGO_PKG_VERSION")
-            );
-            if enabled && !socket {
-                expected.push_str(concat!(
-                    "- socket: enabled service socket is missing\n",
-                    "  action: journalctl --user -u codex-session-control-test-Setup1.service\n",
-                ));
-            }
-            expected
+        let (state, service, cli, problems) = match (enabled, active, socket) {
+            (true, true, true) => (
+                StatusState::Healthy,
+                ServiceSummary::RunningAutomatic,
+                IntegrationState::Ready,
+                Vec::new(),
+            ),
+            (false, false, false) => (
+                StatusState::Disabled,
+                ServiceSummary::StoppedAutomaticOff,
+                IntegrationState::Unavailable,
+                Vec::new(),
+            ),
+            (true, false, false) => (
+                StatusState::Unhealthy,
+                ServiceSummary::StoppedUnexpectedAutomaticOn,
+                IntegrationState::Unhealthy,
+                vec![
+                    StatusProblem::ServiceConfiguredButStopped,
+                    StatusProblem::SocketMissing,
+                ],
+            ),
+            (false, true, true) => (
+                StatusState::Unhealthy,
+                ServiceSummary::CouldNotVerify,
+                IntegrationState::Unhealthy,
+                vec![StatusProblem::ServiceActivityCouldNotBeVerified],
+            ),
+            _ => unreachable!("the service-state fixture table is closed"),
         };
-        assert_eq!(report.stdout, expected, "{name}");
-        assert_eq!(report.healthy, healthy, "{name}");
+        assert_eq!(
+            report,
+            StatusResult::new(
+                state,
+                Some(semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap()),
+                Some(service),
+                cli,
+                IntegrationState::Unavailable,
+                problems,
+            ),
+            "{name}",
+        );
         assert_read_only_logs(&fixture);
         assert!(
             fixture
@@ -160,14 +390,18 @@ async fn app_server_health_does_not_connect_to_an_unsafe_socket() {
         }
     });
 
-    let report = status_with_context(context(&fixture)).await.unwrap();
+    let report = inspect_status(context(&fixture)).await;
 
     assert!(
         timeout(Duration::from_millis(50), accepted_rx)
             .await
             .is_err()
     );
-    assert!(!report.stdout.contains("- app-server-initialize:"));
+    assert!(
+        !render_status(report.clone())
+            .stdout
+            .contains("- app-server-initialize:")
+    );
     listener_task.abort();
 }
 
@@ -187,23 +421,17 @@ async fn absent_unit_exit_four_is_trusted_inactive_status_evidence() {
     }
     fixture.clear_logs();
 
-    let report = status_with_context(context(&fixture)).await.unwrap();
+    let report = inspect_status(context(&fixture)).await;
 
-    assert!(!report.healthy);
     assert_eq!(
-        report.stdout,
-        format!(
-            "Status: drifted\n\
-Installed release: {version}\n\
-Codex app-server service: disabled, inactive\n\
-CLI attachment: available through codex-session-control codex\n\
-Desktop configuration: unavailable\n\
-Loaded task state: not_verified\n\
-Failed checks:\n\
-- service-unit: missing\n\
-{indent}action: codex-session-control setup\n",
-            indent = "  ",
-            version = env!("CARGO_PKG_VERSION")
+        report,
+        StatusResult::new(
+            StatusState::Unhealthy,
+            Some(semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap()),
+            Some(ServiceSummary::StoppedAutomaticOff),
+            IntegrationState::Unavailable,
+            IntegrationState::Unavailable,
+            vec![StatusProblem::InstalledStateCouldNotBeVerified],
         )
     );
     assert_eq!(
@@ -227,23 +455,22 @@ async fn status_reports_untrustworthy_systemctl_state_as_operational_drift() {
         .unwrap();
         fixture.clear_logs();
 
-        let report = status_with_context(context(&fixture)).await.unwrap();
+        let report = inspect_status(context(&fixture)).await;
 
-        assert!(!report.healthy, "{operation}");
+        let problem = if operation == "is-enabled" {
+            StatusProblem::ServiceEnablementCouldNotBeVerified
+        } else {
+            StatusProblem::ServiceActivityCouldNotBeVerified
+        };
         assert_eq!(
-            report.stdout,
-            format!(
-                "Status: drifted\n\
-Installed release: {version}\n\
-Codex app-server service: unknown, unknown\n\
-CLI attachment: available through codex-session-control codex\n\
-Desktop configuration: unavailable\n\
-Loaded task state: not_verified\n\
-Failed checks:\n\
-- service-state: systemctl {operation} could not provide trustworthy service state\n\
-{indent}action: journalctl --user -u codex-session-control-test-Setup1.service\n",
-                indent = "  ",
-                version = env!("CARGO_PKG_VERSION")
+            report,
+            StatusResult::new(
+                StatusState::Unhealthy,
+                Some(semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap()),
+                Some(ServiceSummary::CouldNotVerify),
+                IntegrationState::CouldNotVerify,
+                IntegrationState::Unavailable,
+                vec![problem],
             ),
             "{operation}"
         );
@@ -287,18 +514,18 @@ async fn status_inspects_structural_desktop_without_launch_or_mutation() {
     let desktop_entry_before = fs::read(&desktop_entry).unwrap();
     fixture.clear_logs();
 
-    let report = status_with_context(context(&fixture)).await.unwrap();
+    let report = inspect_status(context(&fixture)).await;
 
-    assert!(report.healthy, "{}", report.stdout);
+    assert!(
+        matches!(report.state(), StatusState::Healthy | StatusState::Disabled),
+        "{}",
+        render_status(report.clone()).stdout
+    );
     assert!(
         !launcher_marker.exists(),
         "status must not execute the Desktop launcher"
     );
-    assert!(
-        report
-            .stdout
-            .contains("Desktop configuration: unverified\n")
-    );
+    assert!(render_status(report).stdout.contains("could not verify\n"));
     assert!(!fixture.paths.home.join(".config/codex-desktop").exists());
     assert_eq!(fs::read(&desktop_entry).unwrap(), desktop_entry_before);
     assert_read_only_logs(&fixture);
@@ -329,14 +556,23 @@ async fn status_uses_persisted_desktop_evidence_without_launch_or_mutation() {
     let descriptor_mode = fs::metadata(&descriptor).unwrap().permissions().mode();
     fixture.clear_logs();
 
-    let report = status_with_context(context(&fixture)).await.unwrap();
+    let report = inspect_status(context(&fixture)).await;
 
-    assert!(report.healthy, "{}", report.stdout);
+    assert!(
+        matches!(report.state(), StatusState::Healthy | StatusState::Disabled),
+        "{}",
+        render_status(report.clone()).stdout
+    );
     assert!(
         !launcher_marker.exists(),
         "status must not execute the persisted Desktop launcher"
     );
-    assert!(report.stdout.contains("Desktop configuration: ready\n"));
+    assert_eq!(report.state(), StatusState::Healthy);
+    assert!(
+        render_status(report)
+            .stdout
+            .contains("Codex Desktop integration: ready\n")
+    );
     assert_eq!(fs::read(&descriptor).unwrap(), descriptor_before);
     assert_eq!(
         fs::metadata(&descriptor).unwrap().permissions().mode(),
@@ -392,14 +628,14 @@ async fn status_leaves_unknown_descriptor_unverified_after_null_setup_without_mu
     let descriptor_before = fs::read(&descriptor).unwrap();
     fixture.clear_logs();
 
-    let report = status_with_context(context(&fixture)).await.unwrap();
+    let report = inspect_status(context(&fixture)).await;
 
-    assert!(report.healthy, "{}", report.stdout);
     assert!(
-        report
-            .stdout
-            .contains("Desktop configuration: unverified\n")
+        matches!(report.state(), StatusState::Healthy | StatusState::Disabled),
+        "{}",
+        render_status(report.clone()).stdout
     );
+    assert!(render_status(report).stdout.contains("could not verify\n"));
     assert_eq!(fs::read(&descriptor).unwrap(), descriptor_before);
     assert_read_only_logs(&fixture);
 }
@@ -423,44 +659,61 @@ async fn status_reports_descriptor_service_matrix_without_mutation() {
     let expected = fs::read(&descriptor).unwrap();
     fixture.clear_logs();
 
-    let structurally_unverified = status_with_context(context(&fixture)).await.unwrap();
+    let structurally_unverified = inspect_status(context(&fixture)).await;
     assert!(
-        structurally_unverified.healthy,
+        matches!(
+            structurally_unverified.state(),
+            StatusState::Healthy | StatusState::Disabled
+        ),
         "{}",
-        structurally_unverified.stdout
+        render_status(structurally_unverified.clone()).stdout
     );
     assert!(
-        structurally_unverified
+        render_status(structurally_unverified)
             .stdout
-            .contains("Desktop configuration: ready\n")
+            .contains("Codex Desktop integration: ready\n")
     );
     assert_eq!(fs::read(&descriptor).unwrap(), expected);
 
     fs::remove_file(&descriptor).unwrap();
-    let absent_active = status_with_context(context(&fixture)).await.unwrap();
-    assert!(!absent_active.healthy, "{}", absent_active.stdout);
+    let absent_active = inspect_status(context(&fixture)).await;
     assert!(
-        absent_active
-            .stdout
-            .contains("Desktop configuration: not_ready\n")
+        !matches!(
+            absent_active.state(),
+            StatusState::Healthy | StatusState::Disabled
+        ),
+        "{}",
+        render_status(absent_active.clone()).stdout
     );
-    assert!(absent_active.stdout.contains("- desktop-descriptor:"));
     assert!(
-        absent_active
+        render_status(absent_active.clone())
             .stdout
-            .contains("action: codex-session-control update")
+            .contains("Codex Desktop integration: unhealthy\n")
     );
+    assert!(
+        render_status(absent_active.clone())
+            .stdout
+            .contains("- Codex Desktop integration is incorrectly configured.")
+    );
+    assert!(render_status(absent_active).stdout.contains("Problems:\n"));
 
     drop(authority);
     fs::remove_file(&fixture.enabled).unwrap();
     fs::remove_file(&fixture.active).unwrap();
     fs::remove_file(&fixture.paths.socket).unwrap();
-    let absent_inactive = status_with_context(context(&fixture)).await.unwrap();
-    assert!(absent_inactive.healthy, "{}", absent_inactive.stdout);
+    let absent_inactive = inspect_status(context(&fixture)).await;
     assert!(
-        absent_inactive
+        matches!(
+            absent_inactive.state(),
+            StatusState::Healthy | StatusState::Disabled
+        ),
+        "{}",
+        render_status(absent_inactive.clone()).stdout
+    );
+    assert!(
+        render_status(absent_inactive)
             .stdout
-            .contains("Desktop configuration: not_ready\n")
+            .contains("unavailable\n")
     );
 
     fs::write(
@@ -468,9 +721,16 @@ async fn status_reports_descriptor_service_matrix_without_mutation() {
         b"{\"schemaVersion\":1,\"transport\":\"unix\",\"socketPath\":\"/foreign\"}",
     )
     .unwrap();
-    let foreign = status_with_context(context(&fixture)).await.unwrap();
-    assert!(!foreign.healthy);
-    assert!(foreign.stdout.contains("- desktop-descriptor:"));
+    let foreign = inspect_status(context(&fixture)).await;
+    assert!(!matches!(
+        foreign.state(),
+        StatusState::Healthy | StatusState::Disabled
+    ));
+    assert!(
+        render_status(foreign.clone())
+            .stdout
+            .contains("- Codex Desktop integration is incorrectly configured.")
+    );
     assert_read_only_logs(&fixture);
 }
 
@@ -494,10 +754,19 @@ async fn status_keeps_a_missing_persisted_launcher_unverified_and_read_only() {
     fs::rename(&launcher, launcher.with_extension("missing")).unwrap();
     fixture.clear_logs();
 
-    let report = status_with_context(context(&fixture)).await.unwrap();
+    let report = inspect_status(context(&fixture)).await;
 
-    assert!(report.healthy, "{}", report.stdout);
-    assert!(report.stdout.contains("Desktop configuration: ready\n"));
+    assert!(
+        matches!(report.state(), StatusState::Healthy | StatusState::Disabled),
+        "{}",
+        render_status(report.clone()).stdout
+    );
+    assert_eq!(report.state(), StatusState::Healthy);
+    assert!(
+        render_status(report)
+            .stdout
+            .contains("Codex Desktop integration: ready\n")
+    );
     assert_eq!(fs::read(&descriptor).unwrap(), expected);
     assert_read_only_logs(&fixture);
 }
@@ -523,11 +792,19 @@ async fn status_detects_unsafe_descriptor_when_persisted_launcher_is_unavailable
     fs::set_permissions(&descriptor, fs::Permissions::from_mode(0o1600)).unwrap();
     fixture.clear_logs();
 
-    let report = status_with_context(context(&fixture)).await.unwrap();
+    let report = inspect_status(context(&fixture)).await;
 
-    assert!(!report.healthy);
-    assert!(report.stdout.contains("Desktop configuration: not_ready\n"));
-    assert!(report.stdout.contains("- desktop-descriptor:"));
+    assert_eq!(
+        report,
+        StatusResult::new(
+            StatusState::Unhealthy,
+            Some(semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap()),
+            Some(ServiceSummary::RunningAutomatic),
+            IntegrationState::Ready,
+            IntegrationState::Unhealthy,
+            vec![StatusProblem::DesktopDescriptorFault],
+        )
+    );
     assert_eq!(fs::read(&descriptor).unwrap(), descriptor_before);
     assert_eq!(
         fs::metadata(&descriptor).unwrap().permissions().mode() & 0o7777,
@@ -555,26 +832,26 @@ async fn status_leaves_descriptor_safe_open_failure_unverified() {
     fs::set_permissions(&descriptor, fs::Permissions::from_mode(0o000)).unwrap();
     fixture.clear_logs();
 
-    let report = status_with_context(context(&fixture)).await.unwrap();
+    let report = inspect_status(context(&fixture)).await;
 
-    assert!(!report.healthy);
-    assert!(
-        report
-            .stdout
-            .contains("Desktop configuration: unverified\n")
+    assert_eq!(
+        report,
+        StatusResult::new(
+            StatusState::Unhealthy,
+            Some(semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap()),
+            Some(ServiceSummary::RunningAutomatic),
+            IntegrationState::Ready,
+            IntegrationState::CouldNotVerify,
+            vec![StatusProblem::DesktopCouldNotBeVerified],
+        )
     );
-    assert!(report.stdout.contains("descriptor cannot be opened safely"));
     assert_read_only_logs(&fixture);
 
     fs::remove_file(&fixture.active).unwrap();
     fixture.clear_logs();
-    let inactive = status_with_context(context(&fixture)).await.unwrap();
+    let inactive = inspect_status(context(&fixture)).await;
 
-    assert!(
-        inactive
-            .stdout
-            .contains("Desktop configuration: not_ready\n")
-    );
+    assert!(render_status(inactive).stdout.contains("unhealthy\n"));
     assert_read_only_logs(&fixture);
 }
 
@@ -606,39 +883,25 @@ async fn status_accumulates_every_failure_with_exact_routes_and_advisory() {
     .unwrap();
     fixture.clear_logs();
 
-    let report = status_with_context(context(&fixture)).await.unwrap();
+    let report = inspect_status(context(&fixture)).await;
 
     assert_eq!(
-        report.stdout,
-        format!(
-            "Compatibility warning: Codex app-server {untested_version} has not been tested with codex-session-control {version}; native results remain authoritative.\n\
-Status: drifted\n\
-Installed release: {version}\n\
-Codex app-server service: enabled, inactive\n\
-CLI attachment: available through codex-session-control codex\n\
-Desktop configuration: unavailable\n\
-Loaded task state: not_verified\n\
-Failed checks:\n\
-- executable: digest does not match installed manifest\n\
-{indent}action: codex-session-control setup\n\
-- configuration: invalid installed configuration\n\
-{indent}action: codex-session-control setup\n\
-- projection: digest does not match installed manifest\n\
-{indent}action: codex-session-control setup\n\
-- plugin: native registration does not match installed manifest\n\
-{indent}action: codex-session-control setup\n\
-- service-unit: digest does not match installed manifest\n\
-{indent}action: codex-session-control setup\n\
-- service-state: enabled service is not active\n\
-{indent}action: journalctl --user -u codex-session-control-test-Setup1.service\n\
-- socket: enabled service socket is missing\n\
-{indent}action: journalctl --user -u codex-session-control-test-Setup1.service\n\
-",
-            version = env!("CARGO_PKG_VERSION"),
-            indent = "  ",
+        report,
+        StatusResult::new(
+            StatusState::Unhealthy,
+            Some(semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap()),
+            Some(ServiceSummary::StoppedUnexpectedAutomaticOn),
+            IntegrationState::Unhealthy,
+            IntegrationState::Unavailable,
+            vec![
+                StatusProblem::InstalledStateCouldNotBeVerified,
+                StatusProblem::ProjectionFault,
+                StatusProblem::NativeRegistrationFault,
+                StatusProblem::ServiceConfiguredButStopped,
+                StatusProblem::SocketMissing,
+            ],
         )
     );
-    assert!(!report.healthy);
     assert_read_only_logs(&fixture);
 }
 
@@ -654,26 +917,19 @@ async fn unsafe_path_drift_names_the_path_and_invariant_without_repair() {
     symlink(&target, &fixture.paths.config).unwrap();
     fixture.clear_logs();
 
-    let report = status_with_context(context(&fixture)).await.unwrap();
+    let report = inspect_status(context(&fixture)).await;
 
     assert_eq!(
-        report.stdout,
-        format!(
-            "Status: drifted\n\
-Installed release: {version}\n\
-Codex app-server service: enabled, active\n\
-CLI attachment: available through codex-session-control codex\n\
-Desktop configuration: unavailable\n\
-Loaded task state: not_verified\n\
-Failed checks:\n\
-- configuration: {}: unsafe owner, type, or mode\n\
-{indent}action: inspect the path and restore its approved ownership, type, and mode\n",
-            fixture.paths.config.display(),
-            indent = "  ",
-            version = env!("CARGO_PKG_VERSION"),
+        report,
+        StatusResult::new(
+            StatusState::Unhealthy,
+            Some(semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap()),
+            Some(ServiceSummary::RunningAutomatic),
+            IntegrationState::Ready,
+            IntegrationState::Unavailable,
+            vec![StatusProblem::InstalledStateCouldNotBeVerified],
         )
     );
-    assert!(!report.healthy);
     assert_eq!(fs::read_link(&fixture.paths.config).unwrap(), target);
     assert_read_only_logs(&fixture);
 }
@@ -686,31 +942,34 @@ async fn status_accepts_only_owner_read_write_socket_modes() {
 
     for mode in [0o600, 0o700] {
         fs::set_permissions(&fixture.paths.socket, fs::Permissions::from_mode(mode)).unwrap();
-        let report = status_with_context(context(&fixture)).await.unwrap();
-        assert!(report.healthy, "mode {mode:04o}: {}", report.stdout);
+        let report = inspect_status(context(&fixture)).await;
+        assert!(
+            matches!(report.state(), StatusState::Healthy | StatusState::Disabled),
+            "mode {mode:04o}: {}",
+            render_status(report.clone()).stdout
+        );
     }
 
     for mode in [0o000, 0o200, 0o400, 0o500, 0o601, 0o660, 0o711, 0o777] {
         fs::set_permissions(&fixture.paths.socket, fs::Permissions::from_mode(mode)).unwrap();
-        let report = status_with_context(context(&fixture)).await.unwrap();
-        assert!(!report.healthy, "mode {mode:04o}");
+        let report = inspect_status(context(&fixture)).await;
         assert!(
-                    report.stdout.contains(&format!(
-                        "- socket: {}: must be an owner-owned Unix socket with owner read/write permissions and no group/other permissions\n",
-                        fixture.paths.socket.display()
-                    )),
-                    "mode {mode:04o}: {}",
-                    report.stdout
-                );
+            !matches!(report.state(), StatusState::Healthy | StatusState::Disabled),
+            "mode {mode:04o}"
+        );
+        assert!(
+            render_status(report.clone())
+                .stdout
+                .contains("- The service connection is unsafe."),
+            "mode {mode:04o}: {}",
+            render_status(report).stdout
+        );
     }
 }
 
 #[tokio::test]
-async fn tested_and_unparseable_versions_have_exact_advisory_behavior() {
-    for (version_output, warning) in [
-        (TESTED_CODEX_CLI_VERSION_OUTPUT, None),
-        ("codex-cli not-semver\n", Some("not-semver")),
-    ] {
+async fn tested_and_unparseable_versions_preserve_the_typed_disabled_result() {
+    for version_output in [TESTED_CODEX_CLI_VERSION_OUTPUT, "codex-cli not-semver\n"] {
         let fixture = Fixture::new();
         let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
         setup_with_context(fixture.context(true)).await.unwrap();
@@ -721,26 +980,19 @@ async fn tested_and_unparseable_versions_have_exact_advisory_behavior() {
         fs::write(&fixture.codex_version, version_output).unwrap();
         fixture.clear_logs();
 
-        let report = status_with_context(context(&fixture)).await.unwrap();
+        let report = inspect_status(context(&fixture)).await;
 
-        let expected_prefix = warning.map(|version| {
-                    format!(
-                        "Compatibility warning: Codex app-server {version} has not been tested with codex-session-control {}; native results remain authoritative.\n",
-                        env!("CARGO_PKG_VERSION")
-                    )
-                });
         assert_eq!(
-            report.stdout.starts_with("Compatibility warning:"),
-            warning.is_some()
+            report,
+            StatusResult::new(
+                StatusState::Disabled,
+                Some(semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap()),
+                Some(ServiceSummary::StoppedAutomaticOff),
+                IntegrationState::Unavailable,
+                IntegrationState::Unavailable,
+                Vec::new(),
+            )
         );
-        if let Some(prefix) = expected_prefix {
-            assert!(report.stdout.starts_with(&prefix));
-        }
-        assert!(report.healthy);
-        assert!(report.stdout.ends_with(
-            "Loaded task state: not_verified\n\
-Availability: codex-session-control enable\n"
-        ));
         assert_read_only_logs(&fixture);
     }
 }

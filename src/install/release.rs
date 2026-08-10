@@ -95,14 +95,6 @@ pub(super) enum ReleaseDownloadError {
     Integrity(ControllerError),
 }
 
-impl ReleaseDownloadError {
-    pub(super) fn into_controller_error(self) -> ControllerError {
-        match self {
-            Self::Download(error) | Self::Integrity(error) => error,
-        }
-    }
-}
-
 #[derive(Deserialize)]
 struct GithubReleaseMetadata {
     tag_name: String,

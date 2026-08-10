@@ -1,11 +1,16 @@
 use std::{
     collections::BTreeMap,
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     path::{Path, PathBuf},
 };
 
 use crate::{
-    desktop::{DesktopTarget, remove_expected_descriptor, render_descriptor},
+    cli_output::UserFailure,
+    desktop::{
+        DescriptorPublicationFailure, DescriptorPublicationResidue, DesktopTarget,
+        remove_expected_descriptor, render_descriptor,
+    },
+    diagnostics::{DiagnosticCause, Diagnostics},
     error::ControllerError,
 };
 use sha2::{Digest, Sha256};
@@ -21,22 +26,20 @@ mod wrapper;
 
 pub(crate) use evidence::{ResolvedUserPaths, load_installed_config};
 pub(crate) use service::LifecycleTarget;
-pub(crate) use status::status;
+pub(crate) use status::status_from_paths;
 pub(crate) use wrapper::codex_wrapper;
 
 use evidence::SelectedHomeEvidence;
 use service::{ServiceActivity, query_service_activity, verify_absent_control_socket};
 
-const DESKTOP_DETACH_GUIDANCE: &str =
-    "Desktop: fully exit and restart Desktop to return to ordinary mode.\n";
-
-fn display_command_for_paths(paths: &ResolvedUserPaths, path_environment: &OsStr) -> String {
-    let install_bin = paths.home.join(".local/bin");
-    if std::env::split_paths(path_environment).any(|entry| entry == install_bin) {
-        "codex-session-control".to_owned()
-    } else {
-        paths.binary.display().to_string()
-    }
+fn fail_with_diagnostic(
+    diagnostics: &mut Diagnostics,
+    stage: &'static str,
+    cause: DiagnosticCause,
+    failure: UserFailure,
+) -> UserFailure {
+    diagnostics.failed(stage, cause);
+    failure
 }
 
 fn missing_control_socket_error() -> ControllerError {
@@ -61,34 +64,15 @@ struct LifecycleContext {
     cwd: PathBuf,
 }
 
-#[derive(Debug)]
-pub(crate) struct LifecycleReceipt {
-    pub stdout: String,
-    pub stderr: String,
-}
-
-macro_rules! complete_lifecycle_stage {
-    ($progress:expr, $stage:expr, $target:expr, $recovery:expr) => {{
-        $progress.complete($stage);
-        #[cfg(test)]
-        if $target.test_hooks.fail_after_completed_stage == Some($stage.name()) {
-            return Err($progress.fail(
-                $stage,
-                "injected failure after completed stage",
-                $recovery,
-            ));
-        }
-    }};
-}
-
 mod update;
-pub(crate) use update::update;
+pub(crate) use update::{UpdateExecution, update};
 
 mod enable_disable;
 mod setup;
 mod uninstall;
 
 pub(crate) use enable_disable::{disable, enable};
+pub(crate) use paths::shell_quote_path;
 pub(crate) use setup::setup;
 pub(crate) use uninstall::uninstall;
 
@@ -139,37 +123,30 @@ fn remove_persisted_desktop_descriptor(
     remove_expected_descriptor(identity, &expected)
 }
 
-fn incomplete_descriptor_cleanup(error: impl std::fmt::Display) -> String {
-    format!("Desktop descriptor cleanup is incomplete: {error}; later product state was retained")
-}
-
 fn cleanup_changed_descriptor_after_start_failure(
     systemctl: &Path,
     target: &LifecycleTarget,
     desktop: Option<&DesktopTarget>,
     descriptor: Option<&[u8]>,
-) -> Result<(), ControllerError> {
-    let (desktop, descriptor) = desktop.zip(descriptor).ok_or_else(|| {
-        ControllerError::Operational(
-            "changed Desktop descriptor cleanup has no exact descriptor identity".to_owned(),
-        )
-    })?;
+) -> Result<(), DescriptorPublicationFailure> {
+    let (desktop, descriptor) = desktop
+        .zip(descriptor)
+        .expect("changed Desktop descriptor has exact identity and bytes");
+    let residue = desktop.identity.descriptor_path.clone();
+    let failed = || DescriptorPublicationFailure {
+        residue: Some(DescriptorPublicationResidue::Final(residue.clone())),
+    };
     match query_service_activity(systemctl, &target.unit_name) {
         ServiceActivity::Active => {
-            return Err(ControllerError::Operational(
-                "service is active; exact Desktop descriptor was retained".to_owned(),
-            ));
+            return Err(failed());
         }
         ServiceActivity::Unproven => {
-            return Err(ControllerError::Operational(
-                "service activity could not be proven; exact Desktop descriptor was retained"
-                    .to_owned(),
-            ));
+            return Err(failed());
         }
         ServiceActivity::Inactive => {}
     }
-    verify_absent_control_socket(target)?;
-    remove_expected_descriptor(&desktop.identity, descriptor)?;
+    verify_absent_control_socket(target).map_err(|_| failed())?;
+    remove_expected_descriptor(&desktop.identity, descriptor).map_err(|_| failed())?;
     Ok(())
 }
 
@@ -189,16 +166,6 @@ enum DesktopAttachmentStatus {
     Available,
     Unavailable,
     Unverified,
-}
-
-impl DesktopAttachmentStatus {
-    const fn receipt(self) -> &'static str {
-        match self {
-            Self::Available => "available",
-            Self::Unavailable => "unavailable",
-            Self::Unverified => "unverified",
-        }
-    }
 }
 
 #[derive(Clone, Debug)]

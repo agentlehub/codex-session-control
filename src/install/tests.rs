@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     ffi::{OsStr, OsString},
     fs,
     os::unix::fs::PermissionsExt,
@@ -13,27 +13,34 @@ use uzers::os::unix::UserExt;
 
 use crate::{
     app_server::{TESTED_CODEX_CLI_VERSION, TESTED_CODEX_CLI_VERSION_OUTPUT, TESTED_CODEX_VERSION},
+    cli_output::{
+        IntegrationState, RunningClientFacts, ServiceSummary, StatusProblem, StatusResult,
+        StatusState, UserSuccess,
+    },
     desktop::render_descriptor,
     error::ControllerError,
     model::{DesktopAttachmentIdentity, InstalledRelease, ProductConfig},
 };
 
 use super::{
-    CandidateRelease, DESKTOP_DETACH_GUIDANCE, LifecycleContext,
-    enable_disable::{disable_with_context, enable_with_context},
+    CandidateRelease, LifecycleContext,
+    enable_disable::{
+        disable_context_failure, disable_with_context, disable_with_context_and_diagnostics,
+        enable_context_failure, enable_publication_failure, enable_service_failure,
+        enable_with_context, enable_with_context_and_diagnostics,
+    },
     evidence::{
-        InstalledEvidenceCase, InvalidEvidence, NativeProductResidue, ResolvedUserPaths,
-        SelectedHomeOperation, StoredEvidence, classify_selected_home_evidence,
+        InstalledEvidenceCase, NativeProductResidue, ResolvedUserPaths, SelectedHomeOperation,
+        StoredEvidence, classify_selected_home_evidence,
         classify_selected_home_evidence_with_native_product_artifact, load_config_from_paths,
         read_configuration_evidence, read_manifest_evidence, require_selected_home_evidence,
         select_first_install_codex_home, selected_codex_home,
     },
     native::marketplace_roots,
     paths::{
-        FileKind, SOCKET_SECURITY_REQUIREMENT, StatusFileError, atomic_write,
-        create_missing_selected_codex_home, create_product_dir, create_shared_dir,
-        remove_owned_empty_dir, resolve_codex_executable, shell_quote_path, validate_config_file,
-        validate_control_socket, validate_existing,
+        FileKind, SOCKET_SECURITY_REQUIREMENT, atomic_write, create_missing_selected_codex_home,
+        create_product_dir, create_shared_dir, remove_owned_empty_dir, resolve_codex_executable,
+        shell_quote_path, validate_config_file, validate_control_socket, validate_existing,
     },
     product_target,
     release::{
@@ -46,22 +53,64 @@ use super::{
     render::{render_projection, render_unit},
     service::{
         CONTROL_SOCKET_READINESS_TIMEOUT, CallerUnitEvidence, CallerUnitInspection,
-        LifecycleTarget, ServiceActivity, ServiceEnablement, append_unattached_client_guidance,
-        cgroup_proves_self_hosted, classify_service_activity, classify_service_enablement,
-        classify_unattached_client, detect_running_unattached_clients_from_snapshot,
-        inspect_caller_unit, wait_for_control_socket,
+        LifecycleTarget, ServiceActivity, ServiceEnablement, cgroup_proves_self_hosted,
+        classify_service_activity, classify_service_enablement,
+        detect_running_unattached_clients_from_snapshot, inspect_caller_unit,
+        wait_for_control_socket,
     },
-    setup::{SetupContext, setup_preflight, setup_with_context},
-    status::{StatusContext, status_with_context},
+    setup::{
+        SetupContext, setup_cli_reconciliation_failure, setup_descriptor_publication_failure,
+        setup_invocation_failure, setup_preflight, setup_with_context,
+        setup_with_context_after_start, setup_with_context_and_diagnostics,
+    },
+    status::{StatusContext, status_from_paths, status_with_context},
     test_target,
-    uninstall::uninstall_with_context,
+    uninstall::{uninstall_with_context, uninstall_with_context_and_diagnostics},
     update::{
-        TerminalState, UpdateContext, UpdateStage, baseline_active_turn_gate, list_active_threads,
-        outer_update_with_endpoints, release_failure_stage, run_candidate_apply,
-        staged_update_with_context,
+        ActiveTurnGateFailure, CandidateApplyResult, CandidateExit, CandidateWaitHook,
+        RestartPromptTestFailure, TerminalState, UpdateContext, UpdateExecution,
+        active_turn_gate_failure, baseline_active_turn_gate, classify_candidate_wait,
+        list_active_threads, outer_update_with_endpoints, run_candidate_apply_with_wait_hook,
+        run_outer_candidate, staged_update_with_context,
+        staged_update_with_context_and_diagnostics, update_cli_reconciliation_failure,
+        update_descriptor_publication_failure,
     },
     wrapper::{exec_codex_wrapper_command, prepare_codex_wrapper},
 };
+
+fn with_recorded_diagnostics(
+    mut rendered: crate::cli_output::RenderedCli,
+    diagnostics: &crate::diagnostics::Diagnostics,
+) -> crate::cli_output::RenderedCli {
+    let mut stderr = diagnostics.recorded_lines().concat();
+    stderr.push_str(&rendered.stderr);
+    rendered.stderr = stderr;
+    rendered
+}
+
+fn without_verbose_diagnostics(stderr: &str) -> String {
+    stderr
+        .split_inclusive('\n')
+        .filter(|line| !(line.starts_with("[verbose] ") && line.ends_with('\n')))
+        .collect()
+}
+
+fn assert_default_verbose_parity(
+    default: &crate::cli_output::RenderedCli,
+    verbose: &crate::cli_output::RenderedCli,
+    diagnostics: &crate::diagnostics::Diagnostics,
+    diagnostic_prefix: &str,
+) {
+    assert_eq!(default.stdout, verbose.stdout);
+    assert_eq!(default.stderr, without_verbose_diagnostics(&verbose.stderr));
+    assert_eq!(default.exit_code, verbose.exit_code);
+    assert!(
+        diagnostics
+            .recorded_lines()
+            .iter()
+            .all(|line| line.starts_with(diagnostic_prefix))
+    );
+}
 
 fn write_executable_fixture(path: &std::path::Path, contents: impl AsRef<[u8]>) {
     use std::os::unix::fs::PermissionsExt;

@@ -12,17 +12,24 @@ use serde_json::Value;
 
 use crate::{
     app_server::TESTED_CODEX_VERSION,
-    desktop::{
-        DescriptorState, DesktopAvailability, DesktopTarget, inspect_descriptor,
-        preflight_descriptor_switch, probe_desktop_capability, probe_persisted_desktop_capability,
-        publish_descriptor, remove_expected_descriptor, render_descriptor,
+    cli_output::{
+        DesktopAvailability as OutputDesktopAvailability, ManagedPaths, OrdinaryFailure,
+        RollbackIncomplete, RollbackPrimary, SetupSuccess, UserFailure, UserNotice, UserSuccess,
     },
+    desktop::{
+        DescriptorPublicationFailure, DescriptorState, DesktopAvailability, DesktopTarget,
+        inspect_descriptor, preflight_descriptor_switch, probe_desktop_capability,
+        probe_persisted_desktop_capability, publish_descriptor, remove_expected_descriptor,
+        render_descriptor,
+    },
+    diagnostics::{DiagnosticCause, DiagnosticEvent, DiagnosticTarget, Diagnostics},
     error::ControllerError,
     model::{DesktopAttachmentIdentity, InstalledRelease, ProductConfig},
 };
 
 use super::{
-    CandidateRelease, DesktopAttachmentStatus, cleanup_changed_descriptor_after_start_failure,
+    CandidateRelease, DesktopAttachmentStatus, UNKNOWN_CODEX_VERSION,
+    cleanup_changed_descriptor_after_start_failure,
     evidence::{
         InstalledEvidenceCase, NativeProductState, ResolvedUserPaths, SelectedHomeEvidence,
         SelectedHomeOperation, classify_selected_home_evidence, require_selected_home_evidence,
@@ -30,19 +37,17 @@ use super::{
     },
     native::{
         plugin_matches, read_codex_version, read_installed_product_version, reconcile_marketplace,
-        reconcile_plugin, resolve_named_executable, valid_owned_executable,
+        reconcile_plugin, resolve_named_executable,
     },
     paths::{
         FileKind, create_missing_selected_codex_home, create_product_dir, create_shared_dir,
-        lifecycle_file_error, read_product_evidence_file, reconcile_file, resolve_codex_executable,
-        validate_existing,
+        read_product_evidence_file, reconcile_file, resolve_codex_executable, validate_existing,
     },
     product_target,
     release::RELEASE_REPOSITORY,
     render::{RenderedProjection, reconcile_projection, render_projection, render_unit},
     service::{
-        LifecycleTarget, append_unattached_client_guidance, detect_running_unattached_clients,
-        run_systemctl, verify_setup_service,
+        LifecycleTarget, detect_running_unattached_clients, run_systemctl, verify_setup_service,
     },
     sha256_bytes,
 };
@@ -55,12 +60,6 @@ pub(super) struct SetupContext {
     pub(super) desktop_environment: BTreeMap<OsString, OsString>,
     pub(super) desktop_launcher: Option<PathBuf>,
     pub(super) cwd: PathBuf,
-}
-
-#[derive(Debug)]
-pub(crate) struct SetupReport {
-    pub stdout: String,
-    pub stderr: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,7 +80,7 @@ enum SetupStage {
 }
 
 impl SetupStage {
-    const fn name(self) -> &'static str {
+    const fn diagnostic_name(self) -> &'static str {
         match self {
             Self::Preflight => "preflight",
             Self::Binary => "binary",
@@ -100,41 +99,60 @@ impl SetupStage {
     }
 }
 
-#[derive(Default)]
-struct SetupProgress {
-    completed: Vec<SetupStage>,
+fn complete_setup_stage(
+    diagnostics: &mut Diagnostics,
+    stage: SetupStage,
+    _target: &LifecycleTarget,
+) -> Result<(), UserFailure> {
+    diagnostics.completed(stage.diagnostic_name());
+    #[cfg(test)]
+    if _target.test_hooks.fail_after_completed_stage == Some(stage.diagnostic_name()) {
+        return Err(super::fail_with_diagnostic(
+            diagnostics,
+            stage.diagnostic_name(),
+            DiagnosticCause::Unexpected,
+            UserFailure::Ordinary(OrdinaryFailure::SetupUnexpectedRetry),
+        ));
+    }
+    Ok(())
 }
 
-impl SetupProgress {
-    fn complete(&mut self, stage: SetupStage) {
-        self.completed.push(stage);
-    }
+fn setup_desktop_rollback(paths: Vec<PathBuf>) -> UserFailure {
+    let mut paths = paths.into_iter();
+    let first = paths
+        .next()
+        .expect("Desktop rollback has at least one exact managed path");
+    UserFailure::RollbackIncomplete(RollbackIncomplete::new(
+        RollbackPrimary::SetupDesktopRetry,
+        ManagedPaths::new(first, paths.collect()),
+    ))
+}
 
-    fn stderr(&self) -> String {
-        self.completed
-            .iter()
-            .map(|stage| format!("completed: {}\n", stage.name()))
-            .collect()
-    }
+pub(super) fn setup_cli_reconciliation_failure(error: &ControllerError) -> UserFailure {
+    UserFailure::Ordinary(match error {
+        ControllerError::InvalidData { .. } => OrdinaryFailure::SetupCliIntegrationCheckStatus,
+        ControllerError::Operational(_) => OrdinaryFailure::SetupCliIntegrationRetry,
+    })
+}
 
-    fn fail(
-        &self,
-        stage: SetupStage,
-        cause: impl std::fmt::Display,
-        recovery: &str,
-    ) -> ControllerError {
-        let mut message = self.stderr();
-        message.push_str(&format!("failed at {}: {cause}\n", stage.name()));
-        message.push_str(recovery);
-        ControllerError::Operational(message)
+pub(super) fn setup_descriptor_publication_failure(
+    failure: DescriptorPublicationFailure,
+) -> UserFailure {
+    match failure.residue {
+        Some(residue) => setup_desktop_rollback(vec![residue.into_path()]),
+        None => UserFailure::Ordinary(OrdinaryFailure::SetupDesktopIntegrationRetry),
     }
+}
+
+pub(super) fn setup_invocation_failure() -> UserFailure {
+    UserFailure::Ordinary(OrdinaryFailure::SetupUnsafeTerminalRetry)
 }
 
 pub(super) struct SetupPreflight {
     codex: PathBuf,
     systemctl: PathBuf,
     expected_running_version: String,
-    compatibility_warning: Option<String>,
+    compatibility_codex_version: Option<semver::Version>,
     binary: Vec<u8>,
     binary_sha256: String,
     config: Vec<u8>,
@@ -154,67 +172,106 @@ struct SetupDesktopPlan {
     warning: Option<String>,
 }
 
-pub(super) struct PreflightFailure {
-    pub(super) cause: String,
-    recovery: String,
-}
-
-pub(crate) async fn setup(desktop_launcher: Option<&Path>) -> Result<SetupReport, ControllerError> {
-    let paths = ResolvedUserPaths::from_effective_user()?;
+pub(crate) async fn setup(
+    desktop_launcher: Option<&Path>,
+    diagnostics: &mut Diagnostics,
+) -> Result<UserSuccess, UserFailure> {
+    diagnostics.emit(DiagnosticEvent::ControllerStarted {
+        version: semver::Version::parse(env!("CARGO_PKG_VERSION"))
+            .expect("package version is semantic"),
+        target: DiagnosticTarget::current(),
+    });
+    let paths = ResolvedUserPaths::from_effective_user().map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            SetupStage::Preflight.diagnostic_name(),
+            DiagnosticCause::Validation,
+            setup_invocation_failure(),
+        )
+    })?;
     let candidate = CandidateRelease {
-        executable: std::env::current_exe().map_err(|_| ControllerError::InvalidData {
-            field: "executable",
-            reason: "cannot resolve current executable",
+        executable: std::env::current_exe().map_err(|_| {
+            super::fail_with_diagnostic(
+                diagnostics,
+                SetupStage::Preflight.diagnostic_name(),
+                DiagnosticCause::Unexpected,
+                UserFailure::Ordinary(OrdinaryFailure::SetupUnexpectedRetry),
+            )
         })?,
         product_version: env!("CARGO_PKG_VERSION").to_owned(),
         target: product_target().to_owned(),
     };
-    let path_environment = std::env::var_os("PATH").ok_or(ControllerError::InvalidData {
-        field: "PATH",
-        reason: "is unavailable",
+    let path_environment = std::env::var_os("PATH").ok_or_else(|| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            SetupStage::Preflight.diagnostic_name(),
+            DiagnosticCause::Validation,
+            setup_invocation_failure(),
+        )
     })?;
-    let cwd = std::env::current_dir().map_err(|_| ControllerError::InvalidData {
-        field: "cwd",
-        reason: "is unavailable",
+    let cwd = std::env::current_dir().map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            SetupStage::Preflight.diagnostic_name(),
+            DiagnosticCause::Validation,
+            setup_invocation_failure(),
+        )
     })?;
-    setup_with_context(SetupContext {
-        target: LifecycleTarget::production(paths),
-        candidate,
-        path_environment,
-        desktop_environment: std::env::vars_os().collect(),
-        desktop_launcher: desktop_launcher.map(Path::to_path_buf),
-        cwd,
-    })
+    setup_with_context_after_start(
+        SetupContext {
+            target: LifecycleTarget::production(paths),
+            candidate,
+            path_environment,
+            desktop_environment: std::env::vars_os().collect(),
+            desktop_launcher: desktop_launcher.map(Path::to_path_buf),
+            cwd,
+        },
+        diagnostics,
+    )
     .await
 }
 
-pub(super) async fn setup_with_context(
+#[cfg(test)]
+pub(super) async fn setup_with_context(context: SetupContext) -> Result<UserSuccess, UserFailure> {
+    let mut diagnostics = Diagnostics::new(false, crate::diagnostics::DiagnosticCommand::Setup);
+    setup_with_context_and_diagnostics(context, &mut diagnostics).await
+}
+
+#[cfg(test)]
+pub(super) async fn setup_with_context_and_diagnostics(
+    context: SetupContext,
+    diagnostics: &mut Diagnostics,
+) -> Result<UserSuccess, UserFailure> {
+    diagnostics.emit(DiagnosticEvent::ControllerStarted {
+        version: semver::Version::parse(&context.candidate.product_version)
+            .unwrap_or_else(|_| semver::Version::new(0, 0, 0)),
+        target: DiagnosticTarget::current(),
+    });
+    setup_with_context_after_start(context, diagnostics).await
+}
+
+pub(super) async fn setup_with_context_after_start(
     mut context: SetupContext,
-) -> Result<SetupReport, ControllerError> {
-    let mut progress = SetupProgress::default();
-    let retry_setup = match context.desktop_launcher.as_ref() {
-        Some(launcher) => format!(
-            "retry: {} setup --desktop-launcher {}\n",
-            display_command(&context),
-            launcher.display()
-        ),
-        None => format!("retry: {} setup\n", display_command(&context)),
-    };
+    diagnostics: &mut Diagnostics,
+) -> Result<UserSuccess, UserFailure> {
     let preflight = match setup_preflight(&mut context).await {
         Ok(preflight) => preflight,
         Err(failure) => {
-            return Err(progress.fail(SetupStage::Preflight, failure.cause, &failure.recovery));
+            return Err(super::fail_with_diagnostic(
+                diagnostics,
+                SetupStage::Preflight.diagnostic_name(),
+                DiagnosticCause::Validation,
+                failure,
+            ));
         }
     };
-    complete_lifecycle_stage!(
-        progress,
-        SetupStage::Preflight,
-        context.target,
-        &retry_setup
-    );
+    diagnostics.emit(DiagnosticEvent::SelectedCodexHome {
+        codex_home: context.target.paths.codex_home.clone(),
+    });
+    complete_setup_stage(diagnostics, SetupStage::Preflight, &context.target)?;
 
     let paths = &context.target.paths;
-    if let Err(error) = (|| {
+    if (|| {
         create_shared_dir(
             paths.binary.parent().ok_or(ControllerError::InvalidData {
                 field: "binary",
@@ -223,12 +280,19 @@ pub(super) async fn setup_with_context(
             paths.euid,
         )?;
         reconcile_file(&paths.binary, &preflight.binary, 0o755, paths.euid)
-    })() {
-        return Err(progress.fail(SetupStage::Binary, error, &retry_setup));
+    })()
+    .is_err()
+    {
+        return Err(super::fail_with_diagnostic(
+            diagnostics,
+            SetupStage::Binary.diagnostic_name(),
+            DiagnosticCause::Validation,
+            UserFailure::Ordinary(OrdinaryFailure::SetupInstallationFilesRetry),
+        ));
     }
-    complete_lifecycle_stage!(progress, SetupStage::Binary, context.target, &retry_setup);
+    complete_setup_stage(diagnostics, SetupStage::Binary, &context.target)?;
 
-    if let Err(error) = (|| {
+    if (|| {
         create_product_dir(
             paths.config.parent().ok_or(ControllerError::InvalidData {
                 field: "configuration",
@@ -246,73 +310,70 @@ pub(super) async fn setup_with_context(
             paths.euid,
         )?;
         reconcile_file(&paths.config, &preflight.config, 0o600, paths.euid)
-    })() {
-        return Err(progress.fail(SetupStage::Configuration, error, &retry_setup));
+    })()
+    .is_err()
+    {
+        return Err(super::fail_with_diagnostic(
+            diagnostics,
+            SetupStage::Configuration.diagnostic_name(),
+            DiagnosticCause::Validation,
+            UserFailure::Ordinary(OrdinaryFailure::SetupInstallationFilesRetry),
+        ));
     }
-    complete_lifecycle_stage!(
-        progress,
-        SetupStage::Configuration,
-        context.target,
-        &retry_setup
-    );
+    complete_setup_stage(diagnostics, SetupStage::Configuration, &context.target)?;
 
-    let projection_changed = match reconcile_projection(paths, &preflight.projection) {
-        Ok(changed) => changed,
-        Err(error) => {
-            return Err(progress.fail(SetupStage::Projection, error, &retry_setup));
-        }
-    };
-    complete_lifecycle_stage!(
-        progress,
-        SetupStage::Projection,
-        context.target,
-        &retry_setup
-    );
+    reconcile_projection(paths, &preflight.projection).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            SetupStage::Projection.diagnostic_name(),
+            DiagnosticCause::CliIntegration,
+            UserFailure::Ordinary(OrdinaryFailure::SetupCliIntegrationRetry),
+        )
+    })?;
+    complete_setup_stage(diagnostics, SetupStage::Projection, &context.target)?;
 
-    let marketplace_changed =
-        match reconcile_marketplace(&preflight.codex, &paths.codex_home, &paths.marketplace) {
-            Ok(changed) => changed,
-            Err(error) => {
-                return Err(progress.fail(SetupStage::PluginMarketplace, error, &retry_setup));
-            }
-        };
-    complete_lifecycle_stage!(
-        progress,
-        SetupStage::PluginMarketplace,
-        context.target,
-        &retry_setup
-    );
+    reconcile_marketplace(&preflight.codex, &paths.codex_home, &paths.marketplace).map_err(
+        |error| {
+            super::fail_with_diagnostic(
+                diagnostics,
+                SetupStage::PluginMarketplace.diagnostic_name(),
+                DiagnosticCause::CliIntegration,
+                setup_cli_reconciliation_failure(&error),
+            )
+        },
+    )?;
+    complete_setup_stage(diagnostics, SetupStage::PluginMarketplace, &context.target)?;
 
-    let plugin_changed = match reconcile_plugin(
+    reconcile_plugin(
         &preflight.codex,
         &paths.codex_home,
         &paths.marketplace,
         &context.candidate.product_version,
-    ) {
-        Ok(changed) => changed,
-        Err(error) => {
-            return Err(progress.fail(SetupStage::PluginInstall, error, &retry_setup));
-        }
-    };
-    complete_lifecycle_stage!(
-        progress,
-        SetupStage::PluginInstall,
-        context.target,
-        &retry_setup
-    );
+    )
+    .map_err(|error| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            SetupStage::PluginInstall.diagnostic_name(),
+            DiagnosticCause::CliIntegration,
+            setup_cli_reconciliation_failure(&error),
+        )
+    })?;
+    complete_setup_stage(diagnostics, SetupStage::PluginInstall, &context.target)?;
 
-    complete_lifecycle_stage!(
-        progress,
-        SetupStage::DesktopDiscovery,
-        context.target,
-        &retry_setup
-    );
+    complete_setup_stage(diagnostics, SetupStage::DesktopDiscovery, &context.target)?;
     let (_desktop_published, desktop_intent_changed) = if let (Some(target), Some(descriptor)) =
         (&preflight.desktop.target, &preflight.desktop.descriptor)
     {
         let published = match publish_descriptor(&target.identity, descriptor) {
             Ok(published) => published,
-            Err(error) => return Err(progress.fail(SetupStage::Descriptor, error, &retry_setup)),
+            Err(failure) => {
+                return Err(super::fail_with_diagnostic(
+                    diagnostics,
+                    SetupStage::Descriptor.diagnostic_name(),
+                    DiagnosticCause::DesktopIntegration,
+                    setup_descriptor_publication_failure(failure),
+                ));
+            }
         };
         let identity_changed = preflight
             .desktop
@@ -332,7 +393,7 @@ pub(super) async fn setup_with_context(
                 .expect("replacement has a previous Desktop attachment");
             #[cfg(test)]
             if context.target.test_hooks.force_old_descriptor_removal_race
-                && let Err(error) = fs::write(
+                && fs::write(
                     &previous.descriptor_path,
                     b"{\"schemaVersion\":1,\"transport\":\"unix\",\"socketPath\":\"/descriptor-removal-race\"}",
                 )
@@ -342,41 +403,40 @@ pub(super) async fn setup_with_context(
                         fs::Permissions::from_mode(0o600),
                     )
                 })
+                .is_err()
             {
-                return Err(progress.fail(SetupStage::Descriptor, error, &retry_setup));
-            }
-            if let Err(error) = remove_expected_descriptor(previous, descriptor) {
-                let cleanup = if published {
-                    remove_expected_descriptor(&target.identity, descriptor).err()
+                let failure = if published {
+                    setup_desktop_rollback(vec![target.identity.descriptor_path.clone()])
                 } else {
-                    None
+                    UserFailure::Ordinary(OrdinaryFailure::SetupDesktopIntegrationRetry)
                 };
-                let cause = match cleanup {
-                    Some(cleanup) => format!(
-                        "Desktop descriptor switch failed at {}: {error}; newly published descriptor at {} could not be removed safely: {cleanup}; new routing intent may remain unmanifested",
-                        previous.descriptor_path.display(),
-                        target.identity.descriptor_path.display(),
-                    ),
-                    None => format!(
-                        "Desktop descriptor switch failed at {}: {error}",
-                        previous.descriptor_path.display(),
-                    ),
-                };
-                return Err(progress.fail(SetupStage::Descriptor, cause, &retry_setup));
+                return Err(super::fail_with_diagnostic(
+                    diagnostics,
+                    SetupStage::Descriptor.diagnostic_name(),
+                    DiagnosticCause::DesktopIntegration,
+                    failure,
+                ));
+            }
+            if remove_expected_descriptor(previous, descriptor).is_err() {
+                let mut residue = vec![previous.descriptor_path.clone()];
+                if published && remove_expected_descriptor(&target.identity, descriptor).is_err() {
+                    residue.push(target.identity.descriptor_path.clone());
+                }
+                return Err(super::fail_with_diagnostic(
+                    diagnostics,
+                    SetupStage::Descriptor.diagnostic_name(),
+                    DiagnosticCause::DesktopIntegration,
+                    setup_desktop_rollback(residue),
+                ));
             }
         }
         (published, published || descriptor_path_changed)
     } else {
         (false, false)
     };
-    complete_lifecycle_stage!(
-        progress,
-        SetupStage::Descriptor,
-        context.target,
-        &retry_setup
-    );
+    complete_setup_stage(diagnostics, SetupStage::Descriptor, &context.target)?;
 
-    if let Err(error) = (|| {
+    if (|| {
         create_shared_dir(
             paths.unit.parent().ok_or(ControllerError::InvalidData {
                 field: "service_unit",
@@ -391,48 +451,37 @@ pub(super) async fn setup_with_context(
             ));
         }
         reconcile_file(&paths.unit, &preflight.unit, 0o644, paths.euid)
-    })() {
+    })()
+    .is_err()
+    {
         return Err(fail_after_descriptor_publication(
-            &mut progress,
+            diagnostics,
             SetupStage::ServiceUnit,
-            error,
-            &retry_setup,
+            DiagnosticCause::ServiceConfiguration,
+            RollbackPrimary::SetupServiceConfigurationRetry,
             desktop_intent_changed,
             &preflight,
             &context.target,
         ));
     }
-    complete_lifecycle_stage!(
-        progress,
-        SetupStage::ServiceUnit,
-        context.target,
-        &retry_setup
-    );
-    let unattached_clients = if preflight.desktop.status == DesktopAttachmentStatus::Available {
-        detect_running_unattached_clients(&context.target.client_process_source, paths.euid)
-    } else {
-        BTreeSet::new()
-    };
+    complete_setup_stage(diagnostics, SetupStage::ServiceUnit, &context.target)?;
+    let running_clients =
+        detect_running_unattached_clients(&context.target.client_process_source, paths.euid);
 
-    if let Err(error) = run_systemctl(&preflight.systemctl, ["--user", "daemon-reload"]) {
+    if run_systemctl(&preflight.systemctl, ["--user", "daemon-reload"]).is_err() {
         return Err(fail_after_descriptor_publication(
-            &mut progress,
+            diagnostics,
             SetupStage::DaemonReload,
-            error,
-            &retry_setup,
+            DiagnosticCause::ServiceConfiguration,
+            RollbackPrimary::SetupServiceConfigurationRetry,
             desktop_intent_changed,
             &preflight,
             &context.target,
         ));
     }
-    complete_lifecycle_stage!(
-        progress,
-        SetupStage::DaemonReload,
-        context.target,
-        &retry_setup
-    );
+    complete_setup_stage(diagnostics, SetupStage::DaemonReload, &context.target)?;
 
-    if let Err(error) = run_systemctl(
+    if run_systemctl(
         &preflight.systemctl,
         [
             "--user",
@@ -440,48 +489,40 @@ pub(super) async fn setup_with_context(
             "--now",
             context.target.unit_name.as_str(),
         ],
-    ) {
+    )
+    .is_err()
+    {
         return Err(fail_after_descriptor_publication(
-            &mut progress,
+            diagnostics,
             SetupStage::ServiceEnable,
-            error,
-            &retry_setup,
+            DiagnosticCause::ServiceStart,
+            RollbackPrimary::SetupServiceStartRetry,
             desktop_intent_changed,
             &preflight,
             &context.target,
         ));
     }
-    complete_lifecycle_stage!(
-        progress,
-        SetupStage::ServiceEnable,
-        context.target,
-        &retry_setup
-    );
+    complete_setup_stage(diagnostics, SetupStage::ServiceEnable, &context.target)?;
 
-    if let Err(error) = verify_setup_service(
+    if verify_setup_service(
         &preflight.systemctl,
         &context.target,
         &preflight.expected_running_version,
     )
     .await
+    .is_err()
     {
-        let update = format!("retry: {} update\n", display_command(&context));
         return Err(fail_after_descriptor_publication(
-            &mut progress,
+            diagnostics,
             SetupStage::ServiceVerify,
-            error,
-            &update,
+            DiagnosticCause::ServiceState,
+            RollbackPrimary::SetupServiceStateRetryUpdate,
             desktop_intent_changed,
             &preflight,
             &context.target,
         ));
     }
-    complete_lifecycle_stage!(
-        progress,
-        SetupStage::ServiceVerify,
-        context.target,
-        &retry_setup
-    );
+    complete_setup_stage(diagnostics, SetupStage::ServiceVerify, &context.target)?;
 
     let manifest = InstalledRelease {
         schema_version: 3,
@@ -497,79 +538,64 @@ pub(super) async fn setup_with_context(
         desktop_attachment: preflight.desktop.attachment.clone(),
     };
     let mut manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|_| {
-        progress.fail(
-            SetupStage::Manifest,
-            "cannot serialize installed release",
-            &retry_setup,
+        super::fail_with_diagnostic(
+            diagnostics,
+            SetupStage::Manifest.diagnostic_name(),
+            DiagnosticCause::Validation,
+            UserFailure::Ordinary(OrdinaryFailure::SetupInstallationFilesRetry),
         )
     })?;
     manifest_bytes.push(b'\n');
-    if let Err(error) = reconcile_file(&paths.manifest, &manifest_bytes, 0o600, paths.euid) {
-        return Err(progress.fail(SetupStage::Manifest, error, &retry_setup));
-    }
-    complete_lifecycle_stage!(progress, SetupStage::Manifest, context.target, &retry_setup);
-
-    let projection_changed = projection_changed || marketplace_changed || plugin_changed;
-    let mut stderr = progress.stderr();
-    if let Some(warning) = preflight.compatibility_warning {
-        stderr.push_str(&warning);
-        stderr.push('\n');
-    }
-    if let Some(warning) = &preflight.desktop.warning {
-        stderr.push_str(warning);
-        stderr.push('\n');
-    }
-    let mut stdout = format!(
-        "Installed release: {version}\n\
-Codex app-server service: enabled, active\n\
-Codex home: {home}\n\
-CLI attachment: available through codex-session-control codex\n\
-Desktop attachment: {desktop}\n\
-Desktop restart required: {desktop_restart}\n\
-Plugin: codex-session-control {version} at {plugin}\n\
-Durable plugin state: current\n\
-Loaded task state: {loaded}\n\
-New task required for guaranteed plugin convergence: yes\n",
-        version = context.candidate.product_version,
-        plugin = paths
-            .marketplace
-            .join("plugins/codex-session-control")
-            .display(),
-        home = paths.codex_home.display(),
-        desktop = preflight.desktop.status.receipt(),
-        desktop_restart = if desktop_intent_changed { "yes" } else { "no" },
-        loaded = if projection_changed {
-            "may_be_stale"
-        } else {
-            "not_verified"
-        },
-    );
-    if !install_bin_on_path(&context) {
-        stdout.push_str(&format!(
-            "\nNote: {} is not on PATH. Add it to PATH to use the short codex-session-control command.\n",
-            paths.home.join(".local/bin").display()
+    if reconcile_file(&paths.manifest, &manifest_bytes, 0o600, paths.euid).is_err() {
+        return Err(super::fail_with_diagnostic(
+            diagnostics,
+            SetupStage::Manifest.diagnostic_name(),
+            DiagnosticCause::Validation,
+            UserFailure::Ordinary(OrdinaryFailure::SetupInstallationFilesRetry),
         ));
     }
-    append_unattached_client_guidance(&mut stdout, &unattached_clients);
-    Ok(SetupReport { stdout, stderr })
+    complete_setup_stage(diagnostics, SetupStage::Manifest, &context.target)?;
+
+    let mut notices = Vec::new();
+    if let Some(codex) = preflight.compatibility_codex_version {
+        notices.push(UserNotice::Compatibility {
+            codex,
+            product: semver::Version::parse(&context.candidate.product_version)
+                .expect("validated candidate version is semantic"),
+        });
+    }
+    if preflight.desktop.warning.is_some() {
+        notices.push(UserNotice::DesktopLauncherUnavailable);
+    }
+    if !install_bin_on_path(&context) {
+        notices.push(UserNotice::LocalBinMissingFromPath {
+            local_bin: paths.home.join(".local/bin"),
+        });
+    }
+    let desktop = match preflight.desktop.status {
+        DesktopAttachmentStatus::Available => OutputDesktopAvailability::Available,
+        DesktopAttachmentStatus::Unavailable => OutputDesktopAvailability::Unavailable,
+        DesktopAttachmentStatus::Unverified => OutputDesktopAvailability::CouldNotVerify,
+    };
+    let success = SetupSuccess::new(
+        semver::Version::parse(&context.candidate.product_version)
+            .expect("validated candidate version is semantic"),
+        running_clients,
+        desktop,
+        desktop_intent_changed,
+        notices,
+    )
+    .expect("setup Desktop evidence forms a valid output state");
+    Ok(UserSuccess::Setup(success))
 }
 
 pub(super) async fn setup_preflight(
     context: &mut SetupContext,
-) -> Result<SetupPreflight, PreflightFailure> {
-    let fail = |cause: String, recovery: String| PreflightFailure { cause, recovery };
-    let candidate_retry = match context.desktop_launcher.as_ref() {
-        Some(launcher) => format!(
-            "retry: {} setup --desktop-launcher {}\n",
-            context.candidate.executable.display(),
-            launcher.display()
-        ),
-        None => format!("retry: {} setup\n", context.candidate.executable.display()),
-    };
+) -> Result<SetupPreflight, UserFailure> {
     let evidence = classify_selected_home_evidence(&context.target.paths);
     SelectedHomeOperation::Setup
         .require_permitted_case(evidence.case)
-        .map_err(|error| fail(error.to_string(), candidate_retry.clone()))?;
+        .map_err(|_| UserFailure::Ordinary(OrdinaryFailure::SetupInstalledStateCheckStatus))?;
     let codex = evidence
         .configuration
         .as_ref()
@@ -582,33 +608,28 @@ pub(super) async fn setup_preflight(
         })
         .map(Ok)
         .unwrap_or_else(|| resolve_codex_executable(&context.path_environment, &context.cwd))
-        .map_err(|error| fail(error.to_string(), candidate_retry.clone()))?;
+        .map_err(|_| UserFailure::Ordinary(OrdinaryFailure::SetupCliIntegrationRetry))?;
     let systemctl = resolve_named_executable(&context.path_environment, &context.cwd, "systemctl")
-        .map_err(|error| fail(error.to_string(), candidate_retry.clone()))?;
+        .map_err(|_| UserFailure::Ordinary(OrdinaryFailure::SetupServiceConfigurationRetry))?;
     let native = resolve_setup_selected_home(&mut context.target.paths, &codex)
-        .map_err(|error| fail(error.to_string(), candidate_retry.clone()))?;
+        .map_err(|_| UserFailure::Ordinary(OrdinaryFailure::SetupCliIntegrationCheckStatus))?;
     let paths = &context.target.paths;
     require_selected_home_evidence(paths, SelectedHomeOperation::Setup)
-        .map_err(|error| fail(error.to_string(), candidate_retry.clone()))?;
+        .map_err(|_| UserFailure::Ordinary(OrdinaryFailure::SetupInstalledStateCheckStatus))?;
     if !context.candidate.executable.is_absolute()
         || !context.cwd.is_absolute()
         || context.candidate.product_version.is_empty()
         || context.candidate.target != product_target()
     {
-        return Err(fail(
-            "candidate identity is invalid".to_owned(),
-            candidate_retry,
+        return Err(UserFailure::Ordinary(
+            OrdinaryFailure::SetupInstallationFilesRetry,
         ));
     }
     let (codex_version, expected_running_version) =
         read_codex_version(&codex, &paths.codex_home)
-            .map_err(|error| fail(error.to_string(), candidate_retry.clone()))?;
-    let binary = fs::read(&context.candidate.executable).map_err(|_| {
-        fail(
-            "candidate executable is unreadable".to_owned(),
-            candidate_retry.clone(),
-        )
-    })?;
+            .map_err(|_| UserFailure::Ordinary(OrdinaryFailure::SetupCliIntegrationRetry))?;
+    let binary = fs::read(&context.candidate.executable)
+        .map_err(|_| UserFailure::Ordinary(OrdinaryFailure::SetupInstallationFilesRetry))?;
     let binary_sha256 = sha256_bytes(&binary);
     let config = ProductConfig {
         schema_version: 2,
@@ -618,33 +639,29 @@ pub(super) async fn setup_preflight(
     };
     let config = toml::to_string(&config)
         .map(String::into_bytes)
-        .map_err(|_| {
-            fail(
-                "configuration cannot be rendered".to_owned(),
-                candidate_retry.clone(),
-            )
-        })?;
+        .map_err(|_| UserFailure::Ordinary(OrdinaryFailure::SetupInstallationFilesRetry))?;
     let projection = render_projection(&paths.binary, &context.candidate.product_version)
-        .map_err(|error| fail(error.to_string(), candidate_retry.clone()))?;
+        .map_err(|_| UserFailure::Ordinary(OrdinaryFailure::SetupCliIntegrationRetry))?;
     let unit = render_unit(paths, &codex)
-        .map_err(|error| fail(error.to_string(), candidate_retry.clone()))?;
+        .map_err(|_| UserFailure::Ordinary(OrdinaryFailure::SetupServiceConfigurationRetry))?;
     let unit_sha256 = sha256_bytes(&unit);
 
     validate_manifestless_setup_artifacts(context, &binary, &config, &projection, &unit, &native)?;
-    let compatibility_warning = (expected_running_version != TESTED_CODEX_VERSION).then(|| {
-        format!(
-            "Compatibility warning: Codex app-server {codex_version} has not been tested with codex-session-control {}; native results remain authoritative.",
-            context.candidate.product_version
-        )
-    });
+    let compatibility_codex_version =
+        (expected_running_version != TESTED_CODEX_VERSION).then(|| {
+            semver::Version::parse(&codex_version).unwrap_or_else(|_| {
+                semver::Version::parse(UNKNOWN_CODEX_VERSION)
+                    .expect("unknown Codex version sentinel is semantic")
+            })
+        });
     let desktop = resolve_setup_desktop(context, &evidence)
         .await
-        .map_err(|error| fail(error.to_string(), candidate_retry.clone()))?;
+        .map_err(UserFailure::Ordinary)?;
     Ok(SetupPreflight {
         codex,
         systemctl,
         expected_running_version,
-        compatibility_warning,
+        compatibility_codex_version,
         binary,
         binary_sha256,
         config,
@@ -658,22 +675,30 @@ pub(super) async fn setup_preflight(
 async fn resolve_setup_desktop(
     context: &SetupContext,
     evidence: &SelectedHomeEvidence,
-) -> Result<SetupDesktopPlan, ControllerError> {
+) -> Result<SetupDesktopPlan, OrdinaryFailure> {
     let previous = evidence
         .manifest
         .as_ref()
         .and_then(|manifest| manifest.desktop_attachment.clone());
     let availability = if let Some(launcher) = context.desktop_launcher.as_deref() {
-        probe_desktop_capability(Some(launcher), &context.desktop_environment).await?
+        probe_desktop_capability(Some(launcher), &context.desktop_environment)
+            .await
+            .map_err(|_| OrdinaryFailure::SetupDesktopIntegrationRetry)?
     } else if let Some(identity) = previous.as_ref() {
-        probe_persisted_desktop_capability(identity, &context.desktop_environment).await?
+        probe_persisted_desktop_capability(identity, &context.desktop_environment)
+            .await
+            .map_err(|_| OrdinaryFailure::SetupDesktopIntegrationRetry)?
     } else {
-        probe_desktop_capability(None, &context.desktop_environment).await?
+        probe_desktop_capability(None, &context.desktop_environment)
+            .await
+            .map_err(|_| OrdinaryFailure::SetupDesktopIntegrationRetry)?
     };
     match availability {
         DesktopAvailability::Verified(target) => {
-            let descriptor = render_descriptor(&context.target.paths.socket)?;
-            preflight_descriptor_switch(previous.as_ref(), &target.identity, &descriptor)?;
+            let descriptor = render_descriptor(&context.target.paths.socket)
+                .map_err(|_| OrdinaryFailure::SetupDesktopIntegrationRetry)?;
+            preflight_descriptor_switch(previous.as_ref(), &target.identity, &descriptor)
+                .map_err(|_| OrdinaryFailure::SetupDesktopIntegrationCheckStatus)?;
             Ok(SetupDesktopPlan {
                 attachment: Some(target.identity.clone()),
                 previous_attachment: previous,
@@ -685,14 +710,14 @@ async fn resolve_setup_desktop(
         }
         DesktopAvailability::Unavailable { warning } => {
             if let Some(identity) = previous.as_ref() {
-                let expected = render_descriptor(&context.target.paths.socket)?;
+                let expected = render_descriptor(&context.target.paths.socket)
+                    .map_err(|_| OrdinaryFailure::SetupDesktopIntegrationRetry)?;
                 if !matches!(
-                    inspect_descriptor(identity, &expected)?,
+                    inspect_descriptor(identity, &expected)
+                        .map_err(|_| OrdinaryFailure::SetupDesktopIntegrationCheckStatus)?,
                     DescriptorState::Absent | DescriptorState::Expected
                 ) {
-                    return Err(ControllerError::Operational(
-                        "Desktop descriptor is foreign".to_owned(),
-                    ));
+                    return Err(OrdinaryFailure::SetupDesktopIntegrationCheckStatus);
                 }
             }
             Ok(SetupDesktopPlan {
@@ -712,15 +737,14 @@ async fn resolve_setup_desktop(
 }
 
 fn fail_after_descriptor_publication(
-    progress: &mut SetupProgress,
+    diagnostics: &mut Diagnostics,
     stage: SetupStage,
-    cause: impl std::fmt::Display,
-    recovery: &str,
+    cause: DiagnosticCause,
+    primary: RollbackPrimary,
     descriptor_intent_changed: bool,
     preflight: &SetupPreflight,
     target: &LifecycleTarget,
-) -> ControllerError {
-    let cause = cause.to_string();
+) -> UserFailure {
     let cleanup = descriptor_intent_changed
         .then(|| {
             cleanup_changed_descriptor_after_start_failure(
@@ -731,16 +755,28 @@ fn fail_after_descriptor_publication(
             )
         })
         .transpose();
-    match cleanup {
-        Ok(_) => progress.fail(stage, cause, recovery),
-        Err(cleanup) => progress.fail(
-            stage,
-            format!(
-                "{cause}; cleanup after changed Desktop descriptor could not complete: {cleanup}; Desktop routing state is unverified"
-            ),
-            recovery,
-        ),
-    }
+    let failure = match cleanup {
+        Err(cleanup) => {
+            let residue = cleanup
+                .residue
+                .expect("changed descriptor cleanup failure has exact final residue");
+            UserFailure::RollbackIncomplete(RollbackIncomplete::new(
+                primary,
+                ManagedPaths::new(residue.into_path(), Vec::new()),
+            ))
+        }
+        Ok(_) => UserFailure::Ordinary(match primary {
+            RollbackPrimary::SetupServiceConfigurationRetry => {
+                OrdinaryFailure::SetupServiceConfigurationRetry
+            }
+            RollbackPrimary::SetupServiceStartRetry => OrdinaryFailure::SetupServiceStartRetry,
+            RollbackPrimary::SetupServiceStateRetryUpdate => {
+                OrdinaryFailure::SetupServiceStateRetryUpdate
+            }
+            _ => unreachable!("post-publication setup uses a setup service primary"),
+        }),
+    };
+    super::fail_with_diagnostic(diagnostics, stage.diagnostic_name(), cause, failure)
 }
 
 fn validate_manifestless_setup_artifacts(
@@ -750,49 +786,29 @@ fn validate_manifestless_setup_artifacts(
     projection: &RenderedProjection,
     unit: &[u8],
     native: &NativeProductState,
-) -> Result<(), PreflightFailure> {
+) -> Result<(), UserFailure> {
     let paths = &context.target.paths;
     let evidence = classify_selected_home_evidence(paths);
     if let Some(expected_manifest) = evidence.manifest.as_ref() {
+        let installed_state_failure =
+            || UserFailure::Ordinary(OrdinaryFailure::SetupInstalledStateCheckStatus);
         let manifest: InstalledRelease = serde_json::from_slice(
-            &read_product_evidence_file(&paths.home, paths.euid, &paths.manifest, 0o600).map_err(
-                |error| PreflightFailure {
-                    cause: lifecycle_file_error(&paths.manifest, error),
-                    recovery: String::new(),
-                },
-            )?,
+            &read_product_evidence_file(&paths.home, paths.euid, &paths.manifest, 0o600)
+                .map_err(|_| installed_state_failure())?,
         )
-        .map_err(|_| PreflightFailure {
-            cause: "installed manifest is invalid".to_owned(),
-            recovery: String::new(),
-        })?;
+        .map_err(|_| installed_state_failure())?;
         manifest
             .validate(&paths.codex_home, &paths.socket)
-            .map_err(|error| PreflightFailure {
-                cause: error.to_string(),
-                recovery: String::new(),
-            })?;
+            .map_err(|_| installed_state_failure())?;
         if manifest != *expected_manifest {
-            return Err(PreflightFailure {
-                cause: "installed manifest changed during validation".to_owned(),
-                recovery: String::new(),
-            });
+            return Err(installed_state_failure());
         }
         if manifest.product_version != context.candidate.product_version
             || manifest.target != context.candidate.target
         {
-            let executable = if valid_owned_executable(&paths.binary, paths.euid) {
-                paths.binary.as_path()
-            } else {
-                context.candidate.executable.as_path()
-            };
-            return Err(PreflightFailure {
-                cause: format!(
-                    "installed release {} differs from candidate {}",
-                    manifest.product_version, context.candidate.product_version
-                ),
-                recovery: format!("retry: {} update\n", executable.display()),
-            });
+            return Err(UserFailure::Ordinary(
+                OrdinaryFailure::SetupInstallationFilesRetryUpdate,
+            ));
         }
         return Ok(());
     }
@@ -841,20 +857,27 @@ fn validate_manifestless_setup_artifacts(
         && !identified_versions.contains(&context.candidate.product_version)
     {
         let version = identified_versions.into_iter().next().unwrap();
-        let recovery = if read_installed_product_version(&paths.binary, paths.euid).as_deref()
+        let failure = if read_installed_product_version(&paths.binary, paths.euid).as_deref()
             == Some(version.as_str())
         {
-            format!("retry: {} setup\n", paths.binary.display())
+            UserFailure::Ordinary(OrdinaryFailure::SetupInstalledStateRepair {
+                binary: paths.binary.clone(),
+            })
         } else {
-            format!(
-                "recovery source: https://github.com/{RELEASE_REPOSITORY}/releases/download/v{version}/codex-session-control-{}\nchecksum source: https://github.com/{RELEASE_REPOSITORY}/releases/download/v{version}/SHA256SUMS\n",
-                context.candidate.target,
-            )
+            let version = semver::Version::parse(&version).map_err(|_| {
+                UserFailure::Ordinary(OrdinaryFailure::SetupInstalledStateCheckStatus)
+            })?;
+            UserFailure::VerifiedRelease(crate::cli_output::VerifiedReleaseRecovery::new(
+                format!(
+                    "https://github.com/{RELEASE_REPOSITORY}/releases/download/v{version}/codex-session-control-{}",
+                    context.candidate.target,
+                ),
+                format!(
+                    "https://github.com/{RELEASE_REPOSITORY}/releases/download/v{version}/SHA256SUMS"
+                ),
+            ))
         };
-        return Err(PreflightFailure {
-            cause: format!("release {version} is partially installed without a manifest"),
-            recovery,
-        });
+        return Err(failure);
     }
     if identified_versions.contains(&context.candidate.product_version) && !ambiguous.is_empty() {
         ambiguous.insert("conflicting release identities".to_owned());
@@ -862,13 +885,9 @@ fn validate_manifestless_setup_artifacts(
     if ambiguous.is_empty() {
         Ok(())
     } else {
-        Err(PreflightFailure {
-            cause: format!(
-                "ambiguous manifestless release artifacts: {}",
-                ambiguous.into_iter().collect::<Vec<_>>().join(", ")
-            ),
-            recovery: String::new(),
-        })
+        Err(UserFailure::Ordinary(
+            OrdinaryFailure::SetupInstalledStateCheckStatus,
+        ))
     }
 }
 
@@ -1004,12 +1023,4 @@ fn observe_manifestless_native_artifacts(
 fn install_bin_on_path(context: &SetupContext) -> bool {
     let install_bin = context.target.paths.home.join(".local/bin");
     std::env::split_paths(&context.path_environment).any(|entry| entry == install_bin)
-}
-
-fn display_command(context: &SetupContext) -> String {
-    if install_bin_on_path(context) {
-        "codex-session-control".to_owned()
-    } else {
-        context.target.paths.binary.display().to_string()
-    }
 }

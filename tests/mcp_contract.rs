@@ -373,6 +373,7 @@ fn child_guard_captures_output_after_normal_exit() {
 fn child_guard_terminates_and_reaps_on_timeout() {
     let mut command = Command::new(cargo_bin("codex-session-control"));
     command
+        .arg("--verbose")
         .arg("mcp-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -546,6 +547,7 @@ fn public_catalog_is_exact() {
 
     let mut command = Command::new(cargo_bin("codex-session-control"));
     command
+        .arg("--verbose")
         .arg("mcp-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -576,8 +578,10 @@ fn public_catalog_is_exact() {
         "mcp-server remained after stdin EOF"
     );
 
-    let responses: Vec<Value> = String::from_utf8(output.stdout)
-        .unwrap()
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(!stdout.contains("[verbose]"));
+    assert!(!stdout.contains("Codex Session Control"));
+    let responses: Vec<Value> = stdout
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();

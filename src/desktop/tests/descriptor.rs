@@ -8,13 +8,71 @@ use crate::model::DesktopAttachmentIdentity;
 
 use super::{
     super::{
-        DESCRIPTOR_FILE_NAME, DescriptorState,
-        descriptor::{inspect_open_descriptor, open_descriptor_parent, parse_descriptor},
-        inspect_descriptor, preflight_descriptor_switch, prepare_descriptor_parent,
-        remove_expected_descriptor, render_descriptor,
+        DESCRIPTOR_FILE_NAME, DescriptorInspectionFailure, DescriptorState,
+        descriptor::{
+            DescriptorPublicationResidue, DescriptorPublicationTestPoint, inspect_open_descriptor,
+            open_descriptor_parent, parse_descriptor, publish_descriptor_with_test_point,
+        },
+        inspect_descriptor, inspect_descriptor_classified, preflight_descriptor_switch,
+        prepare_descriptor_parent, remove_expected_descriptor, render_descriptor,
     },
     write_file,
 };
+
+fn publication_identity(root: &Path, app_id: &str) -> DesktopAttachmentIdentity {
+    DesktopAttachmentIdentity {
+        launcher_path: PathBuf::from("/bin/true"),
+        app_id: app_id.to_owned(),
+        descriptor_path: root.join("config").join(app_id).join(DESCRIPTOR_FILE_NAME),
+    }
+}
+
+#[test]
+fn descriptor_publication_reports_only_exact_managed_residue() {
+    let root = crate::test_support::private_tempdir();
+    let expected = render_descriptor(Path::new("/run/user/1000/app-server.sock")).unwrap();
+
+    let before_identity = publication_identity(root.path(), "before-stage");
+    let failure_before_stage = publish_descriptor_with_test_point(
+        &before_identity,
+        &expected,
+        DescriptorPublicationTestPoint::BeforeStage,
+    )
+    .unwrap_err();
+    assert_eq!(failure_before_stage.residue, None);
+
+    let stage_identity = publication_identity(root.path(), "after-stage");
+    let unverified_stage_cleanup = publish_descriptor_with_test_point(
+        &stage_identity,
+        &expected,
+        DescriptorPublicationTestPoint::AfterStage {
+            cleanup_unverified: true,
+        },
+    )
+    .unwrap_err();
+    let stage_path = match unverified_stage_cleanup.residue {
+        Some(DescriptorPublicationResidue::Stage(path)) => path,
+        residue => panic!("expected exact stage residue, got {residue:?}"),
+    };
+    assert_eq!(stage_path.parent(), stage_identity.descriptor_path.parent());
+    assert!(stage_path.exists());
+    assert_ne!(stage_path, stage_identity.descriptor_path);
+
+    let final_identity = publication_identity(root.path(), "after-rename");
+    let post_rename_failure = publish_descriptor_with_test_point(
+        &final_identity,
+        &expected,
+        DescriptorPublicationTestPoint::AfterRename,
+    )
+    .unwrap_err();
+    assert_eq!(
+        post_rename_failure.residue,
+        Some(DescriptorPublicationResidue::Final(
+            final_identity.descriptor_path.clone()
+        ))
+    );
+    assert_eq!(fs::read(&final_identity.descriptor_path).unwrap(), expected);
+}
 
 #[test]
 fn descriptor_rendering_and_inspection_are_value_exact_and_safe() {
@@ -233,6 +291,10 @@ fn descriptor_bytes_and_open_parent_race_checks_are_exact_and_non_following() {
     assert!(
         inspect_open_descriptor(&parent, file_name, &parse_descriptor(&expected).unwrap()).is_err()
     );
+    assert!(matches!(
+        inspect_descriptor_classified(&identity, &expected),
+        Err(DescriptorInspectionFailure::Inconclusive(_))
+    ));
     fs::remove_file(&identity.descriptor_path).unwrap();
     fs::set_permissions(
         identity.descriptor_path.parent().unwrap(),
@@ -240,6 +302,10 @@ fn descriptor_bytes_and_open_parent_race_checks_are_exact_and_non_following() {
     )
     .unwrap();
     assert!(inspect_descriptor(&identity, &expected).is_err());
+    assert!(matches!(
+        inspect_descriptor_classified(&identity, &expected),
+        Err(DescriptorInspectionFailure::Fault(_))
+    ));
 }
 
 #[test]

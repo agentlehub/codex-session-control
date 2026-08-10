@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeSet,
     ffi::OsStr,
     fs,
     os::unix::{ffi::OsStrExt, fs::MetadataExt},
@@ -8,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use crate::{app_server::AppServerClient, error::ControllerError};
+use crate::{app_server::AppServerClient, cli_output::RunningClientFacts, error::ControllerError};
 
 use super::{evidence::ResolvedUserPaths, paths::validate_control_socket};
 
@@ -515,7 +514,7 @@ pub(super) async fn verify_setup_service(
 pub(super) fn detect_running_unattached_clients(
     source: &ClientProcessSource,
     euid: u32,
-) -> BTreeSet<&'static str> {
+) -> RunningClientFacts {
     let snapshot = match source {
         ClientProcessSource::ProcRoot(root) => read_client_process_snapshot(root, euid),
         #[cfg(test)]
@@ -557,15 +556,25 @@ fn read_client_process_snapshot(proc_root: &Path, euid: u32) -> Vec<(u32, Vec<u8
 pub(super) fn detect_running_unattached_clients_from_snapshot<'a>(
     euid: u32,
     snapshot: impl IntoIterator<Item = (u32, &'a [u8])>,
-) -> BTreeSet<&'static str> {
-    snapshot
-        .into_iter()
-        .filter(|(uid, _)| *uid == euid)
-        .filter_map(|(_, command_line)| classify_unattached_client(command_line))
-        .collect()
+) -> RunningClientFacts {
+    let mut facts = RunningClientFacts::default();
+    for (_, command_line) in snapshot.into_iter().filter(|(uid, _)| *uid == euid) {
+        match classify_unattached_client(command_line) {
+            Some(UnattachedClient::Cli) => facts.cli = true,
+            Some(UnattachedClient::Desktop) => facts.desktop = true,
+            None => {}
+        }
+    }
+    facts
 }
 
-pub(super) fn classify_unattached_client(command_line: &[u8]) -> Option<&'static str> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UnattachedClient {
+    Cli,
+    Desktop,
+}
+
+fn classify_unattached_client(command_line: &[u8]) -> Option<UnattachedClient> {
     let arguments: Vec<&[u8]> = command_line
         .split(|byte| *byte == 0)
         .filter(|argument| !argument.is_empty())
@@ -573,7 +582,7 @@ pub(super) fn classify_unattached_client(command_line: &[u8]) -> Option<&'static
     let executable = arguments.first()?;
     let executable = Path::new(OsStr::from_bytes(executable));
     match executable.file_name()?.as_bytes() {
-        b"codex-desktop" | b"Codex" => Some("Desktop"),
+        b"codex-desktop" | b"Codex" => Some(UnattachedClient::Desktop),
         b"codex"
             if arguments.get(1) == Some(&b"app-server".as_slice())
                 || arguments.iter().skip(1).any(|argument| {
@@ -582,25 +591,7 @@ pub(super) fn classify_unattached_client(command_line: &[u8]) -> Option<&'static
         {
             None
         }
-        b"codex" => Some("CLI"),
+        b"codex" => Some(UnattachedClient::Cli),
         _ => None,
     }
-}
-
-pub(super) fn append_unattached_client_guidance(
-    stdout: &mut String,
-    clients: &BTreeSet<&'static str>,
-) {
-    if clients.is_empty() {
-        return;
-    }
-    stdout.push_str(&format!(
-        "Unattached running clients: {}\n",
-        clients.iter().copied().collect::<Vec<_>>().join(", ")
-    ));
-    stdout.push_str(
-        "This running client was not attached or migrated.\n\
-Desktop: fully exit and restart Desktop to use the shared app-server.\n\
-CLI: exit and resume through codex-session-control codex.\n",
-    );
 }

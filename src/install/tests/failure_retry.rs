@@ -2,6 +2,36 @@ use std::{ffi::OsString, fs, os::unix::fs::PermissionsExt, path::PathBuf, sync::
 
 use super::support::{FakeAuthority, Fixture};
 use super::*;
+use crate::cli_output::{OrdinaryFailure, StopThenRetry, UserFailure};
+
+fn expected_staged_injection(stage: &str) -> UserFailure {
+    match stage {
+        "candidate-preflight" => UserFailure::Ordinary(OrdinaryFailure::UpdateChecksumRetry),
+        "service-snapshot" => UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStateCheckStatus),
+        "restart-inspection" => {
+            UserFailure::StopThenRetry(StopThenRetry::UpdateServiceStateDisableUpdateEnable)
+        }
+        "active-turn-gate" => UserFailure::Ordinary(OrdinaryFailure::UpdateActiveTasksRetry),
+        "binary" | "configuration" => {
+            UserFailure::Ordinary(OrdinaryFailure::UpdateInstallationFilesRetry)
+        }
+        "projection" | "plugin-marketplace" | "plugin-install" => {
+            UserFailure::Ordinary(OrdinaryFailure::UpdateCliIntegrationRetry)
+        }
+        "desktop-discovery" | "descriptor" => {
+            UserFailure::Ordinary(OrdinaryFailure::UpdateUnexpectedRetry)
+        }
+        "service-unit" | "daemon-reload" => {
+            UserFailure::Ordinary(OrdinaryFailure::UpdateServiceConfigurationLogs)
+        }
+        "service-apply" => UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStartLogs),
+        "service-verify" => UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStateLogs),
+        "manifest" => {
+            UserFailure::Ordinary(OrdinaryFailure::UpdateInstalledStatePostMutationCheckStatus)
+        }
+        _ => panic!("unexpected staged update injection: {stage}"),
+    }
+}
 use serde_json::json;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -123,22 +153,6 @@ fn assert_no_backups(path: &Path) {
             assert_no_backups(&entry.path());
         }
     }
-}
-
-fn assert_injected(error: &ControllerError, stage: &str, command: &str) {
-    let error = error.to_string();
-    assert!(
-        error.contains(&format!("completed: {stage}\nfailed at {stage}:")),
-        "{error}"
-    );
-    assert!(error.contains(command), "{error}");
-}
-
-fn assert_injected_before_stage(error: &ControllerError, stage: &str, command: &str) {
-    let error = error.to_string();
-    assert!(error.contains(&format!("failed at {stage}:")), "{error}");
-    assert!(!error.contains(&format!("completed: {stage}\n")), "{error}");
-    assert!(error.contains(command), "{error}");
 }
 
 fn seed_preserved_normal_home_state(fixture: &Fixture) -> Vec<(PathBuf, Vec<u8>, u32)> {
@@ -304,31 +318,11 @@ async fn checksum_transfer_failure_is_reported_at_release_download_stage() {
             .await
             .unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("failed at release-download: release-download request failed"),
-        "{error}"
+    assert_eq!(
+        error,
+        UserFailure::Ordinary(OrdinaryFailure::UpdateReleaseRetry)
     );
     server.await.unwrap();
-}
-
-#[test]
-fn release_failure_stage_uses_typed_classification_not_display_text() {
-    let download = ReleaseDownloadError::Download(ControllerError::Operational(
-        "checksum mirror rejected the binary transfer".to_owned(),
-    ));
-    let integrity = ReleaseDownloadError::Integrity(ControllerError::Operational(
-        "release payload is not trusted".to_owned(),
-    ));
-
-    assert!(download.to_string().contains("checksum"));
-    assert!(!integrity.to_string().contains("checksum"));
-    assert_eq!(
-        release_failure_stage(&download),
-        UpdateStage::ReleaseDownload
-    );
-    assert_eq!(release_failure_stage(&integrity), UpdateStage::Checksum);
 }
 
 #[test]
@@ -356,12 +350,23 @@ async fn setup_retries_after_every_completed_stage_without_rollback() {
 
         let error = setup_with_context(context).await.unwrap_err();
 
-        assert_injected(&error, stage, "retry: codex-session-control setup");
+        assert!(
+            matches!(
+                error,
+                crate::cli_output::UserFailure::Ordinary(
+                    crate::cli_output::OrdinaryFailure::SetupUnexpectedRetry
+                )
+            ),
+            "{stage}: {error:?}"
+        );
         assert_no_backups(&fixture.paths.home);
         assert_preserved_normal_home_state(&preserved);
-        let report = setup_with_context(fixture.context(true)).await.unwrap();
+        let report = setup_with_context(fixture.context(true))
+            .await
+            .unwrap()
+            .render();
         assert!(report.stdout.starts_with(&format!(
-            "Installed release: {}\n",
+            "Codex Session Control {} is ready.\n",
             env!("CARGO_PKG_VERSION")
         )));
         assert_preserved_normal_home_state(&preserved);
@@ -374,13 +379,12 @@ async fn setup_retries_after_every_completed_stage_without_rollback() {
 }
 
 #[tokio::test]
-async fn outer_update_retries_every_release_and_candidate_apply_stage() {
+async fn outer_update_retries_every_pre_spawn_release_stage() {
     for stage in [
         "release-discovery",
         "release-download",
         "checksum",
         "candidate-preflight",
-        "candidate-apply",
     ] {
         let fixture = Fixture::new();
         let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
@@ -398,7 +402,17 @@ async fn outer_update_retries_every_release_and_candidate_apply_stage() {
             .await
             .unwrap_err();
 
-        assert_injected(&error, stage, "retry: codex-session-control update");
+        assert_eq!(
+            error,
+            UserFailure::Ordinary(
+                if matches!(stage, "release-discovery" | "release-download") {
+                    OrdinaryFailure::UpdateReleaseRetry
+                } else {
+                    OrdinaryFailure::UpdateChecksumRetry
+                }
+            ),
+            "{stage}"
+        );
         assert_no_backups(&fixture.paths.home);
         let report = outer_update_with_endpoints(
             LifecycleContext {
@@ -411,21 +425,31 @@ async fn outer_update_retries_every_release_and_candidate_apply_stage() {
         )
         .await
         .unwrap();
-        assert_eq!(report.stderr, "completed: candidate-apply\n");
+        assert_eq!(
+            report,
+            UpdateExecution::PropagateCandidateExit(CandidateExit::Zero)
+        );
         assert_eq!(
             installed(&fixture.paths).product_version,
             env!("CARGO_PKG_VERSION")
         );
-        assert!(
-            status_with_context(StatusContext {
-                target: fixture.context(true).target,
-                path_environment: fixture.context(true).path_environment,
-                desktop_environment: fixture.context(true).desktop_environment,
-                cwd: fixture.context(true).cwd,
-            })
+        let mut status_diagnostics = crate::diagnostics::Diagnostics::new(
+            false,
+            crate::diagnostics::DiagnosticCommand::Status,
+        );
+        assert_eq!(
+            status_with_context(
+                StatusContext {
+                    target: fixture.context(true).target,
+                    path_environment: Some(fixture.context(true).path_environment),
+                    desktop_environment: fixture.context(true).desktop_environment,
+                    cwd: Some(fixture.context(true).cwd),
+                },
+                &mut status_diagnostics
+            )
             .await
-            .unwrap()
-            .healthy
+            .state(),
+            StatusState::Healthy,
         );
         let candidate_runs = fs::read_to_string(candidate_log).unwrap();
         assert_eq!(
@@ -433,7 +457,7 @@ async fn outer_update_retries_every_release_and_candidate_apply_stage() {
                 .lines()
                 .filter(|line| *line == "update")
                 .count(),
-            if stage == "candidate-apply" { 2 } else { 1 }
+            1
         );
         server.abort();
     }
@@ -471,7 +495,10 @@ async fn outer_update_hands_off_after_independent_codex_version_change() {
             .await
             .unwrap();
 
-    assert_eq!(report.stderr, "completed: candidate-apply\n");
+    assert_eq!(
+        report,
+        UpdateExecution::PropagateCandidateExit(CandidateExit::Zero)
+    );
     assert_eq!(
         fs::read_to_string(candidate_log).unwrap(),
         "--version\nupdate\n"
@@ -514,7 +541,7 @@ async fn staged_update_retries_every_stage_for_running_and_stopped_services() {
             .await
             .unwrap_err();
 
-            assert_injected(&error, stage, "retry: codex-session-control update");
+            assert_eq!(error, expected_staged_injection(stage), "{stage}");
             let higher_version = higher_test_release_version();
             assert_eq!(
                 installed(&fixture.paths).product_version,
@@ -531,12 +558,11 @@ async fn staged_update_retries_every_stage_for_running_and_stopped_services() {
                     .await
                     .unwrap();
             assert!(
-                report
-                    .stdout
-                    .starts_with(&format!("Installed release: {higher_version}\n"))
-                    || report
-                        .stdout
-                        .starts_with(&format!("Already current: {higher_version}\n")),
+                report.stdout.starts_with(&format!(
+                    "Codex Session Control was updated to {higher_version}.\n"
+                )) || report.stdout.starts_with(&format!(
+                    "Codex Session Control {higher_version} is already up to date.\n"
+                )),
                 "{stage}: {}",
                 report.stdout
             );
@@ -583,10 +609,9 @@ async fn active_turn_gate_failure_retries_without_a_process_handoff() {
     .await
     .unwrap_err();
 
-    assert_injected(
-        &error,
-        "active-turn-gate",
-        "retry: codex-session-control update",
+    assert_eq!(
+        error,
+        UserFailure::Ordinary(OrdinaryFailure::UpdateActiveTasksRetry)
     );
     assert_eq!(fs::read(&fixture.paths.binary).unwrap(), before_binary);
     assert_eq!(fs::read(&fixture.paths.manifest).unwrap(), before_manifest);
@@ -606,7 +631,7 @@ async fn active_turn_gate_failure_retries_without_a_process_handoff() {
     let restarted_authority = starter.await.unwrap();
 
     assert!(report.stdout.starts_with(&format!(
-        "Installed release: {}\n",
+        "Codex Session Control was updated to {}.\n",
         higher_test_release_version()
     )));
     assert_eq!(installed(&fixture.paths).codex_executable, new_codex);
@@ -643,7 +668,23 @@ async fn enable_and_disable_retry_after_each_completed_service_stage() {
                     enable_with_context(lifecycle_context_with_stage(&fixture, Some(stage)))
                         .await
                         .unwrap_err();
-                assert_injected(&error, stage, "retry: codex-session-control enable");
+                assert!(
+                    matches!(
+                        (stage, error),
+                        (
+                            "service-enable",
+                            crate::cli_output::UserFailure::StopThenRetry(
+                                crate::cli_output::StopThenRetry::EnableServiceStateStopThenEnable
+                            )
+                        ) | (
+                            "service-verify",
+                            crate::cli_output::UserFailure::Ordinary(
+                                crate::cli_output::OrdinaryFailure::EnableUnexpectedCheckStatus
+                            )
+                        )
+                    ),
+                    "{stage}"
+                );
                 enable_with_context(lifecycle_context_with_stage(&fixture, None))
                     .await
                     .unwrap();
@@ -656,7 +697,21 @@ async fn enable_and_disable_retry_after_each_completed_service_stage() {
                     disable_with_context(lifecycle_context_with_stage(&fixture, Some(stage)))
                         .await
                         .unwrap_err();
-                assert_injected(&error, stage, "retry: codex-session-control disable");
+                assert!(
+                    matches!(
+                        (stage, error),
+                        (
+                            "service-disable",
+                            crate::cli_output::UserFailure::StopThenRetry(
+                                crate::cli_output::StopThenRetry::DisableServiceStopThenDisable
+                            )
+                        ) | (
+                            "service-verify",
+                            crate::cli_output::UserFailure::PartialDisable(_)
+                        )
+                    ),
+                    "{stage}"
+                );
                 disable_with_context(lifecycle_context_with_stage(&fixture, None))
                     .await
                     .unwrap();
@@ -680,20 +735,42 @@ async fn uninstall_retries_while_a_valid_identity_survives() {
             .await
             .unwrap_err();
 
-        if matches!(stage, "manifest-remove" | "binary-remove") {
-            assert_injected_before_stage(&error, stage, "retry: codex-session-control uninstall");
+        if stage == "service-stop" {
+            assert_eq!(
+                error,
+                crate::cli_output::UserFailure::StopThenRetry(
+                    crate::cli_output::StopThenRetry::UninstallServiceStateStopThenUninstall
+                )
+            );
+        } else if stage == "manifest-remove" {
+            assert!(matches!(
+                error,
+                crate::cli_output::UserFailure::RollbackIncomplete(_)
+            ));
+            assert!(
+                error
+                    .render()
+                    .stderr
+                    .contains(&fixture.paths.manifest.display().to_string())
+            );
         } else {
-            assert_injected(&error, stage, "retry: codex-session-control uninstall");
+            assert_eq!(
+                error,
+                crate::cli_output::UserFailure::Ordinary(
+                    crate::cli_output::OrdinaryFailure::UninstallUnexpectedRetry
+                )
+            );
         }
         assert!(fixture.paths.manifest.exists(), "{stage}");
         assert!(fixture.paths.binary.exists(), "{stage}");
         assert_no_backups(&fixture.paths.home);
         let report = uninstall_with_context(lifecycle_context_with_stage(&fixture, None))
             .await
-            .unwrap();
+            .unwrap()
+            .render();
         assert_eq!(
             report.stdout.lines().next(),
-            Some("Codex app-server service: removed")
+            Some("Codex Session Control was uninstalled.")
         );
         for removed in [
             &fixture.paths.unit,
@@ -721,10 +798,11 @@ async fn uninstall_retry_crosses_the_exact_missing_managed_unit_boundary() {
     .await
     .unwrap_err();
 
-    assert_injected(
-        &error,
-        "service-unit-remove",
-        "retry: codex-session-control uninstall",
+    assert_eq!(
+        error,
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::UninstallUnexpectedRetry
+        )
     );
     assert!(!fixture.paths.unit.exists());
     assert!(fixture.paths.config.exists());
@@ -734,11 +812,12 @@ async fn uninstall_retry_crosses_the_exact_missing_managed_unit_boundary() {
 
     let report = uninstall_with_context(lifecycle_context_with_stage(&fixture, None))
         .await
-        .unwrap();
+        .unwrap()
+        .render();
 
     assert_eq!(
         report.stdout.lines().next(),
-        Some("Codex app-server service: removed")
+        Some("Codex Session Control was uninstalled.")
     );
     assert!(!fixture.paths.config.exists());
     assert!(!fixture.paths.manifest.exists());
@@ -818,8 +897,14 @@ async fn missing_unit_retry_rejects_every_unproven_service_boundary() {
             .unwrap_err();
 
         assert!(
-            error.to_string().contains("failed at service-stop:"),
-            "{state}: {error}"
+            matches!(
+                error,
+                crate::cli_output::UserFailure::StopThenRetry(
+                    crate::cli_output::StopThenRetry::UninstallUnsafeStopThenUninstall
+                        | crate::cli_output::StopThenRetry::UninstallServiceStateStopThenUninstall
+                )
+            ),
+            "{state}: {error:?}"
         );
         assert!(fixture.paths.config.exists(), "{state}");
         assert!(fixture.paths.manifest.exists(), "{state}");
@@ -841,16 +926,23 @@ async fn binary_remove_failure_reports_terminal_partial_without_a_retry_or_full_
         .unwrap_err();
 
     fs::set_permissions(binary_parent, fs::Permissions::from_mode(0o700)).unwrap();
-    let error = error.to_string();
-    assert!(error.contains("failed at binary-remove: terminal partial uninstall:"));
-    assert!(error.contains(&format!(
-        "remaining product executable: {}",
-        fixture.paths.binary.display()
-    )));
-    assert!(error.contains("installed identity was removed; no fresh-process retry is available"));
-    assert!(!error.contains("retry:"));
-    assert!(!error.contains("Codex app-server service: removed"));
-    assert!(!error.contains("Codex home preserved:"));
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::TerminalPartialUninstall(_)
+    ));
+    let rendered = error.render();
+    assert!(
+        rendered
+            .stderr
+            .contains(&fixture.paths.binary.display().to_string())
+    );
+    assert!(
+        rendered
+            .stderr
+            .contains("Do not rerun `codex-session-control uninstall`")
+    );
+    assert!(!rendered.stderr.contains("Try again:"));
+    assert!(rendered.stdout.is_empty());
     assert!(!fixture.paths.config.exists());
     assert!(!fixture.paths.manifest.exists());
     assert!(!fixture.paths.data_root.exists());

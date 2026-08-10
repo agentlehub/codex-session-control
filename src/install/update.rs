@@ -9,17 +9,21 @@ use std::{
 
 use crate::{
     app_server::{AppServerClient, TESTED_CODEX_VERSION},
+    cli_output::{
+        IndependentTerminal, ManagedPaths, OrdinaryFailure, RollbackIncomplete, RollbackPrimary,
+        StopThenRetry, UpdateState, UpdateSuccess, UserFailure, UserNotice, UserSuccess,
+    },
     desktop::{
-        DescriptorState, DesktopAvailability, inspect_descriptor,
+        DescriptorPublicationFailure, DescriptorState, DesktopAvailability, inspect_descriptor,
         probe_persisted_desktop_capability, publish_descriptor, render_descriptor,
     },
+    diagnostics::{DiagnosticEvent, Diagnostics},
     error::ControllerError,
     model::{InstalledRelease, ProductConfig, Thread, ThreadStatus},
 };
 
 use super::{
-    CandidateRelease, DesktopAttachmentStatus, LifecycleContext, LifecycleReceipt,
-    display_command_for_paths,
+    CandidateRelease, LifecycleContext,
     evidence::{ResolvedUserPaths, SelectedHomeOperation, require_selected_home_evidence},
     native::{
         read_codex_version, reconcile_marketplace, reconcile_plugin, resolve_named_executable,
@@ -35,9 +39,9 @@ use super::{
     },
     render::{reconcile_projection, render_projection, render_unit},
     service::{
-        CallerUnitEvidence, CallerUnitInspection, LifecycleTarget, ServiceActivity,
-        ServiceEnablement, inspect_caller_unit, query_service_activity, query_service_enablement,
-        run_systemctl, verify_disabled_service, verify_enabled_service,
+        CallerUnitInspection, LifecycleTarget, ServiceActivity, ServiceEnablement,
+        inspect_caller_unit, query_service_activity, query_service_enablement, run_systemctl,
+        verify_disabled_service, verify_enabled_service,
     },
     sha256_bytes,
     status::{StatusContext, status_with_context},
@@ -56,6 +60,14 @@ pub(super) struct TerminalState {
 pub(super) struct ScriptedRestartPrompt {
     responses: std::sync::Mutex<std::collections::VecDeque<String>>,
     output: std::sync::Mutex<String>,
+    failure: Option<RestartPromptTestFailure>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RestartPromptTestFailure {
+    Write,
+    Read,
 }
 
 #[cfg(test)]
@@ -77,14 +89,66 @@ pub(super) struct UpdateContext {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum UpdateStage {
+pub(super) enum ActiveTurnGateFailure {
+    Inspection,
+    InteractiveRequired,
+    Cancelled,
+}
+
+impl std::fmt::Display for ActiveTurnGateFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Inspection => "active task inspection failed",
+            Self::InteractiveRequired => "active tasks require interactive restart approval",
+            Self::Cancelled => "active task restart approval declined",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CandidateApplyResult {
+    Exit0,
+    Exit1,
+    SpawnFailed,
+    CompletionUnknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CandidateExit {
+    Zero,
+    One,
+}
+
+impl CandidateExit {
+    pub(crate) fn code(self) -> u8 {
+        match self {
+            Self::Zero => 0,
+            Self::One => 1,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum UpdateExecution {
+    Render(UserSuccess),
+    PropagateCandidateExit(CandidateExit),
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CandidateWaitHook {
+    Real,
+    FailAfterSuccessfulSpawn,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UpdateStage {
     ReleaseDiscovery,
     ReleaseDownload,
     Checksum,
     CandidatePreflight,
     ServiceSnapshot,
     RestartInspection,
-    CandidateApply,
     ActiveTurnGate,
     Binary,
     Configuration,
@@ -100,15 +164,47 @@ pub(super) enum UpdateStage {
     Manifest,
 }
 
-pub(super) fn release_failure_stage(error: &ReleaseDownloadError) -> UpdateStage {
-    match error {
-        ReleaseDownloadError::Download(_) => UpdateStage::ReleaseDownload,
-        ReleaseDownloadError::Integrity(_) => UpdateStage::Checksum,
-    }
-}
-
 impl UpdateStage {
-    const fn name(self) -> &'static str {
+    const fn diagnostic_name(self) -> &'static str {
+        match self {
+            Self::ReleaseDiscovery
+            | Self::ReleaseDownload
+            | Self::Checksum
+            | Self::CandidatePreflight
+            | Self::ServiceSnapshot
+            | Self::RestartInspection
+            | Self::ActiveTurnGate => "preflight",
+            Self::Binary => "binary",
+            Self::Configuration => "configuration",
+            Self::Projection => "projection",
+            Self::PluginMarketplace => "plugin-marketplace",
+            Self::PluginInstall => "plugin-install",
+            Self::DesktopDiscovery => "desktop-discovery",
+            Self::Descriptor => "descriptor",
+            Self::ServiceUnit => "service-unit",
+            Self::DaemonReload => "daemon-reload",
+            Self::ServiceApply => "service-enable",
+            Self::ServiceVerify => "service-verify",
+            Self::Manifest => "manifest",
+        }
+    }
+
+    const fn records_completion(self) -> bool {
+        !matches!(
+            self,
+            Self::ReleaseDiscovery
+                | Self::ReleaseDownload
+                | Self::Checksum
+                | Self::CandidatePreflight
+                | Self::ServiceSnapshot
+                | Self::RestartInspection
+                | Self::ActiveTurnGate
+                | Self::ServiceApply
+        )
+    }
+
+    #[cfg(test)]
+    const fn test_hook_name(self) -> &'static str {
         match self {
             Self::ReleaseDiscovery => "release-discovery",
             Self::ReleaseDownload => "release-download",
@@ -116,7 +212,6 @@ impl UpdateStage {
             Self::CandidatePreflight => "candidate-preflight",
             Self::ServiceSnapshot => "service-snapshot",
             Self::RestartInspection => "restart-inspection",
-            Self::CandidateApply => "candidate-apply",
             Self::ActiveTurnGate => "active-turn-gate",
             Self::Binary => "binary",
             Self::Configuration => "configuration",
@@ -134,34 +229,55 @@ impl UpdateStage {
     }
 }
 
-#[derive(Default)]
-pub(super) struct UpdateProgress {
-    completed: Vec<UpdateStage>,
+fn complete_update_stage(
+    diagnostics: &mut Diagnostics,
+    stage: UpdateStage,
+    _target: &LifecycleTarget,
+    injected_failure: UserFailure,
+) -> Result<(), UserFailure> {
+    if stage.records_completion() {
+        diagnostics.completed(stage.diagnostic_name());
+    }
+    #[cfg(test)]
+    if _target.test_hooks.fail_after_completed_stage == Some(stage.test_hook_name()) {
+        return Err(super::fail_with_diagnostic(
+            diagnostics,
+            stage.diagnostic_name(),
+            crate::diagnostics::DiagnosticCause::Unexpected,
+            injected_failure,
+        ));
+    }
+    #[cfg(not(test))]
+    let _ = injected_failure;
+    Ok(())
 }
 
-impl UpdateProgress {
-    fn complete(&mut self, stage: UpdateStage) {
-        self.completed.push(stage);
+pub(super) fn active_turn_gate_failure(failure: ActiveTurnGateFailure) -> UserFailure {
+    match failure {
+        ActiveTurnGateFailure::Inspection => {
+            UserFailure::Ordinary(OrdinaryFailure::UpdateActiveTasksRetry)
+        }
+        ActiveTurnGateFailure::InteractiveRequired => UserFailure::InteractiveTerminal,
+        ActiveTurnGateFailure::Cancelled => UserFailure::Cancellation,
     }
+}
 
-    fn stderr(&self) -> String {
-        self.completed
-            .iter()
-            .map(|stage| format!("completed: {}\n", stage.name()))
-            .collect()
-    }
+pub(super) fn update_cli_reconciliation_failure(error: &ControllerError) -> UserFailure {
+    UserFailure::Ordinary(match error {
+        ControllerError::InvalidData { .. } => OrdinaryFailure::UpdateCliIntegrationCheckStatus,
+        ControllerError::Operational(_) => OrdinaryFailure::UpdateCliIntegrationRetry,
+    })
+}
 
-    fn fail(
-        &self,
-        stage: UpdateStage,
-        cause: impl std::fmt::Display,
-        recovery: &str,
-    ) -> ControllerError {
-        ControllerError::Operational(format!(
-            "{}failed at {}: {cause}\n{recovery}",
-            self.stderr(),
-            stage.name()
-        ))
+pub(super) fn update_descriptor_publication_failure(
+    failure: DescriptorPublicationFailure,
+) -> UserFailure {
+    match failure.residue {
+        None => UserFailure::Ordinary(OrdinaryFailure::UpdateDesktopIntegrationRetry),
+        Some(residue) => UserFailure::RollbackIncomplete(RollbackIncomplete::new(
+            RollbackPrimary::UpdateDesktopRetry,
+            ManagedPaths::new(residue.into_path(), Vec::new()),
+        )),
     }
 }
 
@@ -170,16 +286,6 @@ pub(super) enum RestartReason {
     RunningCodexVersion,
     CodexExecutablePath,
     ServiceUnit,
-}
-
-impl RestartReason {
-    const fn message(self) -> &'static str {
-        match self {
-            Self::RunningCodexVersion => "running Codex version differs",
-            Self::CodexExecutablePath => "resolved Codex executable path differs",
-            Self::ServiceUnit => "rendered systemd unit differs",
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -204,54 +310,18 @@ pub(super) struct ServiceSnapshot {
     active: bool,
 }
 
-fn restart_reason_summary(reasons: &[RestartReason]) -> String {
-    reasons
-        .iter()
-        .map(|reason| reason.message())
-        .collect::<Vec<_>>()
-        .join("; ")
-}
-
-fn self_hosted_update_refusal(reasons: &[RestartReason], display_command: &str) -> String {
-    format!(
-        "update requires restarting the managed app-server because {}. This command is running inside the managed app-server; run from an independent terminal: {display_command} update.\n",
-        restart_reason_summary(reasons)
-    )
-}
-
-fn unproven_update_caller_refusal(reasons: &[RestartReason], display_command: &str) -> String {
-    format!(
-        "update requires restarting the managed app-server because {}. A working systemctl --user whoami is required to prove this command is independent; repair or upgrade the systemd user environment, then run from an independent terminal: {display_command} update.\n",
-        restart_reason_summary(reasons)
-    )
-}
-
-fn guard_restart_required_update(
+fn guard_restart_required_update_typed(
     systemctl: &Path,
     lifecycle: &LifecycleContext,
     snapshot: ServiceSnapshot,
     restart: &RestartInspection,
-    display_command: &str,
-    progress: &UpdateProgress,
-) -> Result<(), ControllerError> {
-    if snapshot.active
-        && let Some(reasons) = restart.reasons()
-    {
+) -> Result<(), UserFailure> {
+    if snapshot.active && restart.reasons().is_some() {
         match inspect_caller_unit(systemctl, &lifecycle.target) {
             CallerUnitInspection::Independent => {}
-            CallerUnitInspection::SelfHosted(CallerUnitEvidence::WhoAmI) => {
-                return Err(progress.fail(
-                    UpdateStage::RestartInspection,
-                    self_hosted_update_refusal(reasons, display_command),
-                    "",
-                ));
-            }
-            CallerUnitInspection::SelfHosted(CallerUnitEvidence::ControlGroup)
-            | CallerUnitInspection::Unknown { .. } => {
-                return Err(progress.fail(
-                    UpdateStage::RestartInspection,
-                    unproven_update_caller_refusal(reasons, display_command),
-                    "",
+            CallerUnitInspection::SelfHosted(_) | CallerUnitInspection::Unknown { .. } => {
+                return Err(UserFailure::IndependentTerminal(
+                    IndependentTerminal::Update,
                 ));
             }
         }
@@ -285,6 +355,26 @@ impl TerminalState {
                 responses.into_iter().map(ToOwned::to_owned).collect(),
             ),
             output: std::sync::Mutex::new(String::new()),
+            failure: None,
+        }));
+        (
+            Self {
+                stdin: true,
+                stderr: true,
+                restart_prompt: Some(prompt),
+            },
+            RestartPromptCapture(prompt),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn scripted_prompt_failure(
+        failure: RestartPromptTestFailure,
+    ) -> (Self, RestartPromptCapture) {
+        let prompt = Box::leak(Box::new(ScriptedRestartPrompt {
+            responses: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            output: std::sync::Mutex::new(String::new()),
+            failure: Some(failure),
         }));
         (
             Self {
@@ -302,170 +392,299 @@ const STAGED_UPDATE_ENV: &str = "CODEX_SESSION_CONTROL_STAGED_UPDATE";
 pub(crate) async fn update(
     target: LifecycleTarget,
     staged: bool,
-) -> Result<LifecycleReceipt, ControllerError> {
-    let lifecycle = super::lifecycle_context(target)?;
+    verbose: bool,
+    diagnostics: &mut Diagnostics,
+) -> Result<UpdateExecution, UserFailure> {
+    use crate::diagnostics::{DiagnosticCause, UpdatePhase};
+
+    let lifecycle = super::lifecycle_context(target).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
+            DiagnosticCause::Unexpected,
+            UserFailure::Ordinary(OrdinaryFailure::UpdateUnexpectedRetry),
+        )
+    })?;
     if staged {
+        diagnostics.set_phase(UpdatePhase::Apply);
+        diagnostics.emit(DiagnosticEvent::StagedMarkerAccepted);
         let current = std::env::current_exe().map_err(|_| {
-            ControllerError::Operational(
-                "candidate-preflight cannot resolve current executable".to_owned(),
+            super::fail_with_diagnostic(
+                diagnostics,
+                UpdateStage::CandidatePreflight.diagnostic_name(),
+                DiagnosticCause::Unexpected,
+                UserFailure::Ordinary(OrdinaryFailure::UpdateUnexpectedRetry),
             )
         })?;
         if current == lifecycle.target.paths.binary {
-            return Err(ControllerError::Operational(
-                "candidate-preflight rejected staged marker on installed executable".to_owned(),
+            return Err(super::fail_with_diagnostic(
+                diagnostics,
+                UpdateStage::CandidatePreflight.diagnostic_name(),
+                DiagnosticCause::Unexpected,
+                UserFailure::Ordinary(OrdinaryFailure::UpdateUnexpectedRetry),
             ));
         }
-        return staged_update_with_context(UpdateContext {
-            lifecycle,
-            candidate: current,
-            terminal: TerminalState::production(),
-        })
-        .await;
+        return staged_update_with_context_and_diagnostics(
+            UpdateContext {
+                lifecycle,
+                candidate: current,
+                terminal: TerminalState::production(),
+            },
+            diagnostics,
+        )
+        .await
+        .map(UpdateExecution::Render);
     }
-    outer_update(lifecycle).await
+    diagnostics.set_phase(UpdatePhase::Outer);
+    outer_update(lifecycle, verbose, diagnostics).await
 }
 
-async fn outer_update(lifecycle: LifecycleContext) -> Result<LifecycleReceipt, ControllerError> {
-    outer_update_with_endpoints(lifecycle, production_release_endpoints()).await
+async fn outer_update(
+    lifecycle: LifecycleContext,
+    verbose: bool,
+    diagnostics: &mut Diagnostics,
+) -> Result<UpdateExecution, UserFailure> {
+    outer_update_with_endpoints_and_diagnostics(
+        lifecycle,
+        production_release_endpoints(),
+        verbose,
+        diagnostics,
+    )
+    .await
 }
 
+#[cfg(test)]
 pub(super) async fn outer_update_with_endpoints(
     lifecycle: LifecycleContext,
     endpoints: ReleaseEndpoints,
-) -> Result<LifecycleReceipt, ControllerError> {
-    let mut progress = UpdateProgress::default();
+) -> Result<UpdateExecution, UserFailure> {
+    let mut diagnostics = Diagnostics::new(false, crate::diagnostics::DiagnosticCommand::Update);
+    diagnostics.set_phase(crate::diagnostics::UpdatePhase::Outer);
+    outer_update_with_endpoints_and_diagnostics(lifecycle, endpoints, false, &mut diagnostics).await
+}
+
+pub(super) async fn outer_update_with_endpoints_and_diagnostics(
+    lifecycle: LifecycleContext,
+    endpoints: ReleaseEndpoints,
+    verbose: bool,
+    diagnostics: &mut Diagnostics,
+) -> Result<UpdateExecution, UserFailure> {
+    use crate::diagnostics::DiagnosticCause;
+
     let paths = &lifecycle.target.paths;
-    let display_command = display_command_for_paths(paths, &lifecycle.path_environment);
-    let retry = format!("retry: {display_command} update\n");
-    load_update_manifest(paths)
-        .map_err(|error| progress.fail(UpdateStage::CandidatePreflight, error, &retry))?;
-    let target = release_target_for_arch(std::env::consts::ARCH)
-        .map_err(|error| progress.fail(UpdateStage::ReleaseDiscovery, error, &retry))?;
-    let client = build_release_client()
-        .map_err(|error| progress.fail(UpdateStage::ReleaseDiscovery, error, &retry))?;
+    load_update_manifest(paths).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
+            DiagnosticCause::Validation,
+            UserFailure::Ordinary(OrdinaryFailure::UpdateInstalledStateCheckStatus),
+        )
+    })?;
+    let release_failure = || UserFailure::Ordinary(OrdinaryFailure::UpdateReleaseRetry);
+    let checksum_failure = || UserFailure::Ordinary(OrdinaryFailure::UpdateChecksumRetry);
+    let target = release_target_for_arch(std::env::consts::ARCH).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::ReleaseDiscovery.diagnostic_name(),
+            DiagnosticCause::ReleaseDownload,
+            release_failure(),
+        )
+    })?;
+    let client = build_release_client().map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::ReleaseDiscovery.diagnostic_name(),
+            DiagnosticCause::ReleaseDownload,
+            release_failure(),
+        )
+    })?;
     let release = discover_latest_release(&client, &endpoints, target)
         .await
-        .map_err(|error| progress.fail(UpdateStage::ReleaseDiscovery, error, &retry))?;
-    complete_lifecycle_stage!(
-        progress,
+        .map_err(|_| {
+            super::fail_with_diagnostic(
+                diagnostics,
+                UpdateStage::ReleaseDiscovery.diagnostic_name(),
+                DiagnosticCause::ReleaseDownload,
+                release_failure(),
+            )
+        })?;
+    complete_update_stage(
+        diagnostics,
         UpdateStage::ReleaseDiscovery,
-        lifecycle.target,
-        &retry
-    );
+        &lifecycle.target,
+        release_failure(),
+    )?;
 
     let directory = tempfile::tempdir().map_err(|_| {
-        progress.fail(
-            UpdateStage::ReleaseDownload,
-            "private release directory cannot be created",
-            &retry,
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::ReleaseDownload.diagnostic_name(),
+            DiagnosticCause::ReleaseDownload,
+            release_failure(),
         )
     })?;
     let downloaded = download_verified_release(&client, &release, directory.path())
         .await
         .map_err(|error| {
-            let stage = release_failure_stage(&error);
-            progress.fail(stage, error.into_controller_error(), &retry)
+            let (stage, cause, failure) = match &error {
+                ReleaseDownloadError::Download(_) => (
+                    UpdateStage::ReleaseDownload,
+                    DiagnosticCause::ReleaseDownload,
+                    release_failure(),
+                ),
+                ReleaseDownloadError::Integrity(_) => (
+                    UpdateStage::Checksum,
+                    DiagnosticCause::Checksum,
+                    UserFailure::Ordinary(OrdinaryFailure::UpdateChecksumRetry),
+                ),
+            };
+            super::fail_with_diagnostic(diagnostics, stage.diagnostic_name(), cause, failure)
         })?;
-    complete_lifecycle_stage!(
-        progress,
+    complete_update_stage(
+        diagnostics,
         UpdateStage::ReleaseDownload,
-        lifecycle.target,
-        &retry
-    );
-    complete_lifecycle_stage!(progress, UpdateStage::Checksum, lifecycle.target, &retry);
+        &lifecycle.target,
+        release_failure(),
+    )?;
+    complete_update_stage(
+        diagnostics,
+        UpdateStage::Checksum,
+        &lifecycle.target,
+        checksum_failure(),
+    )?;
     fs::set_permissions(&downloaded.binary_path, fs::Permissions::from_mode(0o700)).map_err(
         |_| {
-            progress.fail(
-                UpdateStage::CandidatePreflight,
-                "candidate executable mode cannot be set",
-                &retry,
+            super::fail_with_diagnostic(
+                diagnostics,
+                UpdateStage::CandidatePreflight.diagnostic_name(),
+                DiagnosticCause::Checksum,
+                checksum_failure(),
             )
         },
     )?;
-    let candidate = inspect_candidate(&downloaded.binary_path)
-        .map_err(|error| progress.fail(UpdateStage::CandidatePreflight, error, &retry))?;
+    let candidate = inspect_candidate(&downloaded.binary_path).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
+            DiagnosticCause::Checksum,
+            checksum_failure(),
+        )
+    })?;
     if candidate.product_version != release.version.to_string()
         || candidate.target != release.target
     {
-        return Err(progress.fail(
-            UpdateStage::CandidatePreflight,
-            "candidate identity differs from immutable release metadata",
-            &retry,
+        return Err(super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
+            DiagnosticCause::Checksum,
+            checksum_failure(),
         ));
     }
-    complete_lifecycle_stage!(
-        progress,
+    diagnostics.emit(DiagnosticEvent::CandidateVerified {
+        version: release.version,
+    });
+    complete_update_stage(
+        diagnostics,
         UpdateStage::CandidatePreflight,
-        lifecycle.target,
-        &retry
-    );
+        &lifecycle.target,
+        checksum_failure(),
+    )?;
 
-    outer_restart_preflight(&lifecycle, &candidate, &mut progress, &retry).await?;
-    eprint!("{}", progress.stderr());
-    run_candidate_apply(&candidate).map_err(|error| {
-        ControllerError::Operational(format!("failed at candidate-apply: {error}\n{retry}"))
-    })?;
-    complete_lifecycle_stage!(
-        progress,
-        UpdateStage::CandidateApply,
-        lifecycle.target,
-        &retry
-    );
-    Ok(LifecycleReceipt {
-        stdout: String::new(),
-        stderr: "completed: candidate-apply\n".to_owned(),
-    })
+    outer_restart_preflight(&lifecycle, &candidate, diagnostics).await?;
+    let exit = run_outer_candidate(&candidate, verbose, diagnostics)?;
+    Ok(UpdateExecution::PropagateCandidateExit(exit))
 }
 
 async fn outer_restart_preflight(
     lifecycle: &LifecycleContext,
     candidate: &CandidateRelease,
-    progress: &mut UpdateProgress,
-    retry: &str,
-) -> Result<(), ControllerError> {
+    diagnostics: &mut Diagnostics,
+) -> Result<(), UserFailure> {
+    use crate::diagnostics::DiagnosticCause;
+
     let paths = &lifecycle.target.paths;
-    let manifest = load_update_manifest(paths)
-        .map_err(|error| progress.fail(UpdateStage::CandidatePreflight, error, retry))?;
+    let manifest = load_update_manifest(paths).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
+            DiagnosticCause::Validation,
+            UserFailure::Ordinary(OrdinaryFailure::UpdateInstalledStateCheckStatus),
+        )
+    })?;
     let installed = semver::Version::parse(&manifest.product_version).map_err(|_| {
-        progress.fail(
-            UpdateStage::CandidatePreflight,
-            "installed manifest version is invalid",
-            retry,
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
+            DiagnosticCause::Validation,
+            UserFailure::Ordinary(OrdinaryFailure::UpdateInstalledStateCheckStatus),
         )
     })?;
     let candidate_version = semver::Version::parse(&candidate.product_version).map_err(|_| {
-        progress.fail(
-            UpdateStage::CandidatePreflight,
-            "candidate semantic version is invalid",
-            retry,
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
+            DiagnosticCause::Checksum,
+            UserFailure::Ordinary(OrdinaryFailure::UpdateChecksumRetry),
         )
     })?;
     if candidate_version < installed {
-        return Err(progress.fail(
-            UpdateStage::CandidatePreflight,
-            "candidate version is lower than installed release",
-            retry,
+        return Err(super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
+            DiagnosticCause::Checksum,
+            UserFailure::Ordinary(OrdinaryFailure::UpdateChecksumRetry),
         ));
     }
-    let codex = resolve_codex_executable(&lifecycle.path_environment, &lifecycle.cwd)
-        .map_err(|error| progress.fail(UpdateStage::RestartInspection, error, retry))?;
-    let (_, expected_running_version) = read_codex_version(&codex, &paths.codex_home)
-        .map_err(|error| progress.fail(UpdateStage::RestartInspection, error, retry))?;
-    let desired_unit_sha256 = sha256_bytes(
-        &render_unit(paths, &codex)
-            .map_err(|error| progress.fail(UpdateStage::RestartInspection, error, retry))?,
-    );
+    let codex =
+        resolve_codex_executable(&lifecycle.path_environment, &lifecycle.cwd).map_err(|_| {
+            super::fail_with_diagnostic(
+                diagnostics,
+                UpdateStage::RestartInspection.diagnostic_name(),
+                DiagnosticCause::CliIntegration,
+                UserFailure::Ordinary(OrdinaryFailure::UpdateCliIntegrationRetry),
+            )
+        })?;
+    let (_, expected_running_version) =
+        read_codex_version(&codex, &paths.codex_home).map_err(|_| {
+            super::fail_with_diagnostic(
+                diagnostics,
+                UpdateStage::RestartInspection.diagnostic_name(),
+                DiagnosticCause::CliIntegration,
+                UserFailure::Ordinary(OrdinaryFailure::UpdateCliIntegrationRetry),
+            )
+        })?;
+    let desired_unit_sha256 = sha256_bytes(&render_unit(paths, &codex).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::RestartInspection.diagnostic_name(),
+            DiagnosticCause::ServiceConfiguration,
+            UserFailure::Ordinary(OrdinaryFailure::UpdateServiceConfigurationRetry),
+        )
+    })?);
     let systemctl =
         resolve_named_executable(&lifecycle.path_environment, &lifecycle.cwd, "systemctl")
-            .map_err(|error| progress.fail(UpdateStage::ServiceSnapshot, error, retry))?;
-    let snapshot = service_snapshot(&systemctl, &lifecycle.target)
-        .map_err(|error| progress.fail(UpdateStage::ServiceSnapshot, error, retry))?;
-    complete_lifecycle_stage!(
-        progress,
+            .map_err(|_| {
+                super::fail_with_diagnostic(
+                    diagnostics,
+                    UpdateStage::ServiceSnapshot.diagnostic_name(),
+                    DiagnosticCause::ServiceState,
+                    UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStateCheckStatus),
+                )
+            })?;
+    let snapshot = service_snapshot(&systemctl, &lifecycle.target).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::ServiceSnapshot.diagnostic_name(),
+            DiagnosticCause::ServiceState,
+            UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStateCheckStatus),
+        )
+    })?;
+    complete_update_stage(
+        diagnostics,
         UpdateStage::ServiceSnapshot,
-        lifecycle.target,
-        retry
-    );
+        &lifecycle.target,
+        UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStateCheckStatus),
+    )?;
     let restart = inspect_restart(
         paths,
         &manifest,
@@ -475,95 +694,147 @@ async fn outer_restart_preflight(
         &desired_unit_sha256,
     )
     .await;
-    if let RestartInspection::Unknown { evidence } = &restart {
-        return Err(progress.fail(UpdateStage::RestartInspection, evidence, retry));
+    if matches!(restart, RestartInspection::Unknown { .. }) {
+        return Err(super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::RestartInspection.diagnostic_name(),
+            DiagnosticCause::ServiceState,
+            UserFailure::StopThenRetry(StopThenRetry::UpdateServiceStateDisableUpdateEnable),
+        ));
     }
-    let display_command = display_command_for_paths(paths, &lifecycle.path_environment);
-    guard_restart_required_update(
-        &systemctl,
-        lifecycle,
-        snapshot,
-        &restart,
-        &display_command,
-        progress,
+    guard_restart_required_update_typed(&systemctl, lifecycle, snapshot, &restart).map_err(
+        |failure| {
+            super::fail_with_diagnostic(
+                diagnostics,
+                UpdateStage::RestartInspection.diagnostic_name(),
+                DiagnosticCause::ServiceState,
+                failure,
+            )
+        },
     )?;
-    complete_lifecycle_stage!(
-        progress,
+    complete_update_stage(
+        diagnostics,
         UpdateStage::RestartInspection,
-        lifecycle.target,
-        retry
-    );
+        &lifecycle.target,
+        UserFailure::StopThenRetry(StopThenRetry::UpdateServiceStateDisableUpdateEnable),
+    )?;
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) async fn staged_update_with_context(
     context: UpdateContext,
-) -> Result<LifecycleReceipt, ControllerError> {
-    let mut progress = UpdateProgress::default();
+) -> Result<crate::cli_output::RenderedCli, UserFailure> {
+    let mut diagnostics = Diagnostics::new(false, crate::diagnostics::DiagnosticCommand::Update);
+    diagnostics.set_phase(crate::diagnostics::UpdatePhase::Apply);
+    diagnostics.emit(DiagnosticEvent::StagedMarkerAccepted);
+    staged_update_with_context_and_diagnostics(context, &mut diagnostics)
+        .await
+        .map(|success| success.render())
+}
+
+pub(super) async fn staged_update_with_context_and_diagnostics(
+    context: UpdateContext,
+    diagnostics: &mut Diagnostics,
+) -> Result<UserSuccess, UserFailure> {
+    use crate::diagnostics::DiagnosticCause;
+
     let lifecycle = &context.lifecycle;
     let paths = &lifecycle.target.paths;
-    let display_command = display_command_for_paths(paths, &lifecycle.path_environment);
-    let retry = format!("retry: {display_command} update\n");
+    let checksum_failure = || UserFailure::Ordinary(OrdinaryFailure::UpdateChecksumRetry);
+    let installed_state_failure =
+        || UserFailure::Ordinary(OrdinaryFailure::UpdateInstalledStateCheckStatus);
+    let cli_failure = || UserFailure::Ordinary(OrdinaryFailure::UpdateCliIntegrationRetry);
+    let service_configuration_failure =
+        || UserFailure::Ordinary(OrdinaryFailure::UpdateServiceConfigurationRetry);
+    let service_state_failure =
+        || UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStateCheckStatus);
 
-    let candidate = inspect_candidate(&context.candidate)
-        .map_err(|error| progress.fail(UpdateStage::CandidatePreflight, error, &retry))?;
+    let candidate = inspect_candidate(&context.candidate).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
+            DiagnosticCause::Checksum,
+            checksum_failure(),
+        )
+    })?;
     if candidate.target != product_target() {
-        return Err(progress.fail(
-            UpdateStage::CandidatePreflight,
-            format!(
-                "candidate target {} does not match selected target {}",
-                candidate.target,
-                product_target()
-            ),
-            &retry,
+        return Err(super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
+            DiagnosticCause::Checksum,
+            checksum_failure(),
         ));
     }
     let candidate_bytes = fs::read(&candidate.executable).map_err(|_| {
-        progress.fail(
-            UpdateStage::CandidatePreflight,
-            "candidate executable is unreadable",
-            &retry,
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
+            DiagnosticCause::Checksum,
+            checksum_failure(),
         )
     })?;
     let candidate_sha256 = sha256_bytes(&candidate_bytes);
-    let manifest = load_update_manifest(paths)
-        .map_err(|error| progress.fail(UpdateStage::CandidatePreflight, error, &retry))?;
+    let manifest = load_update_manifest(paths).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
+            DiagnosticCause::Validation,
+            installed_state_failure(),
+        )
+    })?;
     let installed_version = semver::Version::parse(&manifest.product_version).map_err(|_| {
-        progress.fail(
-            UpdateStage::CandidatePreflight,
-            "installed manifest version is invalid",
-            &retry,
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
+            DiagnosticCause::Validation,
+            installed_state_failure(),
         )
     })?;
     let candidate_version = semver::Version::parse(&candidate.product_version).map_err(|_| {
-        progress.fail(
-            UpdateStage::CandidatePreflight,
-            "candidate semantic version is invalid",
-            &retry,
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
+            DiagnosticCause::Checksum,
+            checksum_failure(),
         )
     })?;
     if candidate_version < installed_version {
-        return Err(progress.fail(
-            UpdateStage::CandidatePreflight,
-            format!(
-                "candidate {} is lower than installed release {}",
-                candidate.product_version, manifest.product_version
-            ),
-            &retry,
+        return Err(super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
+            DiagnosticCause::Checksum,
+            checksum_failure(),
         ));
     }
-    complete_lifecycle_stage!(
-        progress,
+    diagnostics.emit(DiagnosticEvent::CandidateVerified {
+        version: candidate_version.clone(),
+    });
+    complete_update_stage(
+        diagnostics,
         UpdateStage::CandidatePreflight,
-        lifecycle.target,
-        &retry
-    );
+        &lifecycle.target,
+        checksum_failure(),
+    )?;
 
-    let codex = resolve_codex_executable(&lifecycle.path_environment, &lifecycle.cwd)
-        .map_err(|error| progress.fail(UpdateStage::CandidatePreflight, error, &retry))?;
-    let (codex_version, expected_running_version) =
-        read_codex_version(&codex, &paths.codex_home)
-            .map_err(|error| progress.fail(UpdateStage::CandidatePreflight, error, &retry))?;
+    let codex =
+        resolve_codex_executable(&lifecycle.path_environment, &lifecycle.cwd).map_err(|_| {
+            super::fail_with_diagnostic(
+                diagnostics,
+                UpdateStage::CandidatePreflight.diagnostic_name(),
+                DiagnosticCause::CliIntegration,
+                cli_failure(),
+            )
+        })?;
+    let (codex_version, expected_running_version) = read_codex_version(&codex, &paths.codex_home)
+        .map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
+            DiagnosticCause::CliIntegration,
+            cli_failure(),
+        )
+    })?;
     let desired_config = ProductConfig {
         schema_version: 2,
         codex_executable: codex.clone(),
@@ -573,28 +844,55 @@ pub(super) async fn staged_update_with_context(
     let desired_config_bytes = toml::to_string(&desired_config)
         .map(String::into_bytes)
         .map_err(|_| {
-            progress.fail(
-                UpdateStage::CandidatePreflight,
-                "configuration cannot be rendered",
-                &retry,
+            super::fail_with_diagnostic(
+                diagnostics,
+                UpdateStage::CandidatePreflight.diagnostic_name(),
+                DiagnosticCause::CliIntegration,
+                cli_failure(),
             )
         })?;
-    let desired_projection = render_projection(&paths.binary, &candidate.product_version)
-        .map_err(|error| progress.fail(UpdateStage::CandidatePreflight, error, &retry))?;
-    let desired_unit = render_unit(paths, &codex)
-        .map_err(|error| progress.fail(UpdateStage::CandidatePreflight, error, &retry))?;
+    let desired_projection =
+        render_projection(&paths.binary, &candidate.product_version).map_err(|_| {
+            super::fail_with_diagnostic(
+                diagnostics,
+                UpdateStage::CandidatePreflight.diagnostic_name(),
+                DiagnosticCause::CliIntegration,
+                cli_failure(),
+            )
+        })?;
+    let desired_unit = render_unit(paths, &codex).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
+            DiagnosticCause::ServiceConfiguration,
+            service_configuration_failure(),
+        )
+    })?;
     let desired_unit_sha256 = sha256_bytes(&desired_unit);
     let systemctl =
         resolve_named_executable(&lifecycle.path_environment, &lifecycle.cwd, "systemctl")
-            .map_err(|error| progress.fail(UpdateStage::ServiceSnapshot, error, &retry))?;
-    let snapshot = service_snapshot(&systemctl, &lifecycle.target)
-        .map_err(|error| progress.fail(UpdateStage::ServiceSnapshot, error, &retry))?;
-    complete_lifecycle_stage!(
-        progress,
+            .map_err(|_| {
+                super::fail_with_diagnostic(
+                    diagnostics,
+                    UpdateStage::ServiceSnapshot.diagnostic_name(),
+                    DiagnosticCause::ServiceState,
+                    service_state_failure(),
+                )
+            })?;
+    let snapshot = service_snapshot(&systemctl, &lifecycle.target).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::ServiceSnapshot.diagnostic_name(),
+            DiagnosticCause::ServiceState,
+            service_state_failure(),
+        )
+    })?;
+    complete_update_stage(
+        diagnostics,
         UpdateStage::ServiceSnapshot,
-        lifecycle.target,
-        &retry
-    );
+        &lifecycle.target,
+        service_state_failure(),
+    )?;
 
     let restart = inspect_restart(
         paths,
@@ -605,159 +903,259 @@ pub(super) async fn staged_update_with_context(
         &desired_unit_sha256,
     )
     .await;
-    if let RestartInspection::Unknown { evidence } = &restart {
-        let recovery = format!(
-            "{display_command} disable\n\
-{display_command} update\n\
-{display_command} enable\n\
-disable stops running turns; the final enable is needed only when the service should be enabled again.\n"
-        );
-        return Err(progress.fail(UpdateStage::RestartInspection, evidence, &recovery));
+    if matches!(restart, RestartInspection::Unknown { .. }) {
+        return Err(super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::RestartInspection.diagnostic_name(),
+            DiagnosticCause::ServiceState,
+            UserFailure::StopThenRetry(StopThenRetry::UpdateServiceStateDisableUpdateEnable),
+        ));
     }
-    guard_restart_required_update(
-        &systemctl,
-        lifecycle,
-        snapshot,
-        &restart,
-        &display_command,
-        &progress,
+    guard_restart_required_update_typed(&systemctl, lifecycle, snapshot, &restart).map_err(
+        |failure| {
+            super::fail_with_diagnostic(
+                diagnostics,
+                UpdateStage::RestartInspection.diagnostic_name(),
+                DiagnosticCause::ServiceState,
+                failure,
+            )
+        },
     )?;
-    complete_lifecycle_stage!(
-        progress,
+    complete_update_stage(
+        diagnostics,
         UpdateStage::RestartInspection,
-        lifecycle.target,
-        &retry
-    );
+        &lifecycle.target,
+        UserFailure::StopThenRetry(StopThenRetry::UpdateServiceStateDisableUpdateEnable),
+    )?;
 
     if candidate_version == installed_version && candidate_sha256 == manifest.binary_sha256 {
-        let status = status_with_context(StatusContext {
-            target: lifecycle.target.clone(),
-            path_environment: lifecycle.path_environment.clone(),
-            desktop_environment: lifecycle.desktop_environment.clone(),
-            cwd: lifecycle.cwd.clone(),
-        })
-        .await?;
-        if status.healthy {
-            return Ok(LifecycleReceipt {
-                stdout: format!(
-                    "Already current: {}\nDurable and running state: coherent\n",
-                    candidate.product_version
-                ),
-                stderr: String::new(),
-            });
+        let status = status_with_context(
+            StatusContext {
+                target: lifecycle.target.clone(),
+                path_environment: Some(lifecycle.path_environment.clone()),
+                desktop_environment: lifecycle.desktop_environment.clone(),
+                cwd: Some(lifecycle.cwd.clone()),
+            },
+            diagnostics,
+        )
+        .await;
+        if status.state() == crate::cli_output::StatusState::Healthy {
+            return Ok(UserSuccess::Update(UpdateSuccess::new(
+                UpdateState::AlreadyCurrent,
+                candidate_version,
+                snapshot.enabled,
+                false,
+                Vec::new(),
+            )));
         }
     }
 
     if snapshot.active && restart.reasons().is_some() {
         baseline_active_turn_gate(paths, &expected_running_version, context.terminal)
             .await
-            .map_err(|error| progress.fail(UpdateStage::ActiveTurnGate, error, &retry))?;
-        complete_lifecycle_stage!(
-            progress,
+            .map_err(|failure| {
+                super::fail_with_diagnostic(
+                    diagnostics,
+                    UpdateStage::ActiveTurnGate.diagnostic_name(),
+                    DiagnosticCause::ActiveTasks,
+                    active_turn_gate_failure(failure),
+                )
+            })?;
+        complete_update_stage(
+            diagnostics,
             UpdateStage::ActiveTurnGate,
-            lifecycle.target,
-            &retry
-        );
+            &lifecycle.target,
+            UserFailure::Ordinary(OrdinaryFailure::UpdateActiveTasksRetry),
+        )?;
     }
 
-    reconcile_file(&paths.binary, &candidate_bytes, 0o755, paths.euid)
-        .map_err(|error| progress.fail(UpdateStage::Binary, error, &retry))?;
-    complete_lifecycle_stage!(progress, UpdateStage::Binary, lifecycle.target, &retry);
+    reconcile_file(&paths.binary, &candidate_bytes, 0o755, paths.euid).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::Binary.diagnostic_name(),
+            DiagnosticCause::Validation,
+            UserFailure::Ordinary(OrdinaryFailure::UpdateInstallationFilesRetry),
+        )
+    })?;
+    complete_update_stage(
+        diagnostics,
+        UpdateStage::Binary,
+        &lifecycle.target,
+        UserFailure::Ordinary(OrdinaryFailure::UpdateInstallationFilesRetry),
+    )?;
 
-    reconcile_file(&paths.config, &desired_config_bytes, 0o600, paths.euid)
-        .map_err(|error| progress.fail(UpdateStage::Configuration, error, &retry))?;
-    complete_lifecycle_stage!(
-        progress,
+    reconcile_file(&paths.config, &desired_config_bytes, 0o600, paths.euid).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::Configuration.diagnostic_name(),
+            DiagnosticCause::Validation,
+            UserFailure::Ordinary(OrdinaryFailure::UpdateInstallationFilesRetry),
+        )
+    })?;
+    complete_update_stage(
+        diagnostics,
         UpdateStage::Configuration,
-        lifecycle.target,
-        &retry
-    );
+        &lifecycle.target,
+        UserFailure::Ordinary(OrdinaryFailure::UpdateInstallationFilesRetry),
+    )?;
 
-    let projection_changed = reconcile_projection(paths, &desired_projection)
-        .map_err(|error| progress.fail(UpdateStage::Projection, error, &retry))?;
-    complete_lifecycle_stage!(progress, UpdateStage::Projection, lifecycle.target, &retry);
+    reconcile_projection(paths, &desired_projection).map_err(|error| {
+        let failure = update_cli_reconciliation_failure(&error);
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::Projection.diagnostic_name(),
+            DiagnosticCause::CliIntegration,
+            failure,
+        )
+    })?;
+    complete_update_stage(
+        diagnostics,
+        UpdateStage::Projection,
+        &lifecycle.target,
+        cli_failure(),
+    )?;
 
-    let marketplace_changed = reconcile_marketplace(&codex, &paths.codex_home, &paths.marketplace)
-        .map_err(|error| progress.fail(UpdateStage::PluginMarketplace, error, &retry))?;
-    complete_lifecycle_stage!(
-        progress,
+    reconcile_marketplace(&codex, &paths.codex_home, &paths.marketplace).map_err(|error| {
+        let failure = update_cli_reconciliation_failure(&error);
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::PluginMarketplace.diagnostic_name(),
+            DiagnosticCause::CliIntegration,
+            failure,
+        )
+    })?;
+    complete_update_stage(
+        diagnostics,
         UpdateStage::PluginMarketplace,
-        lifecycle.target,
-        &retry
-    );
+        &lifecycle.target,
+        cli_failure(),
+    )?;
 
-    let plugin_changed = reconcile_plugin(
+    reconcile_plugin(
         &codex,
         &paths.codex_home,
         &paths.marketplace,
         &candidate.product_version,
     )
-    .map_err(|error| progress.fail(UpdateStage::PluginInstall, error, &retry))?;
-    complete_lifecycle_stage!(
-        progress,
+    .map_err(|error| {
+        let failure = update_cli_reconciliation_failure(&error);
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::PluginInstall.diagnostic_name(),
+            DiagnosticCause::CliIntegration,
+            failure,
+        )
+    })?;
+    complete_update_stage(
+        diagnostics,
         UpdateStage::PluginInstall,
-        lifecycle.target,
-        &retry
-    );
+        &lifecycle.target,
+        cli_failure(),
+    )?;
 
-    let (desktop_status, desktop_warning) = match manifest.desktop_attachment.as_ref() {
-        None => (DesktopAttachmentStatus::Unavailable, None),
+    let desktop_warning = match manifest.desktop_attachment.as_ref() {
+        None => None,
         Some(identity) => {
             match probe_persisted_desktop_capability(identity, &lifecycle.desktop_environment)
                 .await
-                .map_err(|error| progress.fail(UpdateStage::DesktopDiscovery, error, &retry))?
-            {
-                DesktopAvailability::Verified(_) => (DesktopAttachmentStatus::Available, None),
-                DesktopAvailability::Unavailable { warning } => {
-                    (DesktopAttachmentStatus::Unverified, Some(warning))
-                }
+                .map_err(|_| {
+                    super::fail_with_diagnostic(
+                        diagnostics,
+                        UpdateStage::DesktopDiscovery.diagnostic_name(),
+                        DiagnosticCause::DesktopIntegration,
+                        UserFailure::Ordinary(OrdinaryFailure::UpdateDesktopIntegrationCheckStatus),
+                    )
+                })? {
+                DesktopAvailability::Verified(_) => None,
+                DesktopAvailability::Unavailable { warning } => Some(warning),
             }
         }
     };
-    complete_lifecycle_stage!(
-        progress,
+    complete_update_stage(
+        diagnostics,
         UpdateStage::DesktopDiscovery,
-        lifecycle.target,
-        &retry
-    );
+        &lifecycle.target,
+        UserFailure::Ordinary(OrdinaryFailure::UpdateUnexpectedRetry),
+    )?;
 
     let desktop_published = match manifest.desktop_attachment.as_ref() {
         Some(identity) => {
-            let expected = render_descriptor(&paths.socket)
-                .map_err(|error| progress.fail(UpdateStage::Descriptor, error, &retry))?;
-            match inspect_descriptor(identity, &expected)
-                .map_err(|error| progress.fail(UpdateStage::Descriptor, error, &retry))?
-            {
+            let expected = render_descriptor(&paths.socket).map_err(|_| {
+                super::fail_with_diagnostic(
+                    diagnostics,
+                    UpdateStage::Descriptor.diagnostic_name(),
+                    DiagnosticCause::DesktopIntegration,
+                    UserFailure::Ordinary(OrdinaryFailure::UpdateDesktopIntegrationCheckStatus),
+                )
+            })?;
+            match inspect_descriptor(identity, &expected).map_err(|_| {
+                super::fail_with_diagnostic(
+                    diagnostics,
+                    UpdateStage::Descriptor.diagnostic_name(),
+                    DiagnosticCause::DesktopIntegration,
+                    UserFailure::Ordinary(OrdinaryFailure::UpdateDesktopIntegrationCheckStatus),
+                )
+            })? {
                 DescriptorState::Foreign => {
-                    return Err(progress.fail(
-                        UpdateStage::Descriptor,
-                        "Desktop descriptor is foreign",
-                        &retry,
+                    return Err(super::fail_with_diagnostic(
+                        diagnostics,
+                        UpdateStage::Descriptor.diagnostic_name(),
+                        DiagnosticCause::DesktopIntegration,
+                        UserFailure::Ordinary(OrdinaryFailure::UpdateDesktopIntegrationCheckStatus),
                     ));
                 }
                 DescriptorState::Absent if snapshot.enabled => {
-                    publish_descriptor(identity, &expected)
-                        .map_err(|error| progress.fail(UpdateStage::Descriptor, error, &retry))?
+                    publish_descriptor(identity, &expected).map_err(|failure| {
+                        let failure = update_descriptor_publication_failure(failure);
+                        super::fail_with_diagnostic(
+                            diagnostics,
+                            UpdateStage::Descriptor.diagnostic_name(),
+                            DiagnosticCause::DesktopIntegration,
+                            failure,
+                        )
+                    })?
                 }
                 DescriptorState::Absent | DescriptorState::Expected => false,
             }
         }
         None => false,
     };
-    complete_lifecycle_stage!(progress, UpdateStage::Descriptor, lifecycle.target, &retry);
+    complete_update_stage(
+        diagnostics,
+        UpdateStage::Descriptor,
+        &lifecycle.target,
+        UserFailure::Ordinary(OrdinaryFailure::UpdateUnexpectedRetry),
+    )?;
 
-    reconcile_file(&paths.unit, &desired_unit, 0o644, paths.euid)
-        .map_err(|error| progress.fail(UpdateStage::ServiceUnit, error, &retry))?;
-    complete_lifecycle_stage!(progress, UpdateStage::ServiceUnit, lifecycle.target, &retry);
+    reconcile_file(&paths.unit, &desired_unit, 0o644, paths.euid).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::ServiceUnit.diagnostic_name(),
+            DiagnosticCause::ServiceConfiguration,
+            UserFailure::Ordinary(OrdinaryFailure::UpdateServiceConfigurationLogs),
+        )
+    })?;
+    complete_update_stage(
+        diagnostics,
+        UpdateStage::ServiceUnit,
+        &lifecycle.target,
+        UserFailure::Ordinary(OrdinaryFailure::UpdateServiceConfigurationLogs),
+    )?;
 
-    run_systemctl(&systemctl, ["--user", "daemon-reload"])
-        .map_err(|error| progress.fail(UpdateStage::DaemonReload, error, &retry))?;
-    complete_lifecycle_stage!(
-        progress,
+    run_systemctl(&systemctl, ["--user", "daemon-reload"]).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::DaemonReload.diagnostic_name(),
+            DiagnosticCause::ServiceConfiguration,
+            UserFailure::Ordinary(OrdinaryFailure::UpdateServiceConfigurationLogs),
+        )
+    })?;
+    complete_update_stage(
+        diagnostics,
         UpdateStage::DaemonReload,
-        lifecycle.target,
-        &retry
-    );
+        &lifecycle.target,
+        UserFailure::Ordinary(OrdinaryFailure::UpdateServiceConfigurationLogs),
+    )?;
 
     match (snapshot, &restart) {
         (
@@ -771,7 +1169,15 @@ disable stops running turns; the final enable is needed only when the service sh
                 &systemctl,
                 ["--user", "restart", lifecycle.target.unit_name.as_str()],
             )
-            .map_err(|error| progress.fail(UpdateStage::ServiceApply, error, &retry))?;
+            .map_err(|_| {
+                super::fail_with_diagnostic(
+                    diagnostics,
+                    UpdateStage::ServiceApply.diagnostic_name(),
+                    DiagnosticCause::ServiceStart,
+                    UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStartLogs),
+                )
+            })?;
+            diagnostics.emit(DiagnosticEvent::CompletedServiceRestart);
         }
         (
             ServiceSnapshot {
@@ -789,31 +1195,52 @@ disable stops running turns; the final enable is needed only when the service sh
                     lifecycle.target.unit_name.as_str(),
                 ],
             )
-            .map_err(|error| progress.fail(UpdateStage::ServiceApply, error, &retry))?;
+            .map_err(|_| {
+                super::fail_with_diagnostic(
+                    diagnostics,
+                    UpdateStage::ServiceApply.diagnostic_name(),
+                    DiagnosticCause::ServiceStart,
+                    UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStartLogs),
+                )
+            })?;
+            diagnostics.completed(UpdateStage::ServiceApply.diagnostic_name());
         }
         _ => {}
     }
-    complete_lifecycle_stage!(
-        progress,
+    complete_update_stage(
+        diagnostics,
         UpdateStage::ServiceApply,
-        lifecycle.target,
-        &retry
-    );
+        &lifecycle.target,
+        UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStartLogs),
+    )?;
 
     if snapshot.enabled {
         verify_enabled_service(&systemctl, &lifecycle.target, &expected_running_version)
             .await
-            .map_err(|error| progress.fail(UpdateStage::ServiceVerify, error, &retry))?;
+            .map_err(|_| {
+                super::fail_with_diagnostic(
+                    diagnostics,
+                    UpdateStage::ServiceVerify.diagnostic_name(),
+                    DiagnosticCause::ServiceState,
+                    UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStateLogs),
+                )
+            })?;
     } else {
-        verify_disabled_service(&systemctl, &lifecycle.target)
-            .map_err(|error| progress.fail(UpdateStage::ServiceVerify, error, &retry))?;
+        verify_disabled_service(&systemctl, &lifecycle.target).map_err(|_| {
+            super::fail_with_diagnostic(
+                diagnostics,
+                UpdateStage::ServiceVerify.diagnostic_name(),
+                DiagnosticCause::ServiceState,
+                UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStateLogs),
+            )
+        })?;
     }
-    complete_lifecycle_stage!(
-        progress,
+    complete_update_stage(
+        diagnostics,
         UpdateStage::ServiceVerify,
-        lifecycle.target,
-        &retry
-    );
+        &lifecycle.target,
+        UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStateLogs),
+    )?;
 
     let installed = InstalledRelease {
         schema_version: 3,
@@ -829,62 +1256,49 @@ disable stops running turns; the final enable is needed only when the service sh
         desktop_attachment: manifest.desktop_attachment.clone(),
     };
     let mut manifest_bytes = serde_json::to_vec_pretty(&installed).map_err(|_| {
-        progress.fail(
-            UpdateStage::Manifest,
-            "installed manifest cannot be rendered",
-            &retry,
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::Manifest.diagnostic_name(),
+            DiagnosticCause::Validation,
+            UserFailure::Ordinary(OrdinaryFailure::UpdateInstalledStatePostMutationCheckStatus),
         )
     })?;
     manifest_bytes.push(b'\n');
-    reconcile_file(&paths.manifest, &manifest_bytes, 0o600, paths.euid)
-        .map_err(|error| progress.fail(UpdateStage::Manifest, error, &retry))?;
-    complete_lifecycle_stage!(progress, UpdateStage::Manifest, lifecycle.target, &retry);
+    reconcile_file(&paths.manifest, &manifest_bytes, 0o600, paths.euid).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::Manifest.diagnostic_name(),
+            DiagnosticCause::Validation,
+            UserFailure::Ordinary(OrdinaryFailure::UpdateInstalledStatePostMutationCheckStatus),
+        )
+    })?;
+    complete_update_stage(
+        diagnostics,
+        UpdateStage::Manifest,
+        &lifecycle.target,
+        UserFailure::Ordinary(OrdinaryFailure::UpdateInstalledStatePostMutationCheckStatus),
+    )?;
 
-    let projection_changed = projection_changed || marketplace_changed || plugin_changed;
-    let service_state = if snapshot.enabled {
-        "enabled, active"
-    } else {
-        "disabled, inactive"
-    };
-    let mut stderr = progress.stderr();
+    let mut notices = Vec::new();
     if expected_running_version != TESTED_CODEX_VERSION {
-        stderr.push_str(&format!(
-            "Compatibility warning: Codex app-server {codex_version} has not been tested with codex-session-control {}; native results remain authoritative.\n",
-            env!("CARGO_PKG_VERSION")
-        ));
+        notices.push(UserNotice::Compatibility {
+            codex: semver::Version::parse(&codex_version).unwrap_or_else(|_| {
+                semver::Version::parse(super::UNKNOWN_CODEX_VERSION)
+                    .expect("unknown Codex version sentinel is semantic")
+            }),
+            product: candidate_version.clone(),
+        });
     }
-    if let Some(warning) = desktop_warning {
-        stderr.push_str(&warning);
-        stderr.push('\n');
+    if desktop_warning.is_some() {
+        notices.push(UserNotice::DesktopLauncherUnavailable);
     }
-    Ok(LifecycleReceipt {
-        stdout: format!(
-            "Installed release: {version}\n\
-Codex app-server service: {service_state}\n\
-Plugin: codex-session-control {version} at {plugin}\n\
-Codex home: {home}\n\
-Desktop attachment: {desktop}\n\
-Desktop restart required: {desktop_restart}\n\
-Durable plugin state: current\n\
-Loaded task state: {loaded}\n\
-Codex client restart required: no\n\
-New task required for guaranteed plugin convergence: yes\n",
-            version = candidate.product_version,
-            plugin = paths
-                .marketplace
-                .join("plugins/codex-session-control")
-                .display(),
-            home = paths.codex_home.display(),
-            desktop = desktop_status.receipt(),
-            desktop_restart = if desktop_published { "yes" } else { "no" },
-            loaded = if projection_changed {
-                "may_be_stale"
-            } else {
-                "not_verified"
-            },
-        ),
-        stderr,
-    })
+    Ok(UserSuccess::Update(UpdateSuccess::new(
+        UpdateState::Applied,
+        candidate_version,
+        snapshot.enabled,
+        desktop_published,
+        notices,
+    )))
 }
 
 fn inspect_candidate(path: &Path) -> Result<CandidateRelease, ControllerError> {
@@ -1090,14 +1504,18 @@ pub(super) async fn baseline_active_turn_gate(
     paths: &ResolvedUserPaths,
     running_codex_version: &str,
     terminal: TerminalState,
-) -> Result<(), ControllerError> {
-    let mut disclosed = list_active_threads(paths, running_codex_version).await?;
+) -> Result<(), ActiveTurnGateFailure> {
+    let mut disclosed = list_active_threads(paths, running_codex_version)
+        .await
+        .map_err(|_| ActiveTurnGateFailure::Inspection)?;
     if !disclosed.is_empty() {
         require_restart_approval(&disclosed, terminal)?;
     }
 
     loop {
-        let final_check = list_active_threads(paths, running_codex_version).await?;
+        let final_check = list_active_threads(paths, running_codex_version)
+            .await
+            .map_err(|_| ActiveTurnGateFailure::Inspection)?;
         let disclosed_ids = disclosed
             .iter()
             .map(|thread| thread.id.as_str())
@@ -1116,20 +1534,16 @@ pub(super) async fn baseline_active_turn_gate(
 fn require_restart_approval(
     active: &[Thread],
     terminal: TerminalState,
-) -> Result<(), ControllerError> {
+) -> Result<(), ActiveTurnGateFailure> {
     if !(terminal.stdin && terminal.stderr) {
-        return Err(ControllerError::Operational(
-            "active tasks require interactive restart approval".to_owned(),
-        ));
+        return Err(ActiveTurnGateFailure::InteractiveRequired);
     }
     let prompt = active_restart_prompt(active);
     let response = restart_prompt_response(&prompt, terminal)?;
     if matches!(response.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
         Ok(())
     } else {
-        Err(ControllerError::Operational(
-            "active task restart approval declined".to_owned(),
-        ))
+        Err(ActiveTurnGateFailure::Cancelled)
     }
 }
 
@@ -1166,10 +1580,16 @@ Continue and interrupt active work? [y/N]",
 fn restart_prompt_response(
     prompt: &str,
     _terminal: TerminalState,
-) -> Result<String, ControllerError> {
+) -> Result<String, ActiveTurnGateFailure> {
     #[cfg(test)]
     if let Some(script) = _terminal.restart_prompt {
+        if script.failure == Some(RestartPromptTestFailure::Write) {
+            return Err(ActiveTurnGateFailure::InteractiveRequired);
+        }
         script.output.lock().unwrap().push_str(prompt);
+        if script.failure == Some(RestartPromptTestFailure::Read) {
+            return Err(ActiveTurnGateFailure::InteractiveRequired);
+        }
         return Ok(script
             .responses
             .lock()
@@ -1182,13 +1602,11 @@ fn restart_prompt_response(
     stderr
         .write_all(prompt.as_bytes())
         .and_then(|()| stderr.flush())
-        .map_err(|_| {
-            ControllerError::Operational("cannot write active task restart prompt".to_owned())
-        })?;
+        .map_err(|_| ActiveTurnGateFailure::InteractiveRequired)?;
     let mut response = String::new();
-    std::io::stdin().read_line(&mut response).map_err(|_| {
-        ControllerError::Operational("cannot read active task restart approval".to_owned())
-    })?;
+    std::io::stdin()
+        .read_line(&mut response)
+        .map_err(|_| ActiveTurnGateFailure::InteractiveRequired)?;
     Ok(response)
 }
 
@@ -1228,20 +1646,77 @@ pub(super) async fn list_active_threads(
     Ok(active)
 }
 
-pub(super) fn run_candidate_apply(candidate: &CandidateRelease) -> Result<(), ControllerError> {
-    let status = Command::new(&candidate.executable)
+pub(super) fn classify_candidate_wait(
+    status: Result<std::process::ExitStatus, std::io::Error>,
+) -> CandidateApplyResult {
+    match status {
+        Ok(status) if status.code() == Some(0) => CandidateApplyResult::Exit0,
+        Ok(status) if status.code() == Some(1) => CandidateApplyResult::Exit1,
+        Ok(_) | Err(_) => CandidateApplyResult::CompletionUnknown,
+    }
+}
+
+fn spawn_candidate_apply(
+    candidate: &CandidateRelease,
+    verbose: bool,
+) -> Result<std::process::Child, std::io::Error> {
+    let mut command = Command::new(&candidate.executable);
+    if verbose {
+        command.arg("--verbose");
+    }
+    command
         .arg("update")
         .env(STAGED_UPDATE_ENV, "1")
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .status()
-        .map_err(|_| ControllerError::Operational("candidate-apply execution failed".to_owned()))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(ControllerError::Operational(
-            "candidate-apply command failed".to_owned(),
-        ))
+        .spawn()
+}
+
+pub(super) fn run_candidate_apply(
+    candidate: &CandidateRelease,
+    verbose: bool,
+) -> CandidateApplyResult {
+    let Ok(mut child) = spawn_candidate_apply(candidate, verbose) else {
+        return CandidateApplyResult::SpawnFailed;
+    };
+    classify_candidate_wait(child.wait())
+}
+
+#[cfg(test)]
+pub(super) fn run_candidate_apply_with_wait_hook(
+    candidate: &CandidateRelease,
+    verbose: bool,
+    hook: CandidateWaitHook,
+) -> CandidateApplyResult {
+    let Ok(mut child) = spawn_candidate_apply(candidate, verbose) else {
+        return CandidateApplyResult::SpawnFailed;
+    };
+    match hook {
+        CandidateWaitHook::Real => classify_candidate_wait(child.wait()),
+        CandidateWaitHook::FailAfterSuccessfulSpawn => {
+            let _ = child.wait();
+            classify_candidate_wait(Err(std::io::Error::other("injected wait failure")))
+        }
+    }
+}
+
+pub(super) fn run_outer_candidate(
+    candidate: &CandidateRelease,
+    verbose: bool,
+    diagnostics: &mut Diagnostics,
+) -> Result<CandidateExit, UserFailure> {
+    diagnostics.emit(DiagnosticEvent::StartingStagedCandidate);
+    diagnostics.flush();
+    match run_candidate_apply(candidate, verbose) {
+        CandidateApplyResult::Exit0 => {
+            diagnostics.emit(DiagnosticEvent::StagedCandidateExitedSuccessfully);
+            Ok(CandidateExit::Zero)
+        }
+        CandidateApplyResult::Exit1 => Ok(CandidateExit::One),
+        CandidateApplyResult::SpawnFailed => Err(UserFailure::Ordinary(
+            OrdinaryFailure::UpdateInstallationFilesRetry,
+        )),
+        CandidateApplyResult::CompletionUnknown => Err(UserFailure::UpdateCompletionUnknown),
     }
 }

@@ -17,32 +17,14 @@ fn context(fixture: &Fixture) -> LifecycleContext {
     }
 }
 
-fn expected_receipt(selected_home: &Path) -> String {
-    format!(
-        "Codex app-server service: removed\n\
-Product descriptor: removed\n\
-Product projection: removed\n\
-Product configuration: removed\n\
-Product executable: removed\n\
-Codex home preserved: {}\n\
-Authentication preserved: yes\n\
-Tasks preserved: yes\n\
-Rollouts preserved: yes\n",
-        selected_home.display()
-    )
-}
-
-fn expected_stages() -> &'static str {
-    "completed: service-stop\n\
-completed: service-stop-verify\n\
-completed: descriptor-remove\n\
-completed: service-unit-remove\n\
-completed: plugin-remove\n\
-completed: marketplace-remove\n\
-completed: projection-remove\n\
-completed: configuration-remove\n\
-completed: manifest-remove\n\
-completed: binary-remove\n"
+fn expected_receipt(desktop_removed: bool) -> &'static str {
+    if desktop_removed {
+        "Codex Session Control was uninstalled.\n\n\
+Your Codex data is unchanged.\n\
+If Codex Desktop is already running, restart it to continue without Codex Session Control.\n"
+    } else {
+        "Codex Session Control was uninstalled.\n\nYour Codex data is unchanged.\n"
+    }
 }
 
 async fn setup_attached(fixture: &Fixture) -> FakeAuthority {
@@ -166,6 +148,74 @@ fn assert_stop_refusal_state(fixture: &Fixture, descriptor: &Path, expected: Sto
 }
 
 #[tokio::test]
+async fn uninstall_default_and_verbose_are_behaviorally_identical() {
+    use crate::diagnostics::{DiagnosticCommand, Diagnostics};
+
+    let default_fixture = Fixture::new();
+    let verbose_fixture = Fixture::new();
+    let _default_authority =
+        FakeAuthority::start(&default_fixture.paths, TESTED_CODEX_VERSION).await;
+    let _verbose_authority =
+        FakeAuthority::start(&verbose_fixture.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(default_fixture.context(true))
+        .await
+        .unwrap();
+    setup_with_context(verbose_fixture.context(true))
+        .await
+        .unwrap();
+    default_fixture.clear_logs();
+    verbose_fixture.clear_logs();
+    let mut off = Diagnostics::new(false, DiagnosticCommand::Uninstall);
+    let mut verbose = Diagnostics::record(DiagnosticCommand::Uninstall);
+
+    let default = uninstall_with_context_and_diagnostics(context(&default_fixture), &mut off)
+        .await
+        .unwrap()
+        .render();
+    let recorded = uninstall_with_context_and_diagnostics(context(&verbose_fixture), &mut verbose)
+        .await
+        .unwrap()
+        .render();
+
+    let recorded = with_recorded_diagnostics(recorded, &verbose);
+
+    assert_default_verbose_parity(&default, &recorded, &verbose, "[verbose] uninstall:");
+    assert!(
+        verbose
+            .recorded_lines()
+            .iter()
+            .any(|line| line.ends_with("completed service-stop\n"))
+    );
+    assert!(
+        verbose
+            .recorded_lines()
+            .iter()
+            .any(|line| line.ends_with("completed service-stop-verify\n"))
+    );
+    assert_eq!(
+        default_fixture.systemctl_log(),
+        verbose_fixture.systemctl_log()
+    );
+    let native_commands = |log: String| {
+        log.lines()
+            .map(|line| line.split('|').next().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        native_commands(default_fixture.codex_log()),
+        native_commands(verbose_fixture.codex_log())
+    );
+    assert_eq!(
+        default_fixture.paths.manifest.exists(),
+        verbose_fixture.paths.manifest.exists()
+    );
+    assert_eq!(
+        default_fixture.paths.binary.exists(),
+        verbose_fixture.paths.binary.exists()
+    );
+}
+
+#[tokio::test]
 async fn active_self_hosted_uninstall_refuses_before_every_removal() {
     let fixture = Fixture::new();
     let _authority = setup_attached(&fixture).await;
@@ -183,17 +233,12 @@ async fn active_self_hosted_uninstall_refuses_before_every_removal() {
 
     let error = uninstall_with_context(context(&fixture)).await.unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("running inside the managed app-server")
-    );
-    assert!(
-        error
-            .to_string()
-            .contains("codex-session-control uninstall")
-    );
-    assert!(!error.to_string().contains("completed:"));
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::IndependentTerminal(
+            crate::cli_output::IndependentTerminal::Uninstall
+        )
+    ));
     assert_eq!(
         fixture.systemctl_log(),
         "--user is-active codex-session-control-test-Setup1.service\n--user whoami\n"
@@ -217,13 +262,11 @@ async fn unproven_active_uninstall_refuses_before_every_removal() {
 
     let error = uninstall_with_context(context(&fixture)).await.unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("caller independence cannot be proven")
-    );
-    assert!(error.to_string().contains(
-        "systemctl --user stop codex-session-control-test-Setup1.service\ncodex-session-control uninstall"
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::StopThenRetry(
+            crate::cli_output::StopThenRetry::UninstallUnsafeStopThenUninstall
+        )
     ));
     assert!(!fixture.systemctl_log().contains("disable --now"));
     assert!(!fixture.systemctl_log().contains("daemon-reload"));
@@ -272,10 +315,13 @@ async fn uninstall_is_service_first_uses_exact_order_and_preserves_native_home()
     }
     fixture.clear_logs();
 
-    let report = uninstall_with_context(context(&fixture)).await.unwrap();
+    let report = uninstall_with_context(context(&fixture))
+        .await
+        .unwrap()
+        .render();
 
-    assert_eq!(report.stdout, expected_receipt(&fixture.paths.codex_home));
-    assert_eq!(report.stderr, expected_stages());
+    assert_eq!(report.stdout, expected_receipt(false));
+    assert!(report.stderr.is_empty());
     assert!(!config_dir.exists());
     assert!(!fixture.paths.data_root.exists());
     assert!(fixture.paths.data_root.parent().unwrap().is_dir());
@@ -306,7 +352,6 @@ async fn uninstall_is_service_first_uses_exact_order_and_preserves_native_home()
     assert_eq!(
         native_commands,
         [
-            "--version",
             "plugin list --json",
             "plugin remove codex-session-control@codex-session-control-local --json",
             "plugin list --json",
@@ -342,17 +387,17 @@ async fn empty_config_root_with_special_mode_fails_closed_at_configuration_remov
 
     let error = uninstall_with_context(context(&fixture)).await.unwrap_err();
 
+    let rendered = error.render();
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::RollbackIncomplete(_)
+    ));
     assert!(
-        error
-            .to_string()
-            .contains("failed at configuration-remove:"),
-        "{error}"
+        rendered
+            .stderr
+            .contains("Try again:\n  codex-session-control uninstall")
     );
-    assert!(
-        error
-            .to_string()
-            .contains("retry: codex-session-control uninstall")
-    );
+    assert!(rendered.stderr.contains(&config_dir.display().to_string()));
     assert!(config_dir.is_dir());
     assert_eq!(fs::read_dir(config_dir).unwrap().count(), 0);
     assert_eq!(
@@ -381,17 +426,17 @@ async fn nonempty_config_root_preserves_unknown_content_at_configuration_remove(
 
     let error = uninstall_with_context(context(&fixture)).await.unwrap_err();
 
+    let rendered = error.render();
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::RollbackIncomplete(_)
+    ));
     assert!(
-        error
-            .to_string()
-            .contains("failed at configuration-remove:"),
-        "{error}"
+        rendered
+            .stderr
+            .contains("Try again:\n  codex-session-control uninstall")
     );
-    assert!(
-        error
-            .to_string()
-            .contains("retry: codex-session-control uninstall")
-    );
+    assert!(rendered.stderr.contains(&config_dir.display().to_string()));
     assert_eq!(fs::read(&unknown).unwrap(), b"preserve exactly");
     assert!(config_dir.is_dir());
     assert!(!fixture.paths.config.exists());
@@ -421,16 +466,21 @@ async fn empty_product_root_with_special_mode_is_preserved_as_terminal_partial()
 
     let error = uninstall_with_context(context(&fixture)).await.unwrap_err();
 
+    let rendered = error.render();
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::TerminalPartialUninstall(_)
+    ));
     assert!(
-        error
-            .to_string()
-            .contains("failed at manifest-remove: terminal partial uninstall:"),
-        "{error}"
+        rendered
+            .stderr
+            .contains(&fixture.paths.data_root.display().to_string())
     );
-    assert!(error.to_string().contains(&format!(
-        "remaining product root: {}",
-        fixture.paths.data_root.display()
-    )));
+    assert!(
+        rendered
+            .stderr
+            .contains("Do not rerun `codex-session-control uninstall`")
+    );
     assert_eq!(
         fs::symlink_metadata(&fixture.paths.data_root)
             .unwrap()
@@ -463,18 +513,27 @@ async fn nonempty_product_root_preserves_unknown_content_as_terminal_partial() {
 
     let error = uninstall_with_context(context(&fixture)).await.unwrap_err();
 
+    let rendered = error.render();
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::TerminalPartialUninstall(_)
+    ));
     assert!(
-        error
-            .to_string()
-            .contains("failed at manifest-remove: terminal partial uninstall:"),
-        "{error}"
+        rendered
+            .stderr
+            .contains(&fixture.paths.data_root.display().to_string())
     );
-    assert!(error.to_string().contains(&format!(
-        "remaining product root: {}",
-        fixture.paths.data_root.display()
-    )));
-    assert!(!error.to_string().contains("remaining product executable:"));
-    assert!(!error.to_string().contains("retry:"));
+    assert!(
+        !rendered
+            .stderr
+            .contains(&fixture.paths.binary.display().to_string())
+    );
+    assert!(!rendered.stderr.contains("Try again:"));
+    assert!(
+        rendered
+            .stderr
+            .contains("Do not rerun `codex-session-control uninstall`")
+    );
     assert_eq!(fs::read(&unknown).unwrap(), b"preserve exactly");
     assert!(fixture.paths.data_root.is_dir());
     assert!(!fixture.paths.manifest.exists());
@@ -485,6 +544,35 @@ async fn nonempty_product_root_preserves_unknown_content_as_terminal_partial() {
 
 #[tokio::test]
 async fn stop_or_verification_failure_removes_nothing_after_service_boundary() {
+    let resolution = Fixture::new();
+    let _authority = FakeAuthority::start(&resolution.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(resolution.context(true)).await.unwrap();
+    let empty_bin = resolution._root.path().join("empty-bin");
+    fs::create_dir(&empty_bin).unwrap();
+    resolution.clear_logs();
+    let mut resolution_context = context(&resolution);
+    resolution_context.path_environment = std::env::join_paths([empty_bin]).unwrap();
+    let error = uninstall_with_context(resolution_context)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::UninstallServiceStopRetry
+        )
+    );
+    for retained in [
+        &resolution.paths.unit,
+        &resolution.paths.marketplace,
+        &resolution.paths.config,
+        &resolution.paths.manifest,
+        &resolution.paths.binary,
+    ] {
+        assert!(retained.exists(), "{}", retained.display());
+    }
+    assert!(resolution.systemctl_log().is_empty());
+    assert!(resolution.codex_log().is_empty());
+
     for verification_failure in [false, true] {
         let fixture = Fixture::new();
         let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
@@ -502,12 +590,12 @@ async fn stop_or_verification_failure_removes_nothing_after_service_boundary() {
 
         let error = uninstall_with_context(context(&fixture)).await.unwrap_err();
 
-        let stage = if verification_failure {
-            "service-stop-verify"
-        } else {
-            "service-stop"
-        };
-        assert!(error.to_string().contains(&format!("failed at {stage}:")));
+        assert!(matches!(
+            error,
+            crate::cli_output::UserFailure::StopThenRetry(
+                crate::cli_output::StopThenRetry::UninstallServiceStateStopThenUninstall
+            )
+        ));
         for retained in [
             &fixture.paths.unit,
             &fixture.paths.marketplace,
@@ -535,7 +623,10 @@ async fn late_failure_is_retryable_without_reordering_or_restoring_state() {
 
     let error = uninstall_with_context(context(&fixture)).await.unwrap_err();
 
-    assert!(error.to_string().contains("failed at marketplace-remove:"));
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::ManualCleanup(_)
+    ));
     assert!(!fixture.paths.unit.exists());
     assert!(!fixture.plugin_state.exists());
     assert!(fixture.marketplace_state.exists());
@@ -550,10 +641,13 @@ async fn late_failure_is_retryable_without_reordering_or_restoring_state() {
 
     fs::remove_file(&fixture.codex_fail).unwrap();
     fixture.clear_logs();
-    let report = uninstall_with_context(context(&fixture)).await.unwrap();
+    let report = uninstall_with_context(context(&fixture))
+        .await
+        .unwrap()
+        .render();
 
-    assert_eq!(report.stdout, expected_receipt(&fixture.paths.codex_home));
-    assert_eq!(report.stderr, expected_stages());
+    assert_eq!(report.stdout, expected_receipt(false));
+    assert!(report.stderr.is_empty());
     assert!(
         !fixture
             .codex_log()
@@ -573,13 +667,26 @@ async fn missing_config_and_manifest_stop_after_the_service_boundary() {
 
     let error = uninstall_with_context(context(&fixture)).await.unwrap_err();
 
-    assert!(error.to_string().contains("completed: service-stop\n"));
+    let rendered = error.render();
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::RollbackIncomplete(_)
+    ));
     assert!(
-        error
-            .to_string()
-            .contains("completed: service-stop-verify\n")
+        rendered
+            .stderr
+            .contains("installed Codex Session Control state")
     );
-    assert!(error.to_string().contains("failed at descriptor-remove:"));
+    assert!(
+        rendered
+            .stderr
+            .contains(&fixture.paths.config.display().to_string())
+    );
+    assert!(
+        rendered
+            .stderr
+            .contains(&fixture.paths.manifest.display().to_string())
+    );
     assert!(fixture.paths.unit.exists());
     assert!(fixture.codex_log().is_empty());
     assert!(fixture.paths.codex_home.is_dir());
@@ -600,20 +707,14 @@ async fn unprovable_native_absence_stops_with_exact_manual_command() {
 
     let error = uninstall_with_context(context(&fixture)).await.unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("completed: service-unit-remove\n")
-    );
-    assert!(
-        error
-            .to_string()
-            .contains("failed at plugin-remove: native plugin absence cannot be proven\n")
-    );
-    assert!(error.to_string().contains(&format!(
-        "manual: CODEX_HOME='{}' '{}' plugin remove",
-        fixture.paths.codex_home.display(),
-        fixture.fake_bin.join("codex").display()
+    let rendered = error.render();
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::ManualCleanup(_)
+    ));
+    assert!(rendered.stderr.contains(&format!(
+        "CODEX_HOME={} codex plugin remove",
+        shell_quote_path(&fixture.paths.codex_home).unwrap()
     )));
     assert!(!fixture.paths.unit.exists());
     assert!(fixture.paths.marketplace.exists());
@@ -634,7 +735,10 @@ async fn filesystem_cleanup_order_is_state_based_across_partial_retry() {
 
     let error = uninstall_with_context(context(&fixture)).await.unwrap_err();
 
-    assert!(error.to_string().contains("failed at descriptor-remove:"));
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::RollbackIncomplete(_)
+    ));
     assert!(fixture.paths.marketplace.exists());
     assert!(fixture.paths.config.exists());
     assert!(fixture.paths.manifest.is_dir());
@@ -643,14 +747,17 @@ async fn filesystem_cleanup_order_is_state_based_across_partial_retry() {
     fs::remove_dir(&fixture.paths.manifest).unwrap();
     fs::write(&fixture.paths.manifest, manifest).unwrap();
     fs::set_permissions(&fixture.paths.manifest, fs::Permissions::from_mode(0o600)).unwrap();
-    let report = uninstall_with_context(context(&fixture)).await.unwrap();
-    assert_eq!(report.stdout, expected_receipt(&fixture.paths.codex_home));
+    let report = uninstall_with_context(context(&fixture))
+        .await
+        .unwrap()
+        .render();
+    assert_eq!(report.stdout, expected_receipt(false));
     assert!(!fixture.paths.binary.exists());
     drop(authority);
 }
 
 #[tokio::test]
-async fn untested_codex_version_adds_one_advisory_without_changing_receipt() {
+async fn untested_codex_version_does_not_change_approved_uninstall_output() {
     let fixture = Fixture::new();
     let untested_version = crate::test_support::different_stable_version(TESTED_CODEX_VERSION);
     fs::write(
@@ -661,16 +768,12 @@ async fn untested_codex_version_adds_one_advisory_without_changing_receipt() {
     let authority = FakeAuthority::start(&fixture.paths, &untested_version).await;
     setup_with_context(fixture.context(true)).await.unwrap();
 
-    let report = uninstall_with_context(context(&fixture)).await.unwrap();
+    let report = uninstall_with_context(context(&fixture))
+        .await
+        .unwrap()
+        .render();
 
-    assert_eq!(report.stdout, expected_receipt(&fixture.paths.codex_home));
-    assert_eq!(
-        report.stderr,
-        format!(
-            "{}Compatibility warning: Codex app-server {untested_version} has not been tested with codex-session-control {}; native results remain authoritative.\n",
-            expected_stages(),
-            env!("CARGO_PKG_VERSION"),
-        )
-    );
+    assert_eq!(report.stdout, expected_receipt(false));
+    assert!(report.stderr.is_empty());
     drop(authority);
 }

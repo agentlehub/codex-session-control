@@ -671,11 +671,11 @@ fn intermediate_symlink_before_effective_home_invalidates_all_product_evidence()
 
     assert!(matches!(
         read_configuration_evidence(&paths),
-        StoredEvidence::Invalid(InvalidEvidence::File(StatusFileError::Unsafe))
+        StoredEvidence::Invalid
     ));
     assert!(matches!(
         read_manifest_evidence(&paths),
-        StoredEvidence::Invalid(InvalidEvidence::File(StatusFileError::Unsafe))
+        StoredEvidence::Invalid
     ));
     assert_eq!(
         classify_selected_home_evidence(&paths).case,
@@ -696,18 +696,21 @@ async fn status_does_not_probe_identity_from_an_unsafe_configuration_ancestor() 
     fixture.clear_logs();
 
     let setup = fixture.context(true);
-    let report = status_with_context(StatusContext {
-        target: setup.target,
-        path_environment: setup.path_environment,
-        desktop_environment: setup.desktop_environment,
-        cwd: setup.cwd,
-    })
-    .await
-    .unwrap();
+    let mut diagnostics =
+        crate::diagnostics::Diagnostics::new(false, crate::diagnostics::DiagnosticCommand::Status);
+    let report = status_with_context(
+        StatusContext {
+            target: setup.target,
+            path_environment: Some(setup.path_environment),
+            desktop_environment: setup.desktop_environment,
+            cwd: Some(setup.cwd),
+        },
+        &mut diagnostics,
+    )
+    .await;
 
-    assert!(!report.healthy);
-    assert!(report.stdout.contains("configuration:"));
-    assert!(fixture.codex_log().is_empty(), "{:#?}", report.stdout);
+    assert_eq!(report.state(), StatusState::Unhealthy);
+    assert!(fixture.codex_log().is_empty(), "{report:#?}");
 }
 
 #[tokio::test]
@@ -887,9 +890,9 @@ async fn invalid_evidence_command_matrix_preserves_identity_state_and_service_bo
         let setup = fixture.context(true);
         StatusContext {
             target: setup.target,
-            path_environment: setup.path_environment,
+            path_environment: Some(setup.path_environment),
             desktop_environment: setup.desktop_environment,
-            cwd: setup.cwd,
+            cwd: Some(setup.cwd),
         }
     }
 
@@ -941,7 +944,11 @@ async fn invalid_evidence_command_matrix_preserves_identity_state_and_service_bo
                     assert!(fixture.codex_log().is_empty(), "{evidence:?}");
                 }
                 "status" => {
-                    let _ = status_with_context(status_context(&fixture)).await.unwrap();
+                    let mut diagnostics = crate::diagnostics::Diagnostics::new(
+                        false,
+                        crate::diagnostics::DiagnosticCommand::Status,
+                    );
+                    let _ = status_with_context(status_context(&fixture), &mut diagnostics).await;
                     assert!(
                         fixture
                             .systemctl_log()
@@ -974,12 +981,8 @@ async fn invalid_evidence_command_matrix_preserves_identity_state_and_service_bo
                         .await
                         .unwrap_err();
                     assert!(
-                        error.to_string().contains(
-                            "completed: service-disable\n\
-completed: service-verify\n\
-failed at descriptor-remove:"
-                        ),
-                        "{evidence:?}: {error}"
+                        matches!(error, crate::cli_output::UserFailure::PartialDisable(_)),
+                        "{evidence:?}: {error:?}"
                     );
                     assert_eq!(
                         fixture.systemctl_log(),

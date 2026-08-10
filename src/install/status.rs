@@ -6,29 +6,28 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use semver::Version;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    app_server::{AppServerClient, TESTED_CODEX_VERSION, socket_mode_is_owner_only},
+    app_server::{AppServerClient, socket_mode_is_owner_only},
+    cli_output::{IntegrationState, ServiceSummary, StatusProblem, StatusResult, StatusState},
     desktop::{
-        DescriptorState, DesktopStructure, inspect_descriptor, inspect_desktop_structure,
-        render_descriptor,
+        DescriptorInspectionFailure, DescriptorState, DesktopStructure,
+        inspect_descriptor_classified, inspect_desktop_structure, render_descriptor,
     },
+    diagnostics::{DiagnosticCause, Diagnostics},
     error::ControllerError,
     model::{DesktopAttachmentIdentity, InstalledRelease},
 };
 
 use super::{
-    display_command_for_paths,
-    evidence::{
-        EvidenceSourceState, InstalledEvidenceCase, ResolvedUserPaths,
-        classify_selected_home_evidence,
-    },
+    evidence::{InstalledEvidenceCase, ResolvedUserPaths, classify_selected_home_evidence},
     native::{
         plugin_matches, product_plugins, read_codex_version, resolve_named_executable,
         run_codex_json,
     },
-    paths::{SOCKET_SECURITY_REQUIREMENT, StatusFileError, read_status_file},
+    paths::{StatusFileError, read_status_file},
     product_target,
     render::{RenderedProjection, render_projection},
     service::{
@@ -41,28 +40,17 @@ use super::{
 #[derive(Clone, Debug)]
 pub(super) struct StatusContext {
     pub(super) target: LifecycleTarget,
-    pub(super) path_environment: OsString,
+    pub(super) path_environment: Option<OsString>,
     pub(super) desktop_environment: BTreeMap<OsString, OsString>,
-    pub(super) cwd: PathBuf,
-}
-
-#[derive(Debug)]
-pub(crate) struct StatusReport {
-    pub stdout: String,
-    pub healthy: bool,
-}
-
-#[derive(Debug)]
-struct StatusFailure {
-    check: &'static str,
-    detail: String,
-    action: String,
+    pub(super) cwd: Option<PathBuf>,
 }
 
 struct InstalledStatusState {
+    case: InstalledEvidenceCase,
     manifest: Option<InstalledRelease>,
     codex: Option<PathBuf>,
     codex_version: Option<(String, String)>,
+    projection: ProjectionEvidence,
 }
 
 struct ServiceStatusState {
@@ -94,195 +82,175 @@ enum DescriptorStatusEvidence {
     Unverified,
 }
 
-pub(crate) async fn status(target: LifecycleTarget) -> Result<StatusReport, ControllerError> {
-    let path_environment = std::env::var_os("PATH").ok_or(ControllerError::InvalidData {
-        field: "PATH",
-        reason: "is unavailable",
-    })?;
-    let cwd = std::env::current_dir().map_err(|_| ControllerError::InvalidData {
-        field: "cwd",
-        reason: "is unavailable",
-    })?;
-    status_with_context(StatusContext {
-        target,
-        path_environment,
-        desktop_environment: std::env::vars_os().collect(),
-        cwd,
-    })
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectionEvidence {
+    Ready,
+    Fault,
+    CouldNotVerify,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeRegistrationEvidence {
+    Ready,
+    Fault,
+    CouldNotVerify,
+}
+
+#[derive(Clone, Copy)]
+enum StatusStage {
+    Preflight,
+    InstalledState,
+    NativeRegistration,
+    Service,
+    AppServer,
+    Desktop,
+}
+
+impl StatusStage {
+    const fn diagnostic_name(self) -> &'static str {
+        match self {
+            Self::Preflight => "preflight",
+            Self::InstalledState => "installed-state",
+            Self::NativeRegistration => "native-registration",
+            Self::Service => "service",
+            Self::AppServer => "app-server",
+            Self::Desktop => "desktop",
+        }
+    }
+}
+
+pub(crate) async fn status_from_paths(
+    paths: Result<ResolvedUserPaths, ControllerError>,
+    diagnostics: &mut Diagnostics,
+) -> StatusResult {
+    let paths = match paths {
+        Ok(paths) => paths,
+        Err(_) => {
+            diagnostics.failed(
+                StatusStage::Preflight.diagnostic_name(),
+                DiagnosticCause::Validation,
+            );
+            return StatusResult::new(
+                StatusState::Unhealthy,
+                None,
+                Some(ServiceSummary::CouldNotVerify),
+                IntegrationState::CouldNotVerify,
+                IntegrationState::CouldNotVerify,
+                vec![StatusProblem::InstalledStateCouldNotBeVerified],
+            );
+        }
+    };
+    diagnostics.completed(StatusStage::Preflight.diagnostic_name());
+    status_with_context(
+        StatusContext {
+            target: LifecycleTarget::production(paths),
+            path_environment: std::env::var_os("PATH"),
+            desktop_environment: std::env::vars_os().collect(),
+            cwd: std::env::current_dir().ok(),
+        },
+        diagnostics,
+    )
     .await
 }
 
 pub(super) async fn status_with_context(
     context: StatusContext,
-) -> Result<StatusReport, ControllerError> {
+    diagnostics: &mut Diagnostics,
+) -> StatusResult {
     let paths = &context.target.paths;
-    let display_command = display_command_for_paths(paths, &context.path_environment);
-    let setup_action = format!("{display_command} setup");
-    let update_action = format!("{display_command} update");
-    let journal_action = format!("journalctl --user -u {}", context.target.unit_name);
-    let mut failures = Vec::new();
+    let mut problems = Vec::new();
 
-    let installed =
-        inspect_installed_artifacts(paths, &setup_action, &update_action, &mut failures);
-    inspect_native_registration(paths, &installed, &setup_action, &mut failures);
-    let service = inspect_service_and_socket(
-        &context,
-        &installed,
-        &setup_action,
-        &journal_action,
-        &mut failures,
-    );
-    let app_server_health = inspect_app_server_health(
-        paths,
-        &installed,
-        &service,
-        &update_action,
-        &journal_action,
-        &mut failures,
-    )
-    .await;
+    let installed = inspect_installed_artifacts(paths, &mut problems);
+    diagnostics.completed(StatusStage::InstalledState.diagnostic_name());
+    let native = inspect_native_registration(paths, &installed, &mut problems);
+    diagnostics.completed(StatusStage::NativeRegistration.diagnostic_name());
+    let service = inspect_service_and_socket(&context, &installed, &mut problems);
+    diagnostics.completed(StatusStage::Service.diagnostic_name());
+    let app_server_health =
+        inspect_app_server_health(paths, &installed, &service, &mut problems).await;
+    diagnostics.completed(StatusStage::AppServer.diagnostic_name());
     let desktop_configuration = inspect_desktop_configuration(
         installed.manifest.as_ref(),
         &context,
         &service,
         app_server_health,
-        &setup_action,
-        &update_action,
-        &mut failures,
+        &mut problems,
     );
+    diagnostics.completed(StatusStage::Desktop.diagnostic_name());
 
-    Ok(render_status_report(
-        &display_command,
+    project_status_result(
         &installed,
+        native,
         &service,
+        app_server_health,
         desktop_configuration,
-        failures,
-    ))
+        problems,
+    )
 }
 
 fn inspect_installed_artifacts(
     paths: &ResolvedUserPaths,
-    setup_action: &str,
-    update_action: &str,
-    failures: &mut Vec<StatusFailure>,
+    problems: &mut Vec<StatusProblem>,
 ) -> InstalledStatusState {
     let evidence = classify_selected_home_evidence(paths);
     match evidence.case {
-        InstalledEvidenceCase::Contradictory => failures.push(StatusFailure {
-            check: "configuration",
-            detail: "stored identity differs from installed manifest".to_owned(),
-            action: update_action.to_owned(),
-        }),
-        InstalledEvidenceCase::PartialArtifactsWithoutIdentity => failures.push(StatusFailure {
-            check: "manifest",
-            detail: "partial product artifacts have no selected-home identity".to_owned(),
-            action: setup_action.to_owned(),
-        }),
+        InstalledEvidenceCase::Contradictory
+        | InstalledEvidenceCase::PartialArtifactsWithoutIdentity
+        | InstalledEvidenceCase::InvalidConfiguration
+        | InstalledEvidenceCase::InvalidManifest => {
+            push_problem(problems, StatusProblem::InstalledStateCouldNotBeVerified);
+        }
         InstalledEvidenceCase::Coherent
         | InstalledEvidenceCase::ConfigurationOnly
         | InstalledEvidenceCase::ManifestOnly
-        | InstalledEvidenceCase::FirstInstall
-        | InstalledEvidenceCase::InvalidConfiguration
-        | InstalledEvidenceCase::InvalidManifest => {}
+        | InstalledEvidenceCase::FirstInstall => {}
     }
 
-    let manifest = match evidence.manifest_source {
-        EvidenceSourceState::Valid => evidence.manifest.clone(),
-        EvidenceSourceState::Missing => {
-            failures.push(status_file_failure(
-                "manifest",
-                &paths.manifest,
-                StatusFileError::Missing,
-                setup_action,
-            ));
-            None
-        }
-        EvidenceSourceState::InvalidFile(error) => {
-            failures.push(status_file_failure(
-                "manifest",
-                &paths.manifest,
-                error,
-                setup_action,
-            ));
-            None
-        }
-        EvidenceSourceState::InvalidContent => {
-            failures.push(StatusFailure {
-                check: "manifest",
-                detail: "invalid installed release manifest".to_owned(),
-                action: setup_action.to_owned(),
-            });
-            None
-        }
-    };
+    let manifest = evidence.manifest.clone();
+    if manifest.is_none() && evidence.case != InstalledEvidenceCase::FirstInstall {
+        push_problem(problems, StatusProblem::InstalledStateCouldNotBeVerified);
+    }
 
     if let Some(manifest) = &manifest {
         match read_status_file(&paths.binary, paths.euid, 0o755) {
             Ok(bytes) if sha256_bytes(&bytes) == manifest.binary_sha256 => {}
-            Ok(_) => failures.push(StatusFailure {
-                check: "executable",
-                detail: "digest does not match installed manifest".to_owned(),
-                action: setup_action.to_owned(),
-            }),
-            Err(error) => failures.push(status_file_failure(
-                "executable",
-                &paths.binary,
-                error,
-                setup_action,
-            )),
-        }
-    }
-
-    let configuration = match evidence.configuration_source {
-        EvidenceSourceState::Valid => evidence.configuration.clone(),
-        EvidenceSourceState::Missing => {
-            failures.push(status_file_failure(
-                "configuration",
-                &paths.config,
-                StatusFileError::Missing,
-                setup_action,
-            ));
-            None
-        }
-        EvidenceSourceState::InvalidFile(error) => {
-            failures.push(status_file_failure(
-                "configuration",
-                &paths.config,
-                error,
-                setup_action,
-            ));
-            None
-        }
-        EvidenceSourceState::InvalidContent => {
-            failures.push(StatusFailure {
-                check: "configuration",
-                detail: "invalid installed configuration".to_owned(),
-                action: setup_action.to_owned(),
-            });
-            None
-        }
-    };
-
-    if let Some(manifest) = &manifest {
-        let expected = render_projection(&paths.binary, &manifest.product_version);
-        let actual = read_projection(paths);
-        let matches = match (expected.as_ref(), actual.as_ref()) {
-            (Ok(expected), Ok(actual)) => {
-                expected.sha256 == manifest.projection_sha256
-                    && expected.marketplace == actual.marketplace
-                    && expected.plugin == actual.plugin
-                    && expected.mcp == actual.mcp
+            Ok(_) | Err(_) => {
+                push_problem(problems, StatusProblem::InstalledStateCouldNotBeVerified);
             }
-            _ => false,
-        };
-        if !matches {
-            failures.push(StatusFailure {
-                check: "projection",
-                detail: "digest does not match installed manifest".to_owned(),
-                action: setup_action.to_owned(),
-            });
         }
     }
+
+    let configuration = evidence.configuration.clone();
+    if configuration.is_none() && evidence.case != InstalledEvidenceCase::FirstInstall {
+        push_problem(problems, StatusProblem::InstalledStateCouldNotBeVerified);
+    }
+
+    let projection =
+        manifest
+            .as_ref()
+            .map_or(ProjectionEvidence::CouldNotVerify, |manifest| {
+                match (
+                    render_projection(&paths.binary, &manifest.product_version),
+                    read_projection(paths),
+                ) {
+                    (Ok(expected), Ok(actual))
+                        if expected.sha256 == manifest.projection_sha256
+                            && expected.marketplace == actual.marketplace
+                            && expected.plugin == actual.plugin
+                            && expected.mcp == actual.mcp =>
+                    {
+                        ProjectionEvidence::Ready
+                    }
+                    (Ok(_), Ok(_)) => {
+                        push_problem(problems, StatusProblem::ProjectionFault);
+                        ProjectionEvidence::Fault
+                    }
+                    _ => {
+                        push_problem(problems, StatusProblem::ProjectionCouldNotBeVerified);
+                        ProjectionEvidence::CouldNotVerify
+                    }
+                }
+            });
 
     let codex = configuration
         .as_ref()
@@ -301,11 +269,7 @@ fn inspect_installed_artifacts(
         _ => true,
     };
     if !codex_identity_matches {
-        failures.push(StatusFailure {
-            check: "configuration",
-            detail: "stored identity differs from installed manifest".to_owned(),
-            action: update_action.to_owned(),
-        });
+        push_problem(problems, StatusProblem::InstalledStateCouldNotBeVerified);
     }
 
     let codex_version =
@@ -313,100 +277,107 @@ fn inspect_installed_artifacts(
             .as_ref()
             .and_then(|codex| match read_codex_version(codex, &paths.codex_home) {
                 Ok(version) => Some(version),
-                Err(error) => {
-                    failures.push(StatusFailure {
-                        check: "codex-version",
-                        detail: error.to_string(),
-                        action: update_action.to_owned(),
-                    });
+                Err(_) => {
+                    push_problem(
+                        problems,
+                        StatusProblem::NativeRegistrationCouldNotBeVerified,
+                    );
                     None
                 }
             });
 
     InstalledStatusState {
+        case: evidence.case,
         manifest,
         codex,
         codex_version,
+        projection,
     }
 }
 
 fn inspect_native_registration(
     paths: &ResolvedUserPaths,
     installed: &InstalledStatusState,
-    setup_action: &str,
-    failures: &mut Vec<StatusFailure>,
-) {
-    if let (Some(codex), Some(manifest)) = (&installed.codex, &installed.manifest) {
-        let expected_source = paths
-            .marketplace
-            .join("plugins/codex-session-control")
-            .to_string_lossy()
-            .into_owned();
-        let plugin_is_current = run_codex_json(
-            codex,
-            &paths.codex_home,
-            &[
-                OsStr::new("plugin"),
-                OsStr::new("list"),
-                OsStr::new("--json"),
-            ],
-        )
-        .ok()
-        .is_some_and(|value| {
-            product_plugins(&value).is_ok_and(|product| {
-                product.len() == 1
-                    && plugin_matches(product[0], &manifest.plugin_version, &expected_source)
-            })
-        });
-        if !plugin_is_current {
-            failures.push(StatusFailure {
-                check: "plugin",
-                detail: "native registration does not match installed manifest".to_owned(),
-                action: setup_action.to_owned(),
-            });
+    problems: &mut Vec<StatusProblem>,
+) -> NativeRegistrationEvidence {
+    let (Some(codex), Some(manifest)) = (&installed.codex, &installed.manifest) else {
+        return NativeRegistrationEvidence::CouldNotVerify;
+    };
+    let expected_source = paths
+        .marketplace
+        .join("plugins/codex-session-control")
+        .to_string_lossy()
+        .into_owned();
+    let value = match run_codex_json(
+        codex,
+        &paths.codex_home,
+        &[
+            OsStr::new("plugin"),
+            OsStr::new("list"),
+            OsStr::new("--json"),
+        ],
+    ) {
+        Ok(value) => value,
+        Err(_) => {
+            push_problem(
+                problems,
+                StatusProblem::NativeRegistrationCouldNotBeVerified,
+            );
+            return NativeRegistrationEvidence::CouldNotVerify;
         }
+    };
+    let product = match product_plugins(&value) {
+        Ok(product) => product,
+        Err(_) => {
+            push_problem(
+                problems,
+                StatusProblem::NativeRegistrationCouldNotBeVerified,
+            );
+            return NativeRegistrationEvidence::CouldNotVerify;
+        }
+    };
+    if product.len() == 1 && plugin_matches(product[0], &manifest.plugin_version, &expected_source)
+    {
+        NativeRegistrationEvidence::Ready
+    } else {
+        push_problem(problems, StatusProblem::NativeRegistrationFault);
+        NativeRegistrationEvidence::Fault
     }
 }
 
 fn inspect_service_and_socket(
     context: &StatusContext,
     installed: &InstalledStatusState,
-    setup_action: &str,
-    journal_action: &str,
-    failures: &mut Vec<StatusFailure>,
+    problems: &mut Vec<StatusProblem>,
 ) -> ServiceStatusState {
     let paths = &context.target.paths;
     if let Some(manifest) = &installed.manifest {
         match read_status_file(&paths.unit, paths.euid, 0o644) {
             Ok(bytes) if sha256_bytes(&bytes) == manifest.service_unit_sha256 => {}
-            Ok(_) => failures.push(StatusFailure {
-                check: "service-unit",
-                detail: "digest does not match installed manifest".to_owned(),
-                action: setup_action.to_owned(),
-            }),
-            Err(error) => failures.push(status_file_failure(
-                "service-unit",
-                &paths.unit,
-                error,
-                setup_action,
-            )),
+            Ok(_) | Err(_) => {
+                push_problem(problems, StatusProblem::InstalledStateCouldNotBeVerified);
+            }
         }
     }
 
-    let systemctl =
-        resolve_named_executable(&context.path_environment, &context.cwd, "systemctl").ok();
+    if context.path_environment.is_none() || context.cwd.is_none() {
+        push_problem(problems, StatusProblem::InvocationContextCouldNotBeVerified);
+    }
+    let systemctl = context
+        .path_environment
+        .as_deref()
+        .zip(context.cwd.as_deref())
+        .and_then(|(path_environment, cwd)| {
+            resolve_named_executable(path_environment, cwd, "systemctl").ok()
+        });
     let enabled = systemctl.as_ref().and_then(|systemctl| {
         match query_systemctl_enablement(systemctl, &context.target.unit_name) {
             Ok(SystemctlEnablementState::Enabled) => Some(true),
             Ok(SystemctlEnablementState::Disabled | SystemctlEnablementState::NotFound) => {
                 Some(false)
             }
-            Err(error) => {
-                failures.push(StatusFailure {
-                    check: "service-state",
-                    detail: error.to_string(),
-                    action: journal_action.to_owned(),
-                });
+            Err(_) => {
+                push_problem(problems, StatusProblem::ServiceEnablementCouldNotBeVerified);
                 None
             }
         }
@@ -415,36 +386,21 @@ fn inspect_service_and_socket(
         match query_systemctl_activity(systemctl, &context.target.unit_name) {
             Ok(SystemctlActivityState::Active) => Some(true),
             Ok(SystemctlActivityState::Inactive) => Some(false),
-            Err(error) => {
-                failures.push(StatusFailure {
-                    check: "service-state",
-                    detail: error.to_string(),
-                    action: journal_action.to_owned(),
-                });
+            Err(_) => {
+                push_problem(problems, StatusProblem::ServiceActivityCouldNotBeVerified);
                 None
             }
         }
     });
     if systemctl.is_none() {
-        failures.push(StatusFailure {
-            check: "service-state",
-            detail: "systemctl is unavailable".to_owned(),
-            action: journal_action.to_owned(),
-        });
+        push_problem(problems, StatusProblem::ServiceEnablementCouldNotBeVerified);
+        push_problem(problems, StatusProblem::ServiceActivityCouldNotBeVerified);
     }
     if let (Some(enabled), Some(active)) = (enabled, active) {
         if enabled && !active {
-            failures.push(StatusFailure {
-                check: "service-state",
-                detail: "enabled service is not active".to_owned(),
-                action: journal_action.to_owned(),
-            });
+            push_problem(problems, StatusProblem::ServiceConfiguredButStopped);
         } else if !enabled && active {
-            failures.push(StatusFailure {
-                check: "service-state",
-                detail: "disabled service is active".to_owned(),
-                action: journal_action.to_owned(),
-            });
+            push_problem(problems, StatusProblem::ServiceActivityCouldNotBeVerified);
         }
     }
 
@@ -462,18 +418,10 @@ fn inspect_service_and_socket(
     };
     match (enabled, active, &socket_metadata) {
         (Some(true), _, Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            failures.push(StatusFailure {
-                check: "socket",
-                detail: "enabled service socket is missing".to_owned(),
-                action: journal_action.to_owned(),
-            });
+            push_problem(problems, StatusProblem::SocketMissing);
         }
         (Some(false), Some(false), Ok(_)) => {
-            failures.push(StatusFailure {
-                check: "socket",
-                detail: "disabled service socket is present".to_owned(),
-                action: journal_action.to_owned(),
-            });
+            push_problem(problems, StatusProblem::SocketUnsafe);
         }
         (_, _, Ok(metadata))
             if metadata.file_type().is_symlink()
@@ -481,18 +429,10 @@ fn inspect_service_and_socket(
                 || metadata.uid() != paths.euid
                 || !socket_mode_is_owner_only(metadata.mode()) =>
         {
-            failures.push(StatusFailure {
-                check: "socket",
-                detail: format!("{}: {SOCKET_SECURITY_REQUIREMENT}", paths.socket.display()),
-                action: unsafe_path_action(),
-            });
+            push_problem(problems, StatusProblem::SocketUnsafe);
         }
         (_, _, Err(error)) if error.kind() != std::io::ErrorKind::NotFound => {
-            failures.push(StatusFailure {
-                check: "socket",
-                detail: format!("{}: unreadable", paths.socket.display()),
-                action: unsafe_path_action(),
-            });
+            push_problem(problems, StatusProblem::SocketUnsafe);
         }
         _ => {}
     }
@@ -509,9 +449,7 @@ async fn inspect_app_server_health(
     paths: &ResolvedUserPaths,
     installed: &InstalledStatusState,
     service: &ServiceStatusState,
-    update_action: &str,
-    journal_action: &str,
-    failures: &mut Vec<StatusFailure>,
+    problems: &mut Vec<StatusProblem>,
 ) -> AppServerHealthState {
     let mut health = AppServerHealthState::Unverified;
     if service.active == Some(true)
@@ -531,38 +469,26 @@ async fn inspect_app_server_health(
             }
             Ok(_) => {
                 health = AppServerHealthState::Unhealthy;
-                failures.push(StatusFailure {
-                    check: "app-server-initialize",
-                    detail: "running Codex version differs from executable".to_owned(),
-                    action: update_action.to_owned(),
-                });
+                push_problem(problems, StatusProblem::AppServerUnavailable);
             }
             Err(_) => {
                 health = AppServerHealthState::Unhealthy;
-                failures.push(StatusFailure {
-                    check: "app-server-initialize",
-                    detail: "app-server initialize failed".to_owned(),
-                    action: journal_action.to_owned(),
-                });
+                push_problem(problems, StatusProblem::AppServerUnavailable);
             }
         }
+    } else if service.active == Some(true)
+        && service.socket_present
+        && service.socket_safe == Some(true)
+        && installed.codex_version.is_none()
+    {
+        push_problem(problems, StatusProblem::AppServerCouldNotBeVerified);
     }
 
     if let Some(manifest) = &installed.manifest
         && (manifest.product_version != env!("CARGO_PKG_VERSION")
             || manifest.target != product_target())
     {
-        failures.push(StatusFailure {
-            check: "manifest",
-            detail: format!(
-                "installed release {} ({}) differs from controller {} ({})",
-                manifest.product_version,
-                manifest.target,
-                env!("CARGO_PKG_VERSION"),
-                product_target()
-            ),
-            action: update_action.to_owned(),
-        });
+        push_problem(problems, StatusProblem::InstalledStateCouldNotBeVerified);
     }
     health
 }
@@ -572,29 +498,17 @@ fn inspect_desktop_configuration(
     context: &StatusContext,
     service: &ServiceStatusState,
     app_server_health: AppServerHealthState,
-    setup_action: &str,
-    update_action: &str,
-    failures: &mut Vec<StatusFailure>,
+    problems: &mut Vec<StatusProblem>,
 ) -> DesktopConfigurationState {
     if let Some(identity) = manifest.and_then(|manifest| manifest.desktop_attachment.as_ref()) {
-        let descriptor = inspect_status_descriptor(
-            identity,
-            &context.target.paths.socket,
-            failures,
-            setup_action,
-        );
+        let descriptor =
+            inspect_status_descriptor(identity, &context.target.paths.socket, problems);
         if descriptor == DescriptorStatusEvidence::NotReady
             && service.enabled == Some(true)
             && service.active == Some(true)
-            && !failures
-                .iter()
-                .any(|failure| failure.check == "desktop-descriptor")
+            && !problems.contains(&StatusProblem::DesktopDescriptorFault)
         {
-            failures.push(StatusFailure {
-                check: "desktop-descriptor",
-                detail: format!("{} is missing", identity.descriptor_path.display()),
-                action: update_action.to_owned(),
-            });
+            push_problem(problems, StatusProblem::DesktopDescriptorFault);
         }
         classify_desktop_configuration(descriptor, service, app_server_health)
     } else {
@@ -629,155 +543,133 @@ fn classify_desktop_configuration(
     DesktopConfigurationState::Ready
 }
 
-fn render_status_report(
-    display_command: &str,
+fn project_status_result(
     installed: &InstalledStatusState,
+    native: NativeRegistrationEvidence,
     service_state: &ServiceStatusState,
+    app_server_health: AppServerHealthState,
     desktop_configuration: DesktopConfigurationState,
-    failures: Vec<StatusFailure>,
-) -> StatusReport {
-    let compatibility_warning = installed.codex_version.as_ref().and_then(|(display, expected)| {
-        (expected != TESTED_CODEX_VERSION).then(|| {
-            format!(
-                "Compatibility warning: Codex app-server {display} has not been tested with codex-session-control {}; native results remain authoritative.\n",
-                env!("CARGO_PKG_VERSION")
-            )
-        })
-    });
-    let installed_version = installed
+    problems: Vec<StatusProblem>,
+) -> StatusResult {
+    if installed.case == InstalledEvidenceCase::FirstInstall {
+        return StatusResult::new(
+            StatusState::NotInstalled,
+            None,
+            None,
+            IntegrationState::Unavailable,
+            IntegrationState::Unavailable,
+            Vec::new(),
+        );
+    }
+
+    let version = installed
         .manifest
         .as_ref()
-        .map(|manifest| manifest.product_version.as_str())
-        .unwrap_or("not_installed");
+        .and_then(|manifest| Version::parse(&manifest.product_version).ok());
     let service = match (service_state.enabled, service_state.active) {
-        (Some(enabled), Some(active)) => format!(
-            "{}, {}",
-            if enabled { "enabled" } else { "disabled" },
-            if active { "active" } else { "inactive" }
-        ),
-        _ => "unknown, unknown".to_owned(),
+        (Some(true), Some(true)) => ServiceSummary::RunningAutomatic,
+        (Some(false), Some(false)) => ServiceSummary::StoppedAutomaticOff,
+        (Some(true), Some(false)) => ServiceSummary::StoppedUnexpectedAutomaticOn,
+        _ => ServiceSummary::CouldNotVerify,
     };
-    let healthy = failures.is_empty();
-    let desktop_configuration = match desktop_configuration {
-        DesktopConfigurationState::Ready => "ready",
-        DesktopConfigurationState::NotReady => "not_ready",
-        DesktopConfigurationState::Unverified => "unverified",
-        DesktopConfigurationState::Unavailable => "unavailable",
+    let shared_fault = matches!(
+        (service_state.enabled, service_state.active),
+        (Some(true), Some(false)) | (Some(false), Some(true))
+    ) || (service_state.socket_present
+        && service_state.socket_safe == Some(false))
+        || app_server_health == AppServerHealthState::Unhealthy;
+    let shared_unverified = service_state.enabled.is_none()
+        || service_state.active.is_none()
+        || service_state.socket_safe.is_none()
+        || (service_state.active == Some(true)
+            && app_server_health == AppServerHealthState::Unverified);
+    let disabled = service_state.enabled == Some(false)
+        && service_state.active == Some(false)
+        && !service_state.socket_present;
+
+    let cli = if shared_fault
+        || installed.projection == ProjectionEvidence::Fault
+        || native == NativeRegistrationEvidence::Fault
+    {
+        IntegrationState::Unhealthy
+    } else if shared_unverified
+        || installed.projection == ProjectionEvidence::CouldNotVerify
+        || native == NativeRegistrationEvidence::CouldNotVerify
+    {
+        IntegrationState::CouldNotVerify
+    } else if disabled {
+        IntegrationState::Unavailable
+    } else {
+        IntegrationState::Ready
     };
-    let mut stdout = compatibility_warning.unwrap_or_default();
-    stdout.push_str(&format!(
-        "Status: {}\n\
-Installed release: {installed_version}\n\
-Codex app-server service: {service}\n\
-CLI attachment: available through codex-session-control codex\n\
-Desktop configuration: {desktop_configuration}\n\
-Loaded task state: not_verified\n",
-        if healthy { "healthy" } else { "drifted" },
-    ));
-    if healthy && service_state.enabled == Some(false) {
-        stdout.push_str(&format!("Availability: {display_command} enable\n"));
-    }
-    if !failures.is_empty() {
-        stdout.push_str("Failed checks:\n");
-        for failure in failures {
-            stdout.push_str(&format!(
-                "- {}: {}\n  action: {}\n",
-                failure.check, failure.detail, failure.action
-            ));
+    let desktop = match desktop_configuration {
+        DesktopConfigurationState::Unavailable => IntegrationState::Unavailable,
+        DesktopConfigurationState::NotReady => {
+            if disabled {
+                IntegrationState::Unavailable
+            } else {
+                IntegrationState::Unhealthy
+            }
         }
-    }
-    StatusReport { stdout, healthy }
+        DesktopConfigurationState::Unverified if shared_fault => IntegrationState::Unhealthy,
+        DesktopConfigurationState::Unverified => IntegrationState::CouldNotVerify,
+        DesktopConfigurationState::Ready if disabled => IntegrationState::Unavailable,
+        DesktopConfigurationState::Ready => IntegrationState::Ready,
+    };
+    let state = if problems.is_empty() && disabled {
+        StatusState::Disabled
+    } else if problems.is_empty() && cli == IntegrationState::Ready {
+        StatusState::Healthy
+    } else {
+        StatusState::Unhealthy
+    };
+
+    StatusResult::new(state, version, Some(service), cli, desktop, problems)
 }
 
 fn inspect_status_descriptor(
     identity: &DesktopAttachmentIdentity,
     socket: &Path,
-    failures: &mut Vec<StatusFailure>,
-    setup_action: &str,
+    problems: &mut Vec<StatusProblem>,
 ) -> DescriptorStatusEvidence {
     let expected = match render_descriptor(socket) {
         Ok(expected) => expected,
-        Err(error) => {
-            failures.push(StatusFailure {
-                check: "desktop-descriptor",
-                detail: error.to_string(),
-                action: unsafe_path_action(),
-            });
+        Err(_) => {
+            push_problem(problems, StatusProblem::DesktopCouldNotBeVerified);
             return DescriptorStatusEvidence::Unverified;
         }
     };
-    match inspect_descriptor(identity, &expected) {
+    match inspect_descriptor_classified(identity, &expected) {
         Ok(DescriptorState::Foreign) => {
-            failures.push(StatusFailure {
-                check: "desktop-descriptor",
-                detail: format!("{} is foreign", identity.descriptor_path.display()),
-                action: setup_action.to_owned(),
-            });
+            push_problem(problems, StatusProblem::DesktopDescriptorFault);
             DescriptorStatusEvidence::NotReady
         }
         Ok(DescriptorState::Absent) => DescriptorStatusEvidence::NotReady,
         Ok(DescriptorState::Expected) => DescriptorStatusEvidence::Expected,
-        Err(error) => {
-            let evidence = classify_descriptor_inspection_error(&error);
-            failures.push(StatusFailure {
-                check: "desktop-descriptor",
-                detail: error.to_string(),
-                action: unsafe_path_action(),
-            });
+        Err(failure) => {
+            let evidence = match failure {
+                DescriptorInspectionFailure::Fault(_) => DescriptorStatusEvidence::NotReady,
+                DescriptorInspectionFailure::Inconclusive(_) => {
+                    DescriptorStatusEvidence::Unverified
+                }
+            };
+            push_problem(
+                problems,
+                if evidence == DescriptorStatusEvidence::NotReady {
+                    StatusProblem::DesktopDescriptorFault
+                } else {
+                    StatusProblem::DesktopCouldNotBeVerified
+                },
+            );
             evidence
         }
     }
 }
 
-fn classify_descriptor_inspection_error(error: &ControllerError) -> DescriptorStatusEvidence {
-    const PREFIX: &str = "Desktop descriptor safety error: ";
-
-    match error {
-        ControllerError::InvalidData { .. } => DescriptorStatusEvidence::NotReady,
-        ControllerError::Operational(detail) => match detail.strip_prefix(PREFIX) {
-            Some(
-                "descriptor ancestor is unsafe"
-                | "descriptor ancestor leaves the effective-user tree"
-                | "descriptor parent is not owned by the effective user"
-                | "descriptor is not an owner-only regular file"
-                | "descriptor JSON is invalid"
-                | "descriptor schema is unsupported"
-                | "descriptor socket path must be UTF-8"
-                | "descriptor socket path is not a normalized absolute path",
-            ) => DescriptorStatusEvidence::NotReady,
-            // Safe-open, metadata, read, race, and unknown inspection failures do not prove drift.
-            _ => DescriptorStatusEvidence::Unverified,
-        },
+fn push_problem(problems: &mut Vec<StatusProblem>, problem: StatusProblem) {
+    if !problems.contains(&problem) {
+        problems.push(problem);
     }
-}
-
-fn status_file_failure(
-    check: &'static str,
-    path: &Path,
-    error: StatusFileError,
-    repair_action: &str,
-) -> StatusFailure {
-    match error {
-        StatusFileError::Missing => StatusFailure {
-            check,
-            detail: "missing".to_owned(),
-            action: repair_action.to_owned(),
-        },
-        StatusFileError::Unsafe => StatusFailure {
-            check,
-            detail: format!("{}: unsafe owner, type, or mode", path.display()),
-            action: unsafe_path_action(),
-        },
-        StatusFileError::Unreadable => StatusFailure {
-            check,
-            detail: format!("{}: unreadable", path.display()),
-            action: unsafe_path_action(),
-        },
-    }
-}
-
-fn unsafe_path_action() -> String {
-    "inspect the path and restore its approved ownership, type, and mode".to_owned()
 }
 
 fn read_projection(paths: &ResolvedUserPaths) -> Result<RenderedProjection, StatusFileError> {

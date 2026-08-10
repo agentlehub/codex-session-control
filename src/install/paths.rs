@@ -659,7 +659,7 @@ pub(super) fn validate_control_socket(path: &Path, euid: u32) -> Result<(), Cont
     Ok(())
 }
 
-pub(super) fn shell_quote_path(path: &Path) -> Result<String, ControllerError> {
+pub(crate) fn shell_quote_path(path: &Path) -> Result<String, ControllerError> {
     let value = path.to_str().ok_or(ControllerError::InvalidData {
         field: "path",
         reason: "shell recovery path must be UTF-8",

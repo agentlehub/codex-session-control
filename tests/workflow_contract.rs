@@ -1036,8 +1036,9 @@ fn standard_checks_wrapper_owns_private_temporary_directory_lifecycle() {
 }
 
 #[test]
-fn native_ci_and_release_binaries_expose_exactly_eight_commands() {
-    let exact_commands = "expected=\"$(printf '%s\\n' setup update status enable disable uninstall mcp-server codex)\"";
+fn native_ci_and_release_binaries_expose_exactly_seven_visible_commands() {
+    let exact_commands =
+        "expected=\"$(printf '%s\\n' setup update status enable disable uninstall codex)\"";
     let ci = workflow("ci.yml");
     let release = workflow("release.yml");
 
@@ -1049,7 +1050,7 @@ fn native_ci_and_release_binaries_expose_exactly_eight_commands() {
     ] {
         assert!(
             contract.contains(exact_commands),
-            "{surface} does not assert the exact eight-command surface"
+            "{surface} does not assert the exact seven-visible-command surface"
         );
     }
 }
