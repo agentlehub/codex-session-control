@@ -59,14 +59,13 @@ Available commands:
 
 | Command | What it does |
 | --- | --- |
-| `setup` | Install or repair Codex Session Control and start its service. |
-| `update` | Download and install the latest release. |
-| `status` | Check the installation, service, CLI, and Desktop integration. |
-| `enable` | Enable and start the service. |
-| `disable` | Stop the service and prevent it from starting automatically. |
-| `uninstall` | Remove Codex Session Control without deleting your Codex login or sessions. |
-| `mcp-server` | Run the MCP server. The installed plugin starts it automatically. |
-| `codex` | Launch Codex CLI connected to Codex Session Control. |
+| `setup` | Install Codex Session Control and start the shared app-server. |
+| `update` | Install the latest release. |
+| `status` | Check whether Codex Session Control is ready. |
+| `enable` | Start the service and turn on automatic startup. |
+| `disable` | Stop the service and turn off automatic startup. |
+| `uninstall` | Remove the service while keeping your Codex data. |
+| `codex` | Start Codex CLI through the shared app-server. |
 
 ### MCP tools
 
