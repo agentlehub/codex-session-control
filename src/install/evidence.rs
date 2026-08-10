@@ -407,40 +407,13 @@ pub(super) struct SelectedHomeEvidence {
     pub(super) selected_home: Option<PathBuf>,
     pub(super) configuration: Option<ProductConfig>,
     pub(super) manifest: Option<InstalledRelease>,
-    pub(super) configuration_source: EvidenceSourceState,
-    pub(super) manifest_source: EvidenceSourceState,
     pub(super) native_product_residue: NativeProductResidue,
 }
 
 pub(super) enum StoredEvidence<T> {
     Missing,
     Valid(T),
-    Invalid(InvalidEvidence),
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(super) enum InvalidEvidence {
-    Content,
-    File(StatusFileError),
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(super) enum EvidenceSourceState {
-    Missing,
-    Valid,
-    InvalidContent,
-    InvalidFile(StatusFileError),
-}
-
-fn evidence_source_state<T>(evidence: &StoredEvidence<T>) -> EvidenceSourceState {
-    match evidence {
-        StoredEvidence::Missing => EvidenceSourceState::Missing,
-        StoredEvidence::Valid(_) => EvidenceSourceState::Valid,
-        StoredEvidence::Invalid(InvalidEvidence::Content) => EvidenceSourceState::InvalidContent,
-        StoredEvidence::Invalid(InvalidEvidence::File(error)) => {
-            EvidenceSourceState::InvalidFile(*error)
-        }
-    }
+    Invalid,
 }
 
 pub(super) fn selected_codex_home(
@@ -512,8 +485,8 @@ pub(super) fn classify_selected_home_evidence_with_native_product_artifact(
         _ => None,
     };
     let case = match (&configuration, &manifest) {
-        (StoredEvidence::Invalid(_), _) => InstalledEvidenceCase::InvalidConfiguration,
-        (_, StoredEvidence::Invalid(_)) => InstalledEvidenceCase::InvalidManifest,
+        (StoredEvidence::Invalid, _) => InstalledEvidenceCase::InvalidConfiguration,
+        (_, StoredEvidence::Invalid) => InstalledEvidenceCase::InvalidManifest,
         (StoredEvidence::Valid(_), StoredEvidence::Valid(_)) if selected_home.is_some() => {
             InstalledEvidenceCase::Coherent
         }
@@ -542,8 +515,6 @@ pub(super) fn classify_selected_home_evidence_with_native_product_artifact(
             StoredEvidence::Valid(manifest) => Some(manifest.clone()),
             _ => None,
         },
-        configuration_source: evidence_source_state(&configuration),
-        manifest_source: evidence_source_state(&manifest),
         native_product_residue,
     }
 }
@@ -586,10 +557,10 @@ pub(super) fn read_configuration_evidence(
     let bytes = match read_product_evidence_file(&paths.home, paths.euid, &paths.config, 0o600) {
         Ok(bytes) => bytes,
         Err(StatusFileError::Missing) => return StoredEvidence::Missing,
-        Err(error) => return StoredEvidence::Invalid(InvalidEvidence::File(error)),
+        Err(_) => return StoredEvidence::Invalid,
     };
     let Ok(text) = std::str::from_utf8(&bytes) else {
-        return StoredEvidence::Invalid(InvalidEvidence::Content);
+        return StoredEvidence::Invalid;
     };
     if let Ok(configuration) = toml::from_str::<ProductConfig>(text) {
         return if configuration
@@ -608,10 +579,10 @@ pub(super) fn read_configuration_evidence(
         {
             StoredEvidence::Valid(configuration)
         } else {
-            StoredEvidence::Invalid(InvalidEvidence::Content)
+            StoredEvidence::Invalid
         };
     }
-    StoredEvidence::Invalid(InvalidEvidence::Content)
+    StoredEvidence::Invalid
 }
 
 pub(super) fn read_manifest_evidence(
@@ -620,7 +591,7 @@ pub(super) fn read_manifest_evidence(
     let bytes = match read_product_evidence_file(&paths.home, paths.euid, &paths.manifest, 0o600) {
         Ok(bytes) => bytes,
         Err(StatusFileError::Missing) => return StoredEvidence::Missing,
-        Err(error) => return StoredEvidence::Invalid(InvalidEvidence::File(error)),
+        Err(_) => return StoredEvidence::Invalid,
     };
     if let Ok(manifest) = serde_json::from_slice::<InstalledRelease>(&bytes) {
         return if manifest
@@ -640,10 +611,10 @@ pub(super) fn read_manifest_evidence(
         {
             StoredEvidence::Valid(manifest)
         } else {
-            StoredEvidence::Invalid(InvalidEvidence::Content)
+            StoredEvidence::Invalid
         };
     }
-    StoredEvidence::Invalid(InvalidEvidence::Content)
+    StoredEvidence::Invalid
 }
 
 fn product_artifact_is_present(paths: &ResolvedUserPaths) -> bool {

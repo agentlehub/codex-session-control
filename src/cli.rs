@@ -35,13 +35,12 @@ impl Cli {
         T: Into<OsString> + Clone,
     {
         let mut args: Vec<OsString> = args.into_iter().map(Into::into).collect();
-        if let Some(codex_index) = args.iter().position(|arg| arg == "codex") {
-            if args
+        if let Some(codex_index) = args.iter().position(|arg| arg == "codex")
+            && args
                 .get(codex_index + 1)
                 .is_some_and(|arg| arg == "--verbose")
-            {
-                args.insert(codex_index + 1, OsString::from("--"));
-            }
+        {
+            args.insert(codex_index + 1, OsString::from("--"));
         }
 
         <Self as Parser>::try_parse_from(args)

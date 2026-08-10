@@ -318,6 +318,29 @@ mod tests {
             );
         }
 
+        let mut diagnostics = Diagnostics::record(DiagnosticCommand::Status);
+        for stage in [
+            "preflight",
+            "installed-state",
+            "native-registration",
+            "service",
+            "app-server",
+            "desktop",
+        ] {
+            diagnostics.completed(stage);
+        }
+        assert_eq!(
+            diagnostics.recorded_lines(),
+            [
+                "[verbose] status: completed preflight\n",
+                "[verbose] status: completed installed-state\n",
+                "[verbose] status: completed native-registration\n",
+                "[verbose] status: completed service\n",
+                "[verbose] status: completed app-server\n",
+                "[verbose] status: completed desktop\n",
+            ]
+        );
+
         let mut diagnostics = Diagnostics::record(DiagnosticCommand::Setup);
         diagnostics.emit(DiagnosticEvent::SelectedCodexHome {
             codex_home: PathBuf::from("/home/test/.codex"),

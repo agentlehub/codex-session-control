@@ -433,16 +433,23 @@ async fn outer_update_retries_every_pre_spawn_release_stage() {
             installed(&fixture.paths).product_version,
             env!("CARGO_PKG_VERSION")
         );
-        assert!(
-            status_with_context(StatusContext {
-                target: fixture.context(true).target,
-                path_environment: fixture.context(true).path_environment,
-                desktop_environment: fixture.context(true).desktop_environment,
-                cwd: fixture.context(true).cwd,
-            })
+        let mut status_diagnostics = crate::diagnostics::Diagnostics::new(
+            false,
+            crate::diagnostics::DiagnosticCommand::Status,
+        );
+        assert_eq!(
+            status_with_context(
+                StatusContext {
+                    target: fixture.context(true).target,
+                    path_environment: Some(fixture.context(true).path_environment),
+                    desktop_environment: fixture.context(true).desktop_environment,
+                    cwd: Some(fixture.context(true).cwd),
+                },
+                &mut status_diagnostics
+            )
             .await
-            .unwrap()
-            .healthy
+            .state(),
+            StatusState::Healthy,
         );
         let candidate_runs = fs::read_to_string(candidate_log).unwrap();
         assert_eq!(

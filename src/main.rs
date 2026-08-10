@@ -11,7 +11,7 @@ mod model;
 mod test_support;
 
 use cli::{Cli, Command};
-use cli_output::{OrdinaryFailure, RenderedCli, UserFailure};
+use cli_output::{OrdinaryFailure, RenderedCli, UserFailure, UserSuccess};
 use diagnostics::{DiagnosticCause, DiagnosticCommand, Diagnostics};
 use error::ControllerError;
 use std::io::{self, Write};
@@ -69,8 +69,13 @@ async fn run(cli: Cli) -> Result<ProcessOutcome, ControllerError> {
         return Ok(ProcessOutcome::Exit(0));
     }
     if let Command::Codex { args } = cli.command {
-        install::codex_wrapper(args).await?;
-        return Ok(ProcessOutcome::Exit(0));
+        let mut diagnostics = Diagnostics::new(verbose, DiagnosticCommand::Codex);
+        let result = install::codex_wrapper(args, &mut diagnostics).await;
+        diagnostics.flush();
+        return Ok(match result {
+            Ok(()) => ProcessOutcome::Exit(0),
+            Err(failure) => ProcessOutcome::Render(failure.render()),
+        });
     }
     if let Command::Setup { desktop_launcher } = cli.command {
         let mut diagnostics = Diagnostics::new(verbose, DiagnosticCommand::Setup);
@@ -118,11 +123,14 @@ async fn run(cli: Cli) -> Result<ProcessOutcome, ControllerError> {
         });
     }
     if matches!(&cli.command, Command::Status) {
-        let paths = install::ResolvedUserPaths::from_effective_user()?;
-        let target = install::LifecycleTarget::production(paths);
-        let report = install::status(target).await?;
-        print!("{}", report.stdout);
-        return Ok(ProcessOutcome::Exit(if report.healthy { 0 } else { 1 }));
+        let mut diagnostics = Diagnostics::new(verbose, DiagnosticCommand::Status);
+        let result = install::status_from_paths(
+            install::ResolvedUserPaths::from_effective_user(),
+            &mut diagnostics,
+        )
+        .await;
+        diagnostics.flush();
+        return Ok(ProcessOutcome::Render(UserSuccess::Status(result).render()));
     }
     if matches!(&cli.command, Command::Enable | Command::Disable) {
         let command = match &cli.command {

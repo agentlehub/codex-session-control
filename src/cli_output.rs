@@ -243,7 +243,9 @@ pub(crate) enum OrdinaryFailure {
     SetupUnexpectedRetry,
     SetupInstalledStateCheckStatus,
     SetupInstallationFilesRetryUpdate,
-    SetupInstalledStateRepair { binary: PathBuf },
+    SetupInstalledStateRepair {
+        binary: PathBuf,
+    },
     SetupCliIntegrationRetry,
     SetupCliIntegrationCheckStatus,
     SetupInstallationFilesRetry,
@@ -275,9 +277,11 @@ pub(crate) enum OrdinaryFailure {
     EnableDesktopIntegrationRetry,
     EnableServiceStartRetry,
     EnableServiceStateRetry,
+    #[cfg(test)]
     EnableUnexpectedCheckStatus,
     DisableUnexpectedRetry,
     DisableServiceStopRetry,
+    #[cfg(test)]
     DisableUnexpectedCheckStatus,
     UninstallUnexpectedRetry,
     UninstallServiceStopRetry,
@@ -1131,6 +1135,7 @@ fn render_ordinary_failure(failure: &OrdinaryFailure) -> String {
             "The service state could not be verified.",
             ENABLE_RETRY,
         ),
+        #[cfg(test)]
         OrdinaryFailure::EnableUnexpectedCheckStatus => {
             (ENABLE, "The operation failed unexpectedly.", STATUS)
         }
@@ -1140,6 +1145,7 @@ fn render_ordinary_failure(failure: &OrdinaryFailure) -> String {
         OrdinaryFailure::DisableServiceStopRetry => {
             (DISABLE, "The service could not be stopped.", DISABLE_RETRY)
         }
+        #[cfg(test)]
         OrdinaryFailure::DisableUnexpectedCheckStatus => {
             (DISABLE, "The operation failed unexpectedly.", STATUS)
         }

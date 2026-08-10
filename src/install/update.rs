@@ -930,22 +930,17 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
     )?;
 
     if candidate_version == installed_version && candidate_sha256 == manifest.binary_sha256 {
-        let status = status_with_context(StatusContext {
-            target: lifecycle.target.clone(),
-            path_environment: lifecycle.path_environment.clone(),
-            desktop_environment: lifecycle.desktop_environment.clone(),
-            cwd: lifecycle.cwd.clone(),
-        })
-        .await
-        .map_err(|_| {
-            super::fail_with_diagnostic(
-                diagnostics,
-                UpdateStage::CandidatePreflight.diagnostic_name(),
-                DiagnosticCause::Validation,
-                installed_state_failure(),
-            )
-        })?;
-        if status.healthy {
+        let status = status_with_context(
+            StatusContext {
+                target: lifecycle.target.clone(),
+                path_environment: Some(lifecycle.path_environment.clone()),
+                desktop_environment: lifecycle.desktop_environment.clone(),
+                cwd: Some(lifecycle.cwd.clone()),
+            },
+            diagnostics,
+        )
+        .await;
+        if status.state() == crate::cli_output::StatusState::Healthy {
             return Ok(UserSuccess::Update(UpdateSuccess::new(
                 UpdateState::AlreadyCurrent,
                 candidate_version,

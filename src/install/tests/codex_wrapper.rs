@@ -7,6 +7,8 @@ use super::*;
 
 #[tokio::test]
 async fn wrapper_preflight_builds_exact_native_argv_caller_cwd_and_selected_home_environment() {
+    use crate::diagnostics::{DiagnosticCommand, Diagnostics};
+
     let fixture = Fixture::new();
     let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
@@ -19,7 +21,8 @@ async fn wrapper_preflight_builds_exact_native_argv_caller_cwd_and_selected_home
         OsString::from("unix://user-supplied"),
     ];
 
-    let command = prepare_codex_wrapper(&fixture.paths, user_args.clone())
+    let mut diagnostics = Diagnostics::record(DiagnosticCommand::Codex);
+    let command = prepare_codex_wrapper(&fixture.paths, user_args.clone(), &mut diagnostics)
         .await
         .unwrap();
 
@@ -48,10 +51,37 @@ async fn wrapper_preflight_builds_exact_native_argv_caller_cwd_and_selected_home
             .flatten(),
         Some(fixture.paths.codex_home.as_os_str())
     );
+    assert!(diagnostics.recorded_lines().is_empty());
+}
+
+#[tokio::test]
+async fn successful_wrapper_preparation_runs_only_native_bytes_when_verbose() {
+    use crate::diagnostics::{DiagnosticCommand, Diagnostics};
+
+    let fixture = Fixture::new();
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(fixture.context(true)).await.unwrap();
+    let mut diagnostics = Diagnostics::record(DiagnosticCommand::Codex);
+    let mut command = prepare_codex_wrapper(&fixture.paths, Vec::new(), &mut diagnostics)
+        .await
+        .unwrap();
+    write_executable_fixture(
+        &fixture.fake_bin.join("codex"),
+        "#!/bin/sh\nprintf 'native stdout sentinel\\n'\nprintf 'native stderr sentinel\\n' >&2\nexit 23\n",
+    );
+
+    let output = command.output().unwrap();
+
+    assert_eq!(output.status.code(), Some(23));
+    assert_eq!(output.stdout, b"native stdout sentinel\n");
+    assert_eq!(output.stderr, b"native stderr sentinel\n");
+    assert!(diagnostics.recorded_lines().is_empty());
 }
 
 #[tokio::test]
 async fn wrapper_rejects_unavailable_authority_before_exec_with_status_and_enable_guidance() {
+    use crate::diagnostics::{DiagnosticCommand, Diagnostics};
+
     let fixture = Fixture::new();
     let authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
@@ -59,17 +89,23 @@ async fn wrapper_rejects_unavailable_authority_before_exec_with_status_and_enabl
     fs::remove_file(&fixture.active).unwrap();
     fs::remove_file(&fixture.paths.socket).unwrap();
 
-    let error = prepare_codex_wrapper(&fixture.paths, Vec::new())
+    let mut diagnostics = Diagnostics::record(DiagnosticCommand::Codex);
+    let error = prepare_codex_wrapper(&fixture.paths, Vec::new(), &mut diagnostics)
         .await
         .unwrap_err();
 
-    assert_eq!(error.exit_code(), 1);
-    assert!(error.to_string().contains("codex-session-control status"));
-    assert!(error.to_string().contains("codex-session-control enable"));
+    assert_eq!(error, crate::cli_output::UserFailure::WrapperUnavailable);
+    assert_eq!(error.render().exit_code, 1);
+    assert_eq!(
+        diagnostics.recorded_lines(),
+        ["[verbose] codex: failed preflight (validation failed)\n"]
+    );
 }
 
 #[tokio::test]
 async fn wrapper_rejects_a_valid_but_contradictory_manifest_before_exec() {
+    use crate::diagnostics::{DiagnosticCommand, Diagnostics};
+
     let fixture = Fixture::new();
     let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
@@ -85,22 +121,34 @@ async fn wrapper_rejects_a_valid_but_contradictory_manifest_before_exec() {
     )
     .unwrap();
 
-    let error = prepare_codex_wrapper(&fixture.paths, Vec::new())
+    let mut diagnostics = Diagnostics::record(DiagnosticCommand::Codex);
+    let error = prepare_codex_wrapper(&fixture.paths, Vec::new(), &mut diagnostics)
         .await
         .unwrap_err();
 
-    assert_eq!(error.exit_code(), 1);
-    assert!(
-        error.to_string().contains(
-            "coherent schema-2 configuration and supported schema-2 or schema-3 installed manifest are required"
-        )
+    assert_eq!(error, crate::cli_output::UserFailure::WrapperUnavailable);
+    assert_eq!(
+        diagnostics.recorded_lines(),
+        ["[verbose] codex: failed preflight (validation failed)\n"]
     );
 }
 
 #[test]
-fn wrapper_exec_failure_is_operational_exit_one() {
-    let error = exec_codex_wrapper_command(Command::new("/missing/native-codex")).unwrap_err();
+fn wrapper_exec_failure_is_safe_and_exact() {
+    use crate::diagnostics::{DiagnosticCommand, Diagnostics};
 
-    assert_eq!(error.exit_code(), 1);
-    assert!(error.to_string().contains("cannot exec configured Codex"));
+    let raw_sentinel = "/missing/native-codex-raw-sentinel";
+    let mut diagnostics = Diagnostics::record(DiagnosticCommand::Codex);
+    let error =
+        exec_codex_wrapper_command(Command::new(raw_sentinel), &mut diagnostics).unwrap_err();
+
+    assert_eq!(error, crate::cli_output::UserFailure::WrapperUnavailable);
+    let rendered = error.render();
+    assert_eq!(rendered.exit_code, 1);
+    assert!(!rendered.stderr.contains(raw_sentinel));
+    assert_eq!(
+        diagnostics.recorded_lines(),
+        ["[verbose] codex: failed exec (unexpected failure)\n"]
+    );
+    assert!(!diagnostics.recorded_lines().concat().contains(raw_sentinel));
 }

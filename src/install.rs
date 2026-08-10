@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     path::{Path, PathBuf},
 };
 
@@ -26,7 +26,7 @@ mod wrapper;
 
 pub(crate) use evidence::{ResolvedUserPaths, load_installed_config};
 pub(crate) use service::LifecycleTarget;
-pub(crate) use status::status;
+pub(crate) use status::status_from_paths;
 pub(crate) use wrapper::codex_wrapper;
 
 use evidence::SelectedHomeEvidence;
@@ -40,15 +40,6 @@ fn fail_with_diagnostic(
 ) -> UserFailure {
     diagnostics.failed(stage, cause);
     failure
-}
-
-fn display_command_for_paths(paths: &ResolvedUserPaths, path_environment: &OsStr) -> String {
-    let install_bin = paths.home.join(".local/bin");
-    if std::env::split_paths(path_environment).any(|entry| entry == install_bin) {
-        "codex-session-control".to_owned()
-    } else {
-        paths.binary.display().to_string()
-    }
 }
 
 fn missing_control_socket_error() -> ControllerError {

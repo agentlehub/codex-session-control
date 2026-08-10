@@ -237,6 +237,7 @@ pub(super) async fn setup_with_context(context: SetupContext) -> Result<UserSucc
     setup_with_context_and_diagnostics(context, &mut diagnostics).await
 }
 
+#[cfg(test)]
 pub(super) async fn setup_with_context_and_diagnostics(
     context: SetupContext,
     diagnostics: &mut Diagnostics,

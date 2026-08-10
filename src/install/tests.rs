@@ -13,7 +13,10 @@ use uzers::os::unix::UserExt;
 
 use crate::{
     app_server::{TESTED_CODEX_CLI_VERSION, TESTED_CODEX_CLI_VERSION_OUTPUT, TESTED_CODEX_VERSION},
-    cli_output::RunningClientFacts,
+    cli_output::{
+        IntegrationState, RunningClientFacts, ServiceSummary, StatusProblem, StatusResult,
+        StatusState, UserSuccess,
+    },
     desktop::render_descriptor,
     error::ControllerError,
     model::{DesktopAttachmentIdentity, InstalledRelease, ProductConfig},
@@ -27,18 +30,17 @@ use super::{
         enable_with_context, enable_with_context_and_diagnostics,
     },
     evidence::{
-        InstalledEvidenceCase, InvalidEvidence, NativeProductResidue, ResolvedUserPaths,
-        SelectedHomeOperation, StoredEvidence, classify_selected_home_evidence,
+        InstalledEvidenceCase, NativeProductResidue, ResolvedUserPaths, SelectedHomeOperation,
+        StoredEvidence, classify_selected_home_evidence,
         classify_selected_home_evidence_with_native_product_artifact, load_config_from_paths,
         read_configuration_evidence, read_manifest_evidence, require_selected_home_evidence,
         select_first_install_codex_home, selected_codex_home,
     },
     native::marketplace_roots,
     paths::{
-        FileKind, SOCKET_SECURITY_REQUIREMENT, StatusFileError, atomic_write,
-        create_missing_selected_codex_home, create_product_dir, create_shared_dir,
-        remove_owned_empty_dir, resolve_codex_executable, shell_quote_path, validate_config_file,
-        validate_control_socket, validate_existing,
+        FileKind, SOCKET_SECURITY_REQUIREMENT, atomic_write, create_missing_selected_codex_home,
+        create_product_dir, create_shared_dir, remove_owned_empty_dir, resolve_codex_executable,
+        shell_quote_path, validate_config_file, validate_control_socket, validate_existing,
     },
     product_target,
     release::{
@@ -61,7 +63,7 @@ use super::{
         setup_invocation_failure, setup_preflight, setup_with_context,
         setup_with_context_after_start, setup_with_context_and_diagnostics,
     },
-    status::{StatusContext, status_with_context},
+    status::{StatusContext, status_from_paths, status_with_context},
     test_target,
     uninstall::{uninstall_with_context, uninstall_with_context_and_diagnostics},
     update::{
