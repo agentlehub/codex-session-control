@@ -45,39 +45,17 @@ enum LifecycleStage {
 }
 
 impl LifecycleStage {
-    fn completed_event(self) -> DiagnosticEvent {
+    const fn diagnostic_name(self) -> &'static str {
         match self {
-            Self::Configuration => DiagnosticEvent::CompletedConfiguration,
-            Self::ServiceUnit => DiagnosticEvent::CompletedServiceUnit,
-            Self::Descriptor => DiagnosticEvent::CompletedDescriptor,
-            Self::DescriptorRemove => DiagnosticEvent::CompletedDescriptorRemove,
-            Self::ServiceEnable => DiagnosticEvent::CompletedServiceEnable,
-            Self::ServiceDisable => DiagnosticEvent::CompletedServiceDisable,
-            Self::ServiceVerify => DiagnosticEvent::CompletedServiceVerify,
+            Self::Configuration => "configuration",
+            Self::ServiceUnit => "service-unit",
+            Self::Descriptor => "descriptor",
+            Self::DescriptorRemove => "descriptor-remove",
+            Self::ServiceEnable => "service-enable",
+            Self::ServiceDisable => "service-disable",
+            Self::ServiceVerify => "service-verify",
         }
     }
-
-    fn failed_event(self, cause: DiagnosticCause) -> DiagnosticEvent {
-        match self {
-            Self::Configuration => DiagnosticEvent::FailedConfiguration(cause),
-            Self::ServiceUnit => DiagnosticEvent::FailedServiceUnit(cause),
-            Self::Descriptor => DiagnosticEvent::FailedDescriptor(cause),
-            Self::DescriptorRemove => DiagnosticEvent::FailedDescriptorRemove(cause),
-            Self::ServiceEnable => DiagnosticEvent::FailedServiceEnable(cause),
-            Self::ServiceDisable => DiagnosticEvent::FailedServiceDisable(cause),
-            Self::ServiceVerify => DiagnosticEvent::FailedServiceVerify(cause),
-        }
-    }
-}
-
-fn lifecycle_failed(
-    diagnostics: &mut Diagnostics,
-    stage: LifecycleStage,
-    cause: DiagnosticCause,
-    failure: UserFailure,
-) -> UserFailure {
-    diagnostics.emit(stage.failed_event(cause));
-    failure
 }
 
 pub(super) fn enable_context_failure() -> UserFailure {
@@ -133,16 +111,9 @@ fn complete_enable_stage(
     stage: LifecycleStage,
     _target: &LifecycleTarget,
 ) -> Result<(), UserFailure> {
-    diagnostics.emit(stage.completed_event());
+    diagnostics.completed(stage.diagnostic_name());
     #[cfg(test)]
-    if _target.test_hooks.fail_after_completed_stage
-        == Some(match stage {
-            LifecycleStage::Descriptor => "descriptor",
-            LifecycleStage::ServiceEnable => "service-enable",
-            LifecycleStage::ServiceVerify => "service-verify",
-            _ => "",
-        })
-    {
+    if _target.test_hooks.fail_after_completed_stage == Some(stage.diagnostic_name()) {
         let failure = match stage {
             LifecycleStage::Descriptor => {
                 UserFailure::Ordinary(OrdinaryFailure::EnableUnexpectedRetry)
@@ -155,9 +126,9 @@ fn complete_enable_stage(
             }
             _ => unreachable!("enable does not complete this injected stage"),
         };
-        return Err(lifecycle_failed(
+        return Err(super::fail_with_diagnostic(
             diagnostics,
-            stage,
+            stage.diagnostic_name(),
             DiagnosticCause::Unexpected,
             failure,
         ));
@@ -170,16 +141,9 @@ fn complete_disable_stage(
     stage: LifecycleStage,
     _target: &LifecycleTarget,
 ) -> Result<(), UserFailure> {
-    diagnostics.emit(stage.completed_event());
+    diagnostics.completed(stage.diagnostic_name());
     #[cfg(test)]
-    if _target.test_hooks.fail_after_completed_stage
-        == Some(match stage {
-            LifecycleStage::ServiceDisable => "service-disable",
-            LifecycleStage::ServiceVerify => "service-verify",
-            LifecycleStage::DescriptorRemove => "descriptor-remove",
-            _ => "",
-        })
-    {
+    if _target.test_hooks.fail_after_completed_stage == Some(stage.diagnostic_name()) {
         let failure = match stage {
             LifecycleStage::ServiceDisable => {
                 UserFailure::StopThenRetry(StopThenRetry::DisableServiceStopThenDisable)
@@ -190,9 +154,9 @@ fn complete_disable_stage(
             }
             _ => unreachable!("disable does not complete this injected stage"),
         };
-        return Err(lifecycle_failed(
+        return Err(super::fail_with_diagnostic(
             diagnostics,
-            stage,
+            stage.diagnostic_name(),
             DiagnosticCause::Unexpected,
             failure,
         ));
@@ -210,9 +174,9 @@ pub(crate) async fn enable(
         target: DiagnosticTarget::current(),
     });
     let context = lifecycle_context(target).map_err(|_| {
-        lifecycle_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            LifecycleStage::Configuration,
+            LifecycleStage::Configuration.diagnostic_name(),
             DiagnosticCause::Validation,
             enable_context_failure(),
         )
@@ -230,9 +194,9 @@ pub(crate) async fn disable(
         target: DiagnosticTarget::current(),
     });
     let context = lifecycle_context(target).map_err(|_| {
-        lifecycle_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            LifecycleStage::ServiceDisable,
+            LifecycleStage::ServiceDisable.diagnostic_name(),
             DiagnosticCause::Validation,
             disable_context_failure(),
         )
@@ -255,34 +219,34 @@ pub(super) async fn enable_with_context_and_diagnostics(
     let paths = &context.target.paths;
     let evidence =
         require_selected_home_evidence(paths, SelectedHomeOperation::Enable).map_err(|_| {
-            lifecycle_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                LifecycleStage::Configuration,
+                LifecycleStage::Configuration.diagnostic_name(),
                 DiagnosticCause::Validation,
                 UserFailure::Ordinary(OrdinaryFailure::EnableInstalledStateRepairSetup),
             )
         })?;
     let expected_config = evidence.configuration.ok_or_else(|| {
-        lifecycle_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            LifecycleStage::Configuration,
+            LifecycleStage::Configuration.diagnostic_name(),
             DiagnosticCause::Validation,
             UserFailure::Ordinary(OrdinaryFailure::EnableInstalledStateRepairSetup),
         )
     })?;
     let manifest = evidence.manifest.as_ref().ok_or_else(|| {
-        lifecycle_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            LifecycleStage::Configuration,
+            LifecycleStage::Configuration.diagnostic_name(),
             DiagnosticCause::Validation,
             UserFailure::Ordinary(OrdinaryFailure::EnableInstalledStateRepairSetup),
         )
     })?;
     let config_bytes = read_product_evidence_file(&paths.home, paths.euid, &paths.config, 0o600)
         .map_err(|_| {
-            lifecycle_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                LifecycleStage::Configuration,
+                LifecycleStage::Configuration.diagnostic_name(),
                 DiagnosticCause::Validation,
                 UserFailure::Ordinary(OrdinaryFailure::EnableInstalledStateRepairSetup),
             )
@@ -292,42 +256,42 @@ pub(super) async fn enable_with_context_and_diagnostics(
         .and_then(|text| toml::from_str::<ProductConfig>(text).ok())
         .filter(|config| config.validate(&paths.codex_home, &paths.socket).is_ok())
         .ok_or_else(|| {
-            lifecycle_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                LifecycleStage::Configuration,
+                LifecycleStage::Configuration.diagnostic_name(),
                 DiagnosticCause::Validation,
                 UserFailure::Ordinary(OrdinaryFailure::EnableInstalledStateRepairSetup),
             )
         })?;
     if config != expected_config {
-        return Err(lifecycle_failed(
+        return Err(super::fail_with_diagnostic(
             diagnostics,
-            LifecycleStage::Configuration,
+            LifecycleStage::Configuration.diagnostic_name(),
             DiagnosticCause::Validation,
             UserFailure::Ordinary(OrdinaryFailure::EnableInstalledStateRepairSetup),
         ));
     }
 
     let unit = read_status_file(&paths.unit, paths.euid, 0o644).map_err(|_| {
-        lifecycle_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            LifecycleStage::ServiceUnit,
+            LifecycleStage::ServiceUnit.diagnostic_name(),
             DiagnosticCause::ServiceConfiguration,
             UserFailure::Ordinary(OrdinaryFailure::EnableServiceConfigurationRepairSetup),
         )
     })?;
     let expected_unit = render_unit(paths, &config.codex_executable).map_err(|_| {
-        lifecycle_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            LifecycleStage::ServiceUnit,
+            LifecycleStage::ServiceUnit.diagnostic_name(),
             DiagnosticCause::ServiceConfiguration,
             UserFailure::Ordinary(OrdinaryFailure::EnableServiceConfigurationRepairSetup),
         )
     })?;
     if unit != expected_unit {
-        return Err(lifecycle_failed(
+        return Err(super::fail_with_diagnostic(
             diagnostics,
-            LifecycleStage::ServiceUnit,
+            LifecycleStage::ServiceUnit.diagnostic_name(),
             DiagnosticCause::ServiceConfiguration,
             UserFailure::Ordinary(OrdinaryFailure::EnableServiceConfigurationRepairSetup),
         ));
@@ -336,27 +300,27 @@ pub(super) async fn enable_with_context_and_diagnostics(
     let desktop = resolve_enable_desktop(manifest, paths, &context.desktop_environment)
         .await
         .map_err(|_| {
-            lifecycle_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                LifecycleStage::Descriptor,
+                LifecycleStage::Descriptor.diagnostic_name(),
                 DiagnosticCause::DesktopIntegration,
                 UserFailure::Ordinary(OrdinaryFailure::EnableDesktopIntegrationCheckStatus),
             )
         })?;
     let (codex_version, expected_running_version) =
         read_codex_version(&config.codex_executable, &paths.codex_home).map_err(|_| {
-            lifecycle_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                LifecycleStage::Configuration,
+                LifecycleStage::Configuration.diagnostic_name(),
                 DiagnosticCause::CliIntegration,
                 UserFailure::Ordinary(OrdinaryFailure::EnableInstalledStateRepairSetup),
             )
         })?;
     let systemctl = resolve_named_executable(&context.path_environment, &context.cwd, "systemctl")
         .map_err(|_| {
-            lifecycle_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                LifecycleStage::ServiceEnable,
+                LifecycleStage::ServiceEnable.diagnostic_name(),
                 DiagnosticCause::ServiceStart,
                 UserFailure::Ordinary(OrdinaryFailure::EnableServiceStartRetry),
             )
@@ -365,9 +329,9 @@ pub(super) async fn enable_with_context_and_diagnostics(
         (&desktop.target, &desktop.descriptor)
     {
         let published = publish_descriptor(&target.identity, descriptor).map_err(|failure| {
-            lifecycle_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                LifecycleStage::Descriptor,
+                LifecycleStage::Descriptor.diagnostic_name(),
                 DiagnosticCause::DesktopIntegration,
                 enable_publication_failure(failure),
             )
@@ -398,9 +362,9 @@ pub(super) async fn enable_with_context_and_diagnostics(
             desktop.target.as_ref(),
             desktop.descriptor.as_deref(),
         );
-        lifecycle_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            LifecycleStage::ServiceEnable,
+            LifecycleStage::ServiceEnable.diagnostic_name(),
             DiagnosticCause::ServiceStart,
             enable_service_failure(
                 StopThenRetry::EnableServiceStartStopThenEnable,
@@ -421,9 +385,9 @@ pub(super) async fn enable_with_context_and_diagnostics(
                 desktop.target.as_ref(),
                 desktop.descriptor.as_deref(),
             );
-            lifecycle_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                LifecycleStage::ServiceVerify,
+                LifecycleStage::ServiceVerify.diagnostic_name(),
                 DiagnosticCause::ServiceState,
                 enable_service_failure(
                     StopThenRetry::EnableServiceStateStopThenEnable,
@@ -488,9 +452,9 @@ pub(super) async fn disable_with_context_and_diagnostics(
 ) -> Result<UserSuccess, UserFailure> {
     let systemctl = resolve_named_executable(&context.path_environment, &context.cwd, "systemctl")
         .map_err(|_| {
-            lifecycle_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                LifecycleStage::ServiceDisable,
+                LifecycleStage::ServiceDisable.diagnostic_name(),
                 DiagnosticCause::ServiceStop,
                 UserFailure::Ordinary(OrdinaryFailure::DisableServiceStopRetry),
             )
@@ -500,27 +464,27 @@ pub(super) async fn disable_with_context_and_diagnostics(
         ServiceActivity::Active => match inspect_caller_unit(&systemctl, &context.target) {
             CallerUnitInspection::Independent => {}
             CallerUnitInspection::SelfHosted(CallerUnitEvidence::WhoAmI) => {
-                return Err(lifecycle_failed(
+                return Err(super::fail_with_diagnostic(
                     diagnostics,
-                    LifecycleStage::ServiceDisable,
+                    LifecycleStage::ServiceDisable.diagnostic_name(),
                     DiagnosticCause::Validation,
                     UserFailure::IndependentTerminal(IndependentTerminal::Disable),
                 ));
             }
             CallerUnitInspection::SelfHosted(CallerUnitEvidence::ControlGroup)
             | CallerUnitInspection::Unknown { .. } => {
-                return Err(lifecycle_failed(
+                return Err(super::fail_with_diagnostic(
                     diagnostics,
-                    LifecycleStage::ServiceDisable,
+                    LifecycleStage::ServiceDisable.diagnostic_name(),
                     DiagnosticCause::Validation,
                     UserFailure::StopThenRetry(StopThenRetry::DisableUnsafeStopThenDisable),
                 ));
             }
         },
         ServiceActivity::Unproven => {
-            return Err(lifecycle_failed(
+            return Err(super::fail_with_diagnostic(
                 diagnostics,
-                LifecycleStage::ServiceDisable,
+                LifecycleStage::ServiceDisable.diagnostic_name(),
                 DiagnosticCause::ServiceState,
                 UserFailure::StopThenRetry(StopThenRetry::DisableUnsafeStopThenDisable),
             ));
@@ -536,9 +500,9 @@ pub(super) async fn disable_with_context_and_diagnostics(
         ],
     )
     .map_err(|_| {
-        lifecycle_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            LifecycleStage::ServiceDisable,
+            LifecycleStage::ServiceDisable.diagnostic_name(),
             DiagnosticCause::ServiceStop,
             UserFailure::StopThenRetry(StopThenRetry::DisableServiceStopThenDisable),
         )
@@ -546,9 +510,9 @@ pub(super) async fn disable_with_context_and_diagnostics(
     complete_disable_stage(diagnostics, LifecycleStage::ServiceDisable, &context.target)?;
 
     verify_disabled_service(&systemctl, &context.target).map_err(|_| {
-        lifecycle_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            LifecycleStage::ServiceVerify,
+            LifecycleStage::ServiceVerify.diagnostic_name(),
             DiagnosticCause::ServiceState,
             UserFailure::StopThenRetry(StopThenRetry::DisableServiceStateStopThenDisable),
         )
@@ -558,9 +522,9 @@ pub(super) async fn disable_with_context_and_diagnostics(
     let evidence =
         require_selected_home_evidence(&context.target.paths, SelectedHomeOperation::Disable)
             .map_err(|_| {
-                lifecycle_failed(
+                super::fail_with_diagnostic(
                     diagnostics,
-                    LifecycleStage::DescriptorRemove,
+                    LifecycleStage::DescriptorRemove.diagnostic_name(),
                     DiagnosticCause::Cleanup,
                     UserFailure::PartialDisable(PartialDisable::new(None)),
                 )
@@ -572,9 +536,9 @@ pub(super) async fn disable_with_context_and_diagnostics(
         .map(|identity| identity.descriptor_path.clone());
     let desktop_intent_removed =
         remove_persisted_desktop_descriptor(&context.target.paths, &evidence).map_err(|_| {
-            lifecycle_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                LifecycleStage::DescriptorRemove,
+                LifecycleStage::DescriptorRemove.diagnostic_name(),
                 DiagnosticCause::Cleanup,
                 UserFailure::PartialDisable(PartialDisable::new(managed_path)),
             )

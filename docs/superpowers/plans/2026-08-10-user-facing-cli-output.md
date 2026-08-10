@@ -55,9 +55,9 @@
 | AC10 | Active-task prompt, disclosure, recheck, and goal semantics remain unchanged. | Task 5 exact prompt bytes and active-turn request/mutation evidence pass. |
 | AC11 | Default/verbose stdout, default-visible stderr, exit code, and mutation evidence are identical after removing diagnostic lines. | Tasks 4-6 parity assertions pass for every human command. |
 | AC12 | Diagnostics are chronological and use `[verbose] <command>[/<phase>]:`. | Task 2 unit tests and Tasks 5-6 subprocess fixtures pass. |
-| AC13 | Diagnostics structurally exclude prohibited privacy classes. | Task 2 constructor inventory and privacy-sentinel table pass; no event accepts raw errors, environment/argv maps, task data, PID, timestamp, or telemetry fields. |
+| AC13 | Diagnostics structurally exclude prohibited privacy classes. | Task 2 exact dynamic-field inventory and static-stage table pass; no event or stage operation accepts raw errors, environment/argv maps, task data, PID, timestamp, or telemetry fields. |
 | AC14 | Candidate `0`/`1` is propagated; spawn failure is retry-safe; wait/signal/other exit uses exact `UpdateCompletionUnknown`. | Task 5 candidate table and outer/apply ownership tests pass with no second parent prose or result protocol. |
-| AC15 | Successful `codex` emits no CSC bytes; failure is exact and safe. | Task 6 wrapper subprocess and failure-block tests pass, including global verbosity. |
+| AC15 | Successful `codex` emits no CSC bytes; failure is exact and safe. | Task 6 bounded native-process and failure-block tests pass, including global verbosity. |
 | AC16 | MCP stdout remains JSON-RPC-only and hidden transport behavior remains intact. | Tasks 1 and 6 hidden-callable/catalog/EOF/reaping/isolation tests pass. |
 | AC17 | Descriptor evidence is limited to exact final/stage residue and cleanup truth; existing operational safety remains authoritative. | Task 3 publication evidence tests plus Tasks 4-5 producer mappings pass. |
 | AC18 | README/Desktop docs use the approved human command and status vocabulary. | Task 7 docs checks pass with every remaining legacy-term match inspected. |
@@ -279,8 +279,8 @@ fn prefixes_and_update_phases_are_exact() {
 }
 
 #[test]
-fn every_constructor_excludes_all_privacy_sentinels() {
-    assert_no_prohibited_fields(DIAGNOSTIC_CONSTRUCTOR_INVENTORY);
+fn every_dynamic_diagnostic_field_is_exactly_rendered() {
+    assert_eq!(rendered_dynamic_fields_and_causes(), APPROVED_DIAGNOSTIC_LINES);
 }
 
 #[test]
@@ -291,7 +291,7 @@ fn first_write_failure_disables_later_output_without_changing_result() {
 
 Build both case-table functions from typed values and independent literal `RenderedCli` expectations copied byte-for-byte from the approved spec; expected values must not call production render/composition helpers. Use `Vec` rather than `const`/`static` storage because samples contain owned paths and strings. Include final newlines and blank lines in the literals. `failure_render_cases()` contains:
 
-- one row for every `OrdinaryFailure` variant listed in Step 3;
+- `ordinary_literal_cases()` contains one row for every `OrdinaryFailure` variant listed in Step 3, with its complete expected stderr bytes;
 - one row for every `RollbackPrimary` using one managed path, plus one representative multiple-path row to prove list composition;
 - one row for every `StopThenRetry` and `IndependentTerminal` variant;
 - plugin and marketplace `ManualCleanup` rows with and without the optional validated executable;
@@ -570,7 +570,7 @@ pub(crate) enum UpdatePhase { Outer, Apply }
 pub(crate) enum DiagnosticCause { Unexpected, Validation, ReleaseDownload, Checksum, ServiceConfiguration, ServiceStart, ServiceStop, ServiceState, CliIntegration, DesktopIntegration, ActiveTasks, Cleanup }
 ```
 
-Command modules own their stage/event enums and convert them exhaustively into allowlisted diagnostic events. Maintain a test table with one safe constructed instance of every event variant; render the full table and assert none of the prohibited sentinel values supplied only through discarded raw-error/test context appears. The emitter never accepts raw error/display text, arbitrary argv/environment/configuration/task data, PIDs, timestamps, telemetry identifiers, or an arbitrary stage string. A failed write, including the test-only `FailOnce` sink, replaces the sink with `Off`; `emit` and `flush` are best-effort and cannot alter results, mutations, or exit codes.
+Command modules own closed stage enums and return one compile-time `&'static str` diagnostic name from each enum. `Diagnostics::completed` and `Diagnostics::failed` accept only that static label; typed special events remain limited to dynamic evidence and non-stage semantics. Maintain exact rendering coverage for every dynamic event field and diagnostic cause. The emitter never accepts raw error/display text, runtime stage strings, arbitrary argv/environment/configuration/task data, PIDs, timestamps, or telemetry identifiers. A failed write, including the test-only `FailOnce` sink, replaces the sink with `Off`; `emit` and `flush` are best-effort and cannot alter results, mutations, or exit codes.
 
 - [ ] **Step 5: Add the writer seam**
 
@@ -764,7 +764,7 @@ Each slice below must start RED, end GREEN, and commit before the next slice. Ke
 
 Add a table-driven `setup_guidance_precedence_is_exact` covering CLI running with Desktop unavailable, Desktop running, both running, changed-but-not-running Desktop, no duplicate guidance, and rejection of `changed + unavailable/could-not-verify`.
 
-Add `setup_producer_boundaries_select_complete_failures`, with one row for every approved Setup producer-table row and explicit assertions for `SetupCliIntegrationRetry` versus `SetupCliIntegrationCheckStatus`, `SetupDesktopIntegrationRetry` versus check-status, verified-release, clean publication failure, and rollback-incomplete residue. Add `setup_default_and_verbose_are_behaviorally_identical`: run fresh equivalent fixtures with diagnostics off/on, remove only complete stderr lines beginning `[verbose] `, then compare stdout, remaining stderr, exit code, filesystem/native/systemctl markers, and manifest-last evidence.
+Add `setup_pure_failure_mappings_are_exact` for invocation, reconciliation-error class, and descriptor-residue mappings. Assert the remaining typed results in the existing setup, Desktop lifecycle, and retry tests that already own their filesystem/systemd/mutation evidence. Add `setup_default_and_verbose_are_behaviorally_identical`: run fresh equivalent fixtures with diagnostics off/on, remove only complete stderr lines beginning `[verbose] `, then compare stdout, remaining stderr, exit code, filesystem/native/systemctl markers, and manifest-last evidence.
 
 Before production changes, extend the exhaustive diagnostic constructor inventory with every planned setup event; the privacy test must fail to compile until those typed constructors exist.
 
@@ -774,7 +774,7 @@ Before production changes, extend the exhaustive diagnostic constructor inventor
 cargo test --bin codex-session-control --locked install::tests::setup
 cargo test --bin codex-session-control --locked install::tests::desktop_start_lifecycle
 cargo test --bin codex-session-control --locked install::tests::normal_home_setup
-cargo test --bin codex-session-control --locked diagnostics::tests::every_constructor_excludes_all_privacy_sentinels -- --exact
+cargo test --bin codex-session-control --locked diagnostics::tests::every_dynamic_diagnostic_field_is_exactly_rendered -- --exact
 ```
 
 Expected RED: typed setup outcomes/events are missing; current receipt/PATH/warning order is wrong; CLI facts are Desktop-gated; producer and parity assertions fail while existing mutation evidence remains available.
@@ -790,7 +790,7 @@ cargo fmt --all
 cargo test --bin codex-session-control --locked install::tests::setup
 cargo test --bin codex-session-control --locked install::tests::desktop_start_lifecycle
 cargo test --bin codex-session-control --locked install::tests::normal_home_setup
-cargo test --bin codex-session-control --locked diagnostics::tests::every_constructor_excludes_all_privacy_sentinels -- --exact
+cargo test --bin codex-session-control --locked diagnostics::tests::every_dynamic_diagnostic_field_is_exactly_rendered -- --exact
 git add src/main.rs src/install.rs src/install/setup.rs src/install/tests/setup.rs src/install/tests/desktop_start_lifecycle.rs src/install/tests/normal_home_setup.rs src/cli_output.rs src/diagnostics.rs
 git commit -m "feat(setup): render bounded setup outcomes"
 ```
@@ -801,14 +801,14 @@ Expected GREEN: setup copy/guidance/producer/parity/privacy tests and operationa
 
 - [ ] **Step 5: Write and run failing enable/disable producer, guidance, parity, and privacy tests**
 
-Add `enable_disable_producer_boundaries_select_complete_failures`, `enable_guidance_precedence_is_exact`, `enable_default_and_verbose_are_behaviorally_identical`, and `disable_default_and_verbose_are_behaviorally_identical`. The producer table must explicitly cover `EnableDesktopIntegrationRetry` for proven-clean publication failure, check-status for preflight/foreign evidence, post-publication `StopThenRetry`, cleaned ordinary retry, residue rollback, direct `IndependentTerminal`, service stop/state variants, pathless/exact-path `PartialDisable`, and post-cleanup check-status. Extend the diagnostic inventory with every enable/disable event before implementation.
+Add `enable_disable_pure_failure_mappings_are_exact`, `enable_guidance_precedence_is_exact`, `enable_default_and_verbose_are_behaviorally_identical`, and `disable_default_and_verbose_are_behaviorally_identical`. Keep publication-residue and cleanup-state selection in the pure table; assert caller independence, service stop/state, pathless/exact-path partial disable, and post-cleanup outcomes in their existing operational tests. Extend exact diagnostic coverage before implementation.
 
 ```bash
 cargo test --bin codex-session-control --locked install::tests::enable_disable
 cargo test --bin codex-session-control --locked install::tests::desktop_stop_lifecycle
 cargo test --bin codex-session-control --locked install::tests::service_safety
 cargo test --bin codex-session-control --locked install::tests::failure_retry
-cargo test --bin codex-session-control --locked diagnostics::tests::every_constructor_excludes_all_privacy_sentinels -- --exact
+cargo test --bin codex-session-control --locked diagnostics::tests::every_dynamic_diagnostic_field_is_exactly_rendered -- --exact
 ```
 
 Expected RED: the new direct variants/guidance/parity/events are absent; existing service/caller/descriptor evidence still records the required truth.
@@ -823,7 +823,7 @@ cargo test --bin codex-session-control --locked install::tests::enable_disable
 cargo test --bin codex-session-control --locked install::tests::desktop_stop_lifecycle
 cargo test --bin codex-session-control --locked install::tests::service_safety
 cargo test --bin codex-session-control --locked install::tests::failure_retry
-cargo test --bin codex-session-control --locked diagnostics::tests::every_constructor_excludes_all_privacy_sentinels -- --exact
+cargo test --bin codex-session-control --locked diagnostics::tests::every_dynamic_diagnostic_field_is_exactly_rendered -- --exact
 git add src/main.rs src/install.rs src/install/enable_disable.rs src/install/tests/enable_disable.rs src/install/tests/desktop_stop_lifecycle.rs src/install/tests/service_safety.rs src/install/tests/failure_retry.rs src/cli_output.rs src/diagnostics.rs
 git commit -m "feat(lifecycle): render enable and disable outcomes"
 ```
@@ -834,12 +834,12 @@ Expected GREEN: exact variants/output/parity pass and existing service safety, c
 
 - [ ] **Step 7: Write and run failing uninstall producer, parity, manual-command, and privacy tests**
 
-Add `uninstall_producer_boundaries_select_complete_failures`, `uninstall_default_and_verbose_are_behaviorally_identical`, and a typed manual cleanup test covering plugin/marketplace, validated Codex home, optional validated executable, and exact existing shell quoting. Cover rollback while identity survives, manifest rollback, and terminal partial uninstall with exact remaining paths/no rerun. Extend the diagnostic inventory with every uninstall event before implementation.
+Add `uninstall_default_and_verbose_are_behaviorally_identical`; extend the existing service-first, retry, native-cleanup, filesystem-order, and terminal-partial tests with their exact typed outcomes. Keep the existing manual cleanup test covering validated Codex home, optional validated executable, and exact shell quoting. Cover rollback while identity survives, manifest rollback, and terminal partial uninstall with exact remaining paths/no rerun. Extend exact diagnostic coverage before implementation.
 
 ```bash
 cargo test --bin codex-session-control --locked install::tests::uninstall
 cargo test --bin codex-session-control --locked install::tests::failure_retry
-cargo test --bin codex-session-control --locked diagnostics::tests::every_constructor_excludes_all_privacy_sentinels -- --exact
+cargo test --bin codex-session-control --locked diagnostics::tests::every_dynamic_diagnostic_field_is_exactly_rendered -- --exact
 ```
 
 Expected RED: current manual cleanup is an arbitrary string; uninstall receipt/progress cannot express direct rollback/manual/terminal variants or parity.
@@ -852,7 +852,7 @@ Preserve service-first and manifest-last order. Make `shell_quote_path` crate-vi
 cargo fmt --all
 cargo test --bin codex-session-control --locked install::tests::uninstall
 cargo test --bin codex-session-control --locked install::tests::failure_retry
-cargo test --bin codex-session-control --locked diagnostics::tests::every_constructor_excludes_all_privacy_sentinels -- --exact
+cargo test --bin codex-session-control --locked diagnostics::tests::every_dynamic_diagnostic_field_is_exactly_rendered -- --exact
 git add src/main.rs src/install.rs src/install/uninstall.rs src/install/native.rs src/install/paths.rs src/install/tests/uninstall.rs src/install/tests/failure_retry.rs src/cli_output.rs src/diagnostics.rs
 git commit -m "feat(uninstall): render terminal cleanup outcomes"
 ```
@@ -970,7 +970,7 @@ cargo test --bin codex-session-control --locked install::tests::update_matrix::c
 cargo test --bin codex-session-control --locked install::tests::update_matrix::outer_candidate_ownership_is_exact -- --exact
 cargo test --bin codex-session-control --locked install::tests::update_matrix::update_producer_boundaries_select_complete_failures -- --exact
 cargo test --bin codex-session-control --locked install::tests::update_matrix::update_default_and_verbose_are_behaviorally_identical -- --exact
-cargo test --bin codex-session-control --locked diagnostics::tests::every_constructor_excludes_all_privacy_sentinels -- --exact
+cargo test --bin codex-session-control --locked diagnostics::tests::every_dynamic_diagnostic_field_is_exactly_rendered -- --exact
 cargo test --bin codex-session-control --locked install::tests::failure_retry
 ```
 
@@ -1018,7 +1018,7 @@ cargo fmt --all
 cargo test --bin codex-session-control --locked install::tests::active_turn_gate
 cargo test --bin codex-session-control --locked install::tests::update_matrix
 cargo test --bin codex-session-control --locked install::tests::failure_retry
-cargo test --bin codex-session-control --locked diagnostics::tests::every_constructor_excludes_all_privacy_sentinels -- --exact
+cargo test --bin codex-session-control --locked diagnostics::tests::every_dynamic_diagnostic_field_is_exactly_rendered -- --exact
 cargo test --bin codex-session-control --locked --no-run
 cargo test --test app_server_integration --locked
 ```
@@ -1089,26 +1089,21 @@ Retain all existing read-only mutation logs, unsafe socket no-connect, systemd e
 
 `CONTEXT_UNHEALTHY_RESULT` is the minimal technical projection required by the approved four-state status contract: top-level `Status: unhealthy`; no version row; service `could not verify`; both integrations `could not verify`; the already-approved problem `The installed Codex Session Control state could not be verified.`; and the already-approved recovery block `Check what needs attention:` followed by `codex-session-control status`; exit `1`; no stderr. This selects existing closed wording and recovery behavior under the status composition rule; it does not introduce a fifth state, a retry recommendation, or new copy. Missing `PATH` uses the validated absolute CSC binary for later actions, and missing cwd/systemctl resolution becomes typed inconclusive service evidence instead of escaping the status result.
 
-Add `status_default_and_verbose_are_behaviorally_identical`: run equivalent fresh status fixtures with diagnostics off/on, remove only complete `[verbose] ` lines, then compare stdout, remaining stderr, exit code, empty mutation logs, socket-connect evidence, and independent integration classification. Extend the diagnostic constructor inventory with every planned status event before implementation.
+Add `status_default_and_verbose_are_behaviorally_identical`: run equivalent fresh status fixtures with diagnostics off/on, remove only complete `[verbose] ` lines, then compare stdout, remaining stderr, exit code, empty mutation logs, socket-connect evidence, and independent integration classification. Extend the exact static-stage and dynamic-field diagnostic coverage before implementation.
 
 - [ ] **Step 2: Write failing wrapper and MCP tests**
 
-Convert wrapper raw-string assertions to exact `WrapperUnavailable` rendering and raw-error sentinel absence. Introduce this narrow internal seam:
+Convert wrapper raw-string assertions to exact `WrapperUnavailable` rendering and raw-error sentinel absence. Reuse the existing preparation seam with a typed result and diagnostics parameter:
 
 ```rust
-async fn codex_wrapper_with_paths(
+async fn prepare_codex_wrapper(
     paths: &ResolvedUserPaths,
     args: Vec<OsString>,
     diagnostics: &mut Diagnostics,
 ) -> Result<Command, UserFailure>;
 ```
 
-Production resolves paths, calls this function, then immediately passes the prepared command to the real `exec_codex_wrapper_command`. Prove the full success boundary with exactly two test entries in `src/install/tests/codex_wrapper.rs`:
-
-- `successful_wrapper_emits_only_native_bytes_and_no_csc_diagnostics_when_verbose` is the parent. It retains the existing `FakeAuthority`, creates dedicated native stdout/stderr files inside the fixture, and re-executes `std::env::current_exe()` with the exact filter `install::tests::codex_wrapper::wrapper_exec_child_entry --exact --nocapture`. It supplies only `#[cfg(test)]` marker, fixture-root, caller-cwd, and sink-path fields.
-- `wrapper_exec_child_entry` returns immediately unless the test-only marker is present. In child mode it reconstructs only the existing `Fixture`/`ResolvedUserPaths`, enables record-mode verbose diagnostics, calls `codex_wrapper_with_paths`, asserts the diagnostic record is empty, redirects the returned native `Command` to the two dedicated files, and calls the real `exec_codex_wrapper_command`. Successful `exec` replaces the libtest child with the fixture's fake native executable.
-
-The parent asserts child exit `0`; dedicated stdout/stderr files equal only fixed native sentinels; and captured child-process bytes equal the pinned Rust 1.95 libtest-only prefix for that exact filtered `--nocapture` invocation, with empty stderr and no extra `[verbose]`, friendly-result, raw-error, or native bytes. Keep the exact libtest prefix as a test constant so any byte outside known harness output fails. This separates unavoidable pre-`exec` harness bytes from the wrapper/native sinks without weakening the native-byte assertion. The child-only fields must not create a public CLI option, production environment override, process backend, or cross-process result protocol. Combine this proof with Task 1's parser assertion that global `--verbose` reaches `codex` without entering passthrough arguments. Extend the diagnostic inventory with every wrapper failure event before implementation; successful wrapper preparation and dispatch emit no event.
+Production resolves paths, calls this function, then immediately passes the prepared command to the real `exec_codex_wrapper_command`. Extend the existing exact argv/cwd/environment test to enable record-mode verbose diagnostics and assert that successful preparation records no CSC diagnostic. Add one bounded process test that runs the returned fixture-native command, asserts its exit status and exact fixed stdout/stderr sentinels, and rejects any additional CSC, friendly-result, or raw-error bytes. Do not re-execute the libtest binary, assert test-harness presentation, add a public option or production environment override, or introduce a process backend or helper protocol. Keep the existing exec-failure test and make it assert exact `WrapperUnavailable`, safe diagnostics, and raw-error sentinel absence. Combine these proofs with Task 1's parser assertion that global `--verbose` reaches `codex` without entering passthrough arguments. Successful wrapper preparation and dispatch emit no event.
 
 Run `public_catalog_is_exact` through global verbosity and explicitly reject human/`[verbose]` stdout while retaining JSON-RPC parsing, exact catalog/schema, EOF exit, reaping, and no result/error frames on stderr.
 
@@ -1120,8 +1115,8 @@ cargo test --bin codex-session-control --locked install::tests::status::pre_cont
 cargo test --bin codex-session-control --locked install::tests::status::status_default_and_verbose_are_behaviorally_identical -- --exact
 cargo test --bin codex-session-control --locked install::tests::selected_home_evidence::status_does_not_probe_identity_from_an_unsafe_configuration_ancestor
 cargo test --bin codex-session-control --locked install::tests::codex_wrapper
-cargo test --bin codex-session-control --locked install::tests::codex_wrapper::successful_wrapper_emits_only_native_bytes_and_no_csc_diagnostics_when_verbose -- --exact
-cargo test --bin codex-session-control --locked diagnostics::tests::every_constructor_excludes_all_privacy_sentinels -- --exact
+cargo test --bin codex-session-control --locked install::tests::codex_wrapper::successful_wrapper_preparation_runs_only_native_bytes_when_verbose -- --exact
+cargo test --bin codex-session-control --locked diagnostics::tests::every_dynamic_diagnostic_field_is_exactly_rendered -- --exact
 cargo test --test mcp_contract --locked public_catalog_is_exact -- --exact
 ```
 
@@ -1168,7 +1163,7 @@ cargo test --bin codex-session-control --locked install::tests::status
 cargo test --bin codex-session-control --locked install::tests::selected_home_evidence
 cargo test --bin codex-session-control --locked install::tests::failure_retry
 cargo test --bin codex-session-control --locked install::tests::codex_wrapper
-cargo test --bin codex-session-control --locked diagnostics::tests::every_constructor_excludes_all_privacy_sentinels -- --exact
+cargo test --bin codex-session-control --locked diagnostics::tests::every_dynamic_diagnostic_field_is_exactly_rendered -- --exact
 cargo test --test mcp_contract --locked
 cargo clippy --bin codex-session-control --all-features --locked -- -D warnings
 ```

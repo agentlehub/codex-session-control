@@ -165,8 +165,46 @@ enum UpdateStage {
 }
 
 impl UpdateStage {
+    const fn diagnostic_name(self) -> &'static str {
+        match self {
+            Self::ReleaseDiscovery
+            | Self::ReleaseDownload
+            | Self::Checksum
+            | Self::CandidatePreflight
+            | Self::ServiceSnapshot
+            | Self::RestartInspection
+            | Self::ActiveTurnGate => "preflight",
+            Self::Binary => "binary",
+            Self::Configuration => "configuration",
+            Self::Projection => "projection",
+            Self::PluginMarketplace => "plugin-marketplace",
+            Self::PluginInstall => "plugin-install",
+            Self::DesktopDiscovery => "desktop-discovery",
+            Self::Descriptor => "descriptor",
+            Self::ServiceUnit => "service-unit",
+            Self::DaemonReload => "daemon-reload",
+            Self::ServiceApply => "service-enable",
+            Self::ServiceVerify => "service-verify",
+            Self::Manifest => "manifest",
+        }
+    }
+
+    const fn records_completion(self) -> bool {
+        !matches!(
+            self,
+            Self::ReleaseDiscovery
+                | Self::ReleaseDownload
+                | Self::Checksum
+                | Self::CandidatePreflight
+                | Self::ServiceSnapshot
+                | Self::RestartInspection
+                | Self::ActiveTurnGate
+                | Self::ServiceApply
+        )
+    }
+
     #[cfg(test)]
-    const fn name(self) -> &'static str {
+    const fn test_hook_name(self) -> &'static str {
         match self {
             Self::ReleaseDiscovery => "release-discovery",
             Self::ReleaseDownload => "release-download",
@@ -189,64 +227,6 @@ impl UpdateStage {
             Self::Manifest => "manifest",
         }
     }
-
-    fn completed_event(self) -> Option<DiagnosticEvent> {
-        match self {
-            Self::ReleaseDiscovery
-            | Self::ReleaseDownload
-            | Self::Checksum
-            | Self::CandidatePreflight
-            | Self::ServiceSnapshot
-            | Self::RestartInspection
-            | Self::ActiveTurnGate => None,
-            Self::Binary => Some(DiagnosticEvent::CompletedBinary),
-            Self::Configuration => Some(DiagnosticEvent::CompletedConfiguration),
-            Self::Projection => Some(DiagnosticEvent::CompletedProjection),
-            Self::PluginMarketplace => Some(DiagnosticEvent::CompletedPluginMarketplace),
-            Self::PluginInstall => Some(DiagnosticEvent::CompletedPluginInstall),
-            Self::DesktopDiscovery => Some(DiagnosticEvent::CompletedDesktopDiscovery),
-            Self::Descriptor => Some(DiagnosticEvent::CompletedDescriptor),
-            Self::ServiceUnit => Some(DiagnosticEvent::CompletedServiceUnit),
-            Self::DaemonReload => Some(DiagnosticEvent::CompletedDaemonReload),
-            Self::ServiceApply => None,
-            Self::ServiceVerify => Some(DiagnosticEvent::CompletedServiceVerify),
-            Self::Manifest => Some(DiagnosticEvent::CompletedManifest),
-        }
-    }
-
-    fn failed_event(self, cause: crate::diagnostics::DiagnosticCause) -> DiagnosticEvent {
-        match self {
-            Self::ReleaseDiscovery
-            | Self::ReleaseDownload
-            | Self::Checksum
-            | Self::CandidatePreflight
-            | Self::ServiceSnapshot
-            | Self::RestartInspection
-            | Self::ActiveTurnGate => DiagnosticEvent::FailedPreflight(cause),
-            Self::Binary => DiagnosticEvent::FailedBinary(cause),
-            Self::Configuration => DiagnosticEvent::FailedConfiguration(cause),
-            Self::Projection => DiagnosticEvent::FailedProjection(cause),
-            Self::PluginMarketplace => DiagnosticEvent::FailedPluginMarketplace(cause),
-            Self::PluginInstall => DiagnosticEvent::FailedPluginInstall(cause),
-            Self::DesktopDiscovery => DiagnosticEvent::FailedDesktopDiscovery(cause),
-            Self::Descriptor => DiagnosticEvent::FailedDescriptor(cause),
-            Self::ServiceUnit => DiagnosticEvent::FailedServiceUnit(cause),
-            Self::DaemonReload => DiagnosticEvent::FailedDaemonReload(cause),
-            Self::ServiceApply => DiagnosticEvent::FailedServiceEnable(cause),
-            Self::ServiceVerify => DiagnosticEvent::FailedServiceVerify(cause),
-            Self::Manifest => DiagnosticEvent::FailedManifest(cause),
-        }
-    }
-}
-
-fn update_failed(
-    diagnostics: &mut Diagnostics,
-    stage: UpdateStage,
-    cause: crate::diagnostics::DiagnosticCause,
-    failure: UserFailure,
-) -> UserFailure {
-    diagnostics.emit(stage.failed_event(cause));
-    failure
 }
 
 fn complete_update_stage(
@@ -255,14 +235,14 @@ fn complete_update_stage(
     _target: &LifecycleTarget,
     injected_failure: UserFailure,
 ) -> Result<(), UserFailure> {
-    if let Some(event) = stage.completed_event() {
-        diagnostics.emit(event);
+    if stage.records_completion() {
+        diagnostics.completed(stage.diagnostic_name());
     }
     #[cfg(test)]
-    if _target.test_hooks.fail_after_completed_stage == Some(stage.name()) {
-        return Err(update_failed(
+    if _target.test_hooks.fail_after_completed_stage == Some(stage.test_hook_name()) {
+        return Err(super::fail_with_diagnostic(
             diagnostics,
-            stage,
+            stage.diagnostic_name(),
             crate::diagnostics::DiagnosticCause::Unexpected,
             injected_failure,
         ));
@@ -419,9 +399,9 @@ pub(crate) async fn update(
     use crate::diagnostics::{DiagnosticCause, UpdatePhase};
 
     let lifecycle = super::lifecycle_context(target).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::CandidatePreflight,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
             DiagnosticCause::Unexpected,
             UserFailure::Ordinary(OrdinaryFailure::UpdateUnexpectedRetry),
         )
@@ -430,17 +410,17 @@ pub(crate) async fn update(
         diagnostics.set_phase(UpdatePhase::Apply);
         diagnostics.emit(DiagnosticEvent::StagedMarkerAccepted);
         let current = std::env::current_exe().map_err(|_| {
-            update_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                UpdateStage::CandidatePreflight,
+                UpdateStage::CandidatePreflight.diagnostic_name(),
                 DiagnosticCause::Unexpected,
                 UserFailure::Ordinary(OrdinaryFailure::UpdateUnexpectedRetry),
             )
         })?;
         if current == lifecycle.target.paths.binary {
-            return Err(update_failed(
+            return Err(super::fail_with_diagnostic(
                 diagnostics,
-                UpdateStage::CandidatePreflight,
+                UpdateStage::CandidatePreflight.diagnostic_name(),
                 DiagnosticCause::Unexpected,
                 UserFailure::Ordinary(OrdinaryFailure::UpdateUnexpectedRetry),
             ));
@@ -494,9 +474,9 @@ pub(super) async fn outer_update_with_endpoints_and_diagnostics(
 
     let paths = &lifecycle.target.paths;
     load_update_manifest(paths).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::CandidatePreflight,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
             DiagnosticCause::Validation,
             UserFailure::Ordinary(OrdinaryFailure::UpdateInstalledStateCheckStatus),
         )
@@ -504,17 +484,17 @@ pub(super) async fn outer_update_with_endpoints_and_diagnostics(
     let release_failure = || UserFailure::Ordinary(OrdinaryFailure::UpdateReleaseRetry);
     let checksum_failure = || UserFailure::Ordinary(OrdinaryFailure::UpdateChecksumRetry);
     let target = release_target_for_arch(std::env::consts::ARCH).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::ReleaseDiscovery,
+            UpdateStage::ReleaseDiscovery.diagnostic_name(),
             DiagnosticCause::ReleaseDownload,
             release_failure(),
         )
     })?;
     let client = build_release_client().map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::ReleaseDiscovery,
+            UpdateStage::ReleaseDiscovery.diagnostic_name(),
             DiagnosticCause::ReleaseDownload,
             release_failure(),
         )
@@ -522,9 +502,9 @@ pub(super) async fn outer_update_with_endpoints_and_diagnostics(
     let release = discover_latest_release(&client, &endpoints, target)
         .await
         .map_err(|_| {
-            update_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                UpdateStage::ReleaseDiscovery,
+                UpdateStage::ReleaseDiscovery.diagnostic_name(),
                 DiagnosticCause::ReleaseDownload,
                 release_failure(),
             )
@@ -537,9 +517,9 @@ pub(super) async fn outer_update_with_endpoints_and_diagnostics(
     )?;
 
     let directory = tempfile::tempdir().map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::ReleaseDownload,
+            UpdateStage::ReleaseDownload.diagnostic_name(),
             DiagnosticCause::ReleaseDownload,
             release_failure(),
         )
@@ -559,7 +539,7 @@ pub(super) async fn outer_update_with_endpoints_and_diagnostics(
                     UserFailure::Ordinary(OrdinaryFailure::UpdateChecksumRetry),
                 ),
             };
-            update_failed(diagnostics, stage, cause, failure)
+            super::fail_with_diagnostic(diagnostics, stage.diagnostic_name(), cause, failure)
         })?;
     complete_update_stage(
         diagnostics,
@@ -575,18 +555,18 @@ pub(super) async fn outer_update_with_endpoints_and_diagnostics(
     )?;
     fs::set_permissions(&downloaded.binary_path, fs::Permissions::from_mode(0o700)).map_err(
         |_| {
-            update_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                UpdateStage::CandidatePreflight,
+                UpdateStage::CandidatePreflight.diagnostic_name(),
                 DiagnosticCause::Checksum,
                 checksum_failure(),
             )
         },
     )?;
     let candidate = inspect_candidate(&downloaded.binary_path).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::CandidatePreflight,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
             DiagnosticCause::Checksum,
             checksum_failure(),
         )
@@ -594,9 +574,9 @@ pub(super) async fn outer_update_with_endpoints_and_diagnostics(
     if candidate.product_version != release.version.to_string()
         || candidate.target != release.target
     {
-        return Err(update_failed(
+        return Err(super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::CandidatePreflight,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
             DiagnosticCause::Checksum,
             checksum_failure(),
         ));
@@ -625,59 +605,59 @@ async fn outer_restart_preflight(
 
     let paths = &lifecycle.target.paths;
     let manifest = load_update_manifest(paths).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::CandidatePreflight,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
             DiagnosticCause::Validation,
             UserFailure::Ordinary(OrdinaryFailure::UpdateInstalledStateCheckStatus),
         )
     })?;
     let installed = semver::Version::parse(&manifest.product_version).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::CandidatePreflight,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
             DiagnosticCause::Validation,
             UserFailure::Ordinary(OrdinaryFailure::UpdateInstalledStateCheckStatus),
         )
     })?;
     let candidate_version = semver::Version::parse(&candidate.product_version).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::CandidatePreflight,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
             DiagnosticCause::Checksum,
             UserFailure::Ordinary(OrdinaryFailure::UpdateChecksumRetry),
         )
     })?;
     if candidate_version < installed {
-        return Err(update_failed(
+        return Err(super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::CandidatePreflight,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
             DiagnosticCause::Checksum,
             UserFailure::Ordinary(OrdinaryFailure::UpdateChecksumRetry),
         ));
     }
     let codex =
         resolve_codex_executable(&lifecycle.path_environment, &lifecycle.cwd).map_err(|_| {
-            update_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                UpdateStage::RestartInspection,
+                UpdateStage::RestartInspection.diagnostic_name(),
                 DiagnosticCause::CliIntegration,
                 UserFailure::Ordinary(OrdinaryFailure::UpdateCliIntegrationRetry),
             )
         })?;
     let (_, expected_running_version) =
         read_codex_version(&codex, &paths.codex_home).map_err(|_| {
-            update_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                UpdateStage::RestartInspection,
+                UpdateStage::RestartInspection.diagnostic_name(),
                 DiagnosticCause::CliIntegration,
                 UserFailure::Ordinary(OrdinaryFailure::UpdateCliIntegrationRetry),
             )
         })?;
     let desired_unit_sha256 = sha256_bytes(&render_unit(paths, &codex).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::RestartInspection,
+            UpdateStage::RestartInspection.diagnostic_name(),
             DiagnosticCause::ServiceConfiguration,
             UserFailure::Ordinary(OrdinaryFailure::UpdateServiceConfigurationRetry),
         )
@@ -685,17 +665,17 @@ async fn outer_restart_preflight(
     let systemctl =
         resolve_named_executable(&lifecycle.path_environment, &lifecycle.cwd, "systemctl")
             .map_err(|_| {
-                update_failed(
+                super::fail_with_diagnostic(
                     diagnostics,
-                    UpdateStage::ServiceSnapshot,
+                    UpdateStage::ServiceSnapshot.diagnostic_name(),
                     DiagnosticCause::ServiceState,
                     UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStateCheckStatus),
                 )
             })?;
     let snapshot = service_snapshot(&systemctl, &lifecycle.target).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::ServiceSnapshot,
+            UpdateStage::ServiceSnapshot.diagnostic_name(),
             DiagnosticCause::ServiceState,
             UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStateCheckStatus),
         )
@@ -716,18 +696,18 @@ async fn outer_restart_preflight(
     )
     .await;
     if matches!(restart, RestartInspection::Unknown { .. }) {
-        return Err(update_failed(
+        return Err(super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::RestartInspection,
+            UpdateStage::RestartInspection.diagnostic_name(),
             DiagnosticCause::ServiceState,
             UserFailure::StopThenRetry(StopThenRetry::UpdateServiceStateDisableUpdateEnable),
         ));
     }
     guard_restart_required_update_typed(&systemctl, lifecycle, snapshot, &restart).map_err(
         |failure| {
-            update_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                UpdateStage::RestartInspection,
+                UpdateStage::RestartInspection.diagnostic_name(),
                 DiagnosticCause::ServiceState,
                 failure,
             )
@@ -772,58 +752,58 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
         || UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStateCheckStatus);
 
     let candidate = inspect_candidate(&context.candidate).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::CandidatePreflight,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
             DiagnosticCause::Checksum,
             checksum_failure(),
         )
     })?;
     if candidate.target != product_target() {
-        return Err(update_failed(
+        return Err(super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::CandidatePreflight,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
             DiagnosticCause::Checksum,
             checksum_failure(),
         ));
     }
     let candidate_bytes = fs::read(&candidate.executable).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::CandidatePreflight,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
             DiagnosticCause::Checksum,
             checksum_failure(),
         )
     })?;
     let candidate_sha256 = sha256_bytes(&candidate_bytes);
     let manifest = load_update_manifest(paths).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::CandidatePreflight,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
             DiagnosticCause::Validation,
             installed_state_failure(),
         )
     })?;
     let installed_version = semver::Version::parse(&manifest.product_version).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::CandidatePreflight,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
             DiagnosticCause::Validation,
             installed_state_failure(),
         )
     })?;
     let candidate_version = semver::Version::parse(&candidate.product_version).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::CandidatePreflight,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
             DiagnosticCause::Checksum,
             checksum_failure(),
         )
     })?;
     if candidate_version < installed_version {
-        return Err(update_failed(
+        return Err(super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::CandidatePreflight,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
             DiagnosticCause::Checksum,
             checksum_failure(),
         ));
@@ -840,18 +820,18 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
 
     let codex =
         resolve_codex_executable(&lifecycle.path_environment, &lifecycle.cwd).map_err(|_| {
-            update_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                UpdateStage::CandidatePreflight,
+                UpdateStage::CandidatePreflight.diagnostic_name(),
                 DiagnosticCause::CliIntegration,
                 cli_failure(),
             )
         })?;
     let (codex_version, expected_running_version) = read_codex_version(&codex, &paths.codex_home)
         .map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::CandidatePreflight,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
             DiagnosticCause::CliIntegration,
             cli_failure(),
         )
@@ -865,26 +845,26 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
     let desired_config_bytes = toml::to_string(&desired_config)
         .map(String::into_bytes)
         .map_err(|_| {
-            update_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                UpdateStage::CandidatePreflight,
+                UpdateStage::CandidatePreflight.diagnostic_name(),
                 DiagnosticCause::CliIntegration,
                 cli_failure(),
             )
         })?;
     let desired_projection =
         render_projection(&paths.binary, &candidate.product_version).map_err(|_| {
-            update_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                UpdateStage::CandidatePreflight,
+                UpdateStage::CandidatePreflight.diagnostic_name(),
                 DiagnosticCause::CliIntegration,
                 cli_failure(),
             )
         })?;
     let desired_unit = render_unit(paths, &codex).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::CandidatePreflight,
+            UpdateStage::CandidatePreflight.diagnostic_name(),
             DiagnosticCause::ServiceConfiguration,
             service_configuration_failure(),
         )
@@ -893,17 +873,17 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
     let systemctl =
         resolve_named_executable(&lifecycle.path_environment, &lifecycle.cwd, "systemctl")
             .map_err(|_| {
-                update_failed(
+                super::fail_with_diagnostic(
                     diagnostics,
-                    UpdateStage::ServiceSnapshot,
+                    UpdateStage::ServiceSnapshot.diagnostic_name(),
                     DiagnosticCause::ServiceState,
                     service_state_failure(),
                 )
             })?;
     let snapshot = service_snapshot(&systemctl, &lifecycle.target).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::ServiceSnapshot,
+            UpdateStage::ServiceSnapshot.diagnostic_name(),
             DiagnosticCause::ServiceState,
             service_state_failure(),
         )
@@ -925,18 +905,18 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
     )
     .await;
     if matches!(restart, RestartInspection::Unknown { .. }) {
-        return Err(update_failed(
+        return Err(super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::RestartInspection,
+            UpdateStage::RestartInspection.diagnostic_name(),
             DiagnosticCause::ServiceState,
             UserFailure::StopThenRetry(StopThenRetry::UpdateServiceStateDisableUpdateEnable),
         ));
     }
     guard_restart_required_update_typed(&systemctl, lifecycle, snapshot, &restart).map_err(
         |failure| {
-            update_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                UpdateStage::RestartInspection,
+                UpdateStage::RestartInspection.diagnostic_name(),
                 DiagnosticCause::ServiceState,
                 failure,
             )
@@ -958,9 +938,9 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
         })
         .await
         .map_err(|_| {
-            update_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                UpdateStage::CandidatePreflight,
+                UpdateStage::CandidatePreflight.diagnostic_name(),
                 DiagnosticCause::Validation,
                 installed_state_failure(),
             )
@@ -980,9 +960,9 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
         baseline_active_turn_gate(paths, &expected_running_version, context.terminal)
             .await
             .map_err(|failure| {
-                update_failed(
+                super::fail_with_diagnostic(
                     diagnostics,
-                    UpdateStage::ActiveTurnGate,
+                    UpdateStage::ActiveTurnGate.diagnostic_name(),
                     DiagnosticCause::ActiveTasks,
                     active_turn_gate_failure(failure),
                 )
@@ -996,9 +976,9 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
     }
 
     reconcile_file(&paths.binary, &candidate_bytes, 0o755, paths.euid).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::Binary,
+            UpdateStage::Binary.diagnostic_name(),
             DiagnosticCause::Validation,
             UserFailure::Ordinary(OrdinaryFailure::UpdateInstallationFilesRetry),
         )
@@ -1011,9 +991,9 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
     )?;
 
     reconcile_file(&paths.config, &desired_config_bytes, 0o600, paths.euid).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::Configuration,
+            UpdateStage::Configuration.diagnostic_name(),
             DiagnosticCause::Validation,
             UserFailure::Ordinary(OrdinaryFailure::UpdateInstallationFilesRetry),
         )
@@ -1027,9 +1007,9 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
 
     let projection_changed = reconcile_projection(paths, &desired_projection).map_err(|error| {
         let failure = update_cli_reconciliation_failure(&error);
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::Projection,
+            UpdateStage::Projection.diagnostic_name(),
             DiagnosticCause::CliIntegration,
             failure,
         )
@@ -1044,9 +1024,9 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
     let marketplace_changed = reconcile_marketplace(&codex, &paths.codex_home, &paths.marketplace)
         .map_err(|error| {
             let failure = update_cli_reconciliation_failure(&error);
-            update_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                UpdateStage::PluginMarketplace,
+                UpdateStage::PluginMarketplace.diagnostic_name(),
                 DiagnosticCause::CliIntegration,
                 failure,
             )
@@ -1066,9 +1046,9 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
     )
     .map_err(|error| {
         let failure = update_cli_reconciliation_failure(&error);
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::PluginInstall,
+            UpdateStage::PluginInstall.diagnostic_name(),
             DiagnosticCause::CliIntegration,
             failure,
         )
@@ -1086,9 +1066,9 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
             match probe_persisted_desktop_capability(identity, &lifecycle.desktop_environment)
                 .await
                 .map_err(|_| {
-                    update_failed(
+                    super::fail_with_diagnostic(
                         diagnostics,
-                        UpdateStage::DesktopDiscovery,
+                        UpdateStage::DesktopDiscovery.diagnostic_name(),
                         DiagnosticCause::DesktopIntegration,
                         UserFailure::Ordinary(OrdinaryFailure::UpdateDesktopIntegrationCheckStatus),
                     )
@@ -1108,25 +1088,25 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
     let desktop_published = match manifest.desktop_attachment.as_ref() {
         Some(identity) => {
             let expected = render_descriptor(&paths.socket).map_err(|_| {
-                update_failed(
+                super::fail_with_diagnostic(
                     diagnostics,
-                    UpdateStage::Descriptor,
+                    UpdateStage::Descriptor.diagnostic_name(),
                     DiagnosticCause::DesktopIntegration,
                     UserFailure::Ordinary(OrdinaryFailure::UpdateDesktopIntegrationCheckStatus),
                 )
             })?;
             match inspect_descriptor(identity, &expected).map_err(|_| {
-                update_failed(
+                super::fail_with_diagnostic(
                     diagnostics,
-                    UpdateStage::Descriptor,
+                    UpdateStage::Descriptor.diagnostic_name(),
                     DiagnosticCause::DesktopIntegration,
                     UserFailure::Ordinary(OrdinaryFailure::UpdateDesktopIntegrationCheckStatus),
                 )
             })? {
                 DescriptorState::Foreign => {
-                    return Err(update_failed(
+                    return Err(super::fail_with_diagnostic(
                         diagnostics,
-                        UpdateStage::Descriptor,
+                        UpdateStage::Descriptor.diagnostic_name(),
                         DiagnosticCause::DesktopIntegration,
                         UserFailure::Ordinary(OrdinaryFailure::UpdateDesktopIntegrationCheckStatus),
                     ));
@@ -1134,9 +1114,9 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
                 DescriptorState::Absent if snapshot.enabled => {
                     publish_descriptor(identity, &expected).map_err(|failure| {
                         let failure = update_descriptor_publication_failure(failure);
-                        update_failed(
+                        super::fail_with_diagnostic(
                             diagnostics,
-                            UpdateStage::Descriptor,
+                            UpdateStage::Descriptor.diagnostic_name(),
                             DiagnosticCause::DesktopIntegration,
                             failure,
                         )
@@ -1155,9 +1135,9 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
     )?;
 
     reconcile_file(&paths.unit, &desired_unit, 0o644, paths.euid).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::ServiceUnit,
+            UpdateStage::ServiceUnit.diagnostic_name(),
             DiagnosticCause::ServiceConfiguration,
             UserFailure::Ordinary(OrdinaryFailure::UpdateServiceConfigurationLogs),
         )
@@ -1170,9 +1150,9 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
     )?;
 
     run_systemctl(&systemctl, ["--user", "daemon-reload"]).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::DaemonReload,
+            UpdateStage::DaemonReload.diagnostic_name(),
             DiagnosticCause::ServiceConfiguration,
             UserFailure::Ordinary(OrdinaryFailure::UpdateServiceConfigurationLogs),
         )
@@ -1197,9 +1177,9 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
                 ["--user", "restart", lifecycle.target.unit_name.as_str()],
             )
             .map_err(|_| {
-                update_failed(
+                super::fail_with_diagnostic(
                     diagnostics,
-                    UpdateStage::ServiceApply,
+                    UpdateStage::ServiceApply.diagnostic_name(),
                     DiagnosticCause::ServiceStart,
                     UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStartLogs),
                 )
@@ -1223,14 +1203,14 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
                 ],
             )
             .map_err(|_| {
-                update_failed(
+                super::fail_with_diagnostic(
                     diagnostics,
-                    UpdateStage::ServiceApply,
+                    UpdateStage::ServiceApply.diagnostic_name(),
                     DiagnosticCause::ServiceStart,
                     UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStartLogs),
                 )
             })?;
-            diagnostics.emit(DiagnosticEvent::CompletedServiceEnable);
+            diagnostics.completed(UpdateStage::ServiceApply.diagnostic_name());
         }
         _ => {}
     }
@@ -1245,18 +1225,18 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
         verify_enabled_service(&systemctl, &lifecycle.target, &expected_running_version)
             .await
             .map_err(|_| {
-                update_failed(
+                super::fail_with_diagnostic(
                     diagnostics,
-                    UpdateStage::ServiceVerify,
+                    UpdateStage::ServiceVerify.diagnostic_name(),
                     DiagnosticCause::ServiceState,
                     UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStateLogs),
                 )
             })?;
     } else {
         verify_disabled_service(&systemctl, &lifecycle.target).map_err(|_| {
-            update_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                UpdateStage::ServiceVerify,
+                UpdateStage::ServiceVerify.diagnostic_name(),
                 DiagnosticCause::ServiceState,
                 UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStateLogs),
             )
@@ -1283,18 +1263,18 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
         desktop_attachment: manifest.desktop_attachment.clone(),
     };
     let mut manifest_bytes = serde_json::to_vec_pretty(&installed).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::Manifest,
+            UpdateStage::Manifest.diagnostic_name(),
             DiagnosticCause::Validation,
             UserFailure::Ordinary(OrdinaryFailure::UpdateInstalledStatePostMutationCheckStatus),
         )
     })?;
     manifest_bytes.push(b'\n');
     reconcile_file(&paths.manifest, &manifest_bytes, 0o600, paths.euid).map_err(|_| {
-        update_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UpdateStage::Manifest,
+            UpdateStage::Manifest.diagnostic_name(),
             DiagnosticCause::Validation,
             UserFailure::Ordinary(OrdinaryFailure::UpdateInstalledStatePostMutationCheckStatus),
         )

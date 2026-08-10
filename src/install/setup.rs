@@ -80,8 +80,7 @@ enum SetupStage {
 }
 
 impl SetupStage {
-    #[cfg(test)]
-    const fn name(self) -> &'static str {
+    const fn diagnostic_name(self) -> &'static str {
         match self {
             Self::Preflight => "preflight",
             Self::Binary => "binary",
@@ -98,52 +97,6 @@ impl SetupStage {
             Self::Manifest => "manifest",
         }
     }
-
-    fn completed_event(self) -> DiagnosticEvent {
-        match self {
-            Self::Preflight => DiagnosticEvent::CompletedPreflight,
-            Self::Binary => DiagnosticEvent::CompletedBinary,
-            Self::Configuration => DiagnosticEvent::CompletedConfiguration,
-            Self::Projection => DiagnosticEvent::CompletedProjection,
-            Self::PluginMarketplace => DiagnosticEvent::CompletedPluginMarketplace,
-            Self::PluginInstall => DiagnosticEvent::CompletedPluginInstall,
-            Self::DesktopDiscovery => DiagnosticEvent::CompletedDesktopDiscovery,
-            Self::Descriptor => DiagnosticEvent::CompletedDescriptor,
-            Self::ServiceUnit => DiagnosticEvent::CompletedServiceUnit,
-            Self::DaemonReload => DiagnosticEvent::CompletedDaemonReload,
-            Self::ServiceEnable => DiagnosticEvent::CompletedServiceEnable,
-            Self::ServiceVerify => DiagnosticEvent::CompletedServiceVerify,
-            Self::Manifest => DiagnosticEvent::CompletedManifest,
-        }
-    }
-
-    fn failed_event(self, cause: DiagnosticCause) -> DiagnosticEvent {
-        match self {
-            Self::Preflight => DiagnosticEvent::FailedPreflight(cause),
-            Self::Binary => DiagnosticEvent::FailedBinary(cause),
-            Self::Configuration => DiagnosticEvent::FailedConfiguration(cause),
-            Self::Projection => DiagnosticEvent::FailedProjection(cause),
-            Self::PluginMarketplace => DiagnosticEvent::FailedPluginMarketplace(cause),
-            Self::PluginInstall => DiagnosticEvent::FailedPluginInstall(cause),
-            Self::DesktopDiscovery => DiagnosticEvent::FailedDesktopDiscovery(cause),
-            Self::Descriptor => DiagnosticEvent::FailedDescriptor(cause),
-            Self::ServiceUnit => DiagnosticEvent::FailedServiceUnit(cause),
-            Self::DaemonReload => DiagnosticEvent::FailedDaemonReload(cause),
-            Self::ServiceEnable => DiagnosticEvent::FailedServiceEnable(cause),
-            Self::ServiceVerify => DiagnosticEvent::FailedServiceVerify(cause),
-            Self::Manifest => DiagnosticEvent::FailedManifest(cause),
-        }
-    }
-}
-
-fn setup_failed(
-    diagnostics: &mut Diagnostics,
-    stage: SetupStage,
-    cause: DiagnosticCause,
-    failure: UserFailure,
-) -> UserFailure {
-    diagnostics.emit(stage.failed_event(cause));
-    failure
 }
 
 fn complete_setup_stage(
@@ -151,12 +104,12 @@ fn complete_setup_stage(
     stage: SetupStage,
     _target: &LifecycleTarget,
 ) -> Result<(), UserFailure> {
-    diagnostics.emit(stage.completed_event());
+    diagnostics.completed(stage.diagnostic_name());
     #[cfg(test)]
-    if _target.test_hooks.fail_after_completed_stage == Some(stage.name()) {
-        return Err(setup_failed(
+    if _target.test_hooks.fail_after_completed_stage == Some(stage.diagnostic_name()) {
+        return Err(super::fail_with_diagnostic(
             diagnostics,
-            stage,
+            stage.diagnostic_name(),
             DiagnosticCause::Unexpected,
             UserFailure::Ordinary(OrdinaryFailure::SetupUnexpectedRetry),
         ));
@@ -229,18 +182,18 @@ pub(crate) async fn setup(
         target: DiagnosticTarget::current(),
     });
     let paths = ResolvedUserPaths::from_effective_user().map_err(|_| {
-        setup_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            SetupStage::Preflight,
+            SetupStage::Preflight.diagnostic_name(),
             DiagnosticCause::Validation,
             setup_invocation_failure(),
         )
     })?;
     let candidate = CandidateRelease {
         executable: std::env::current_exe().map_err(|_| {
-            setup_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                SetupStage::Preflight,
+                SetupStage::Preflight.diagnostic_name(),
                 DiagnosticCause::Unexpected,
                 UserFailure::Ordinary(OrdinaryFailure::SetupUnexpectedRetry),
             )
@@ -249,17 +202,17 @@ pub(crate) async fn setup(
         target: product_target().to_owned(),
     };
     let path_environment = std::env::var_os("PATH").ok_or_else(|| {
-        setup_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            SetupStage::Preflight,
+            SetupStage::Preflight.diagnostic_name(),
             DiagnosticCause::Validation,
             setup_invocation_failure(),
         )
     })?;
     let cwd = std::env::current_dir().map_err(|_| {
-        setup_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            SetupStage::Preflight,
+            SetupStage::Preflight.diagnostic_name(),
             DiagnosticCause::Validation,
             setup_invocation_failure(),
         )
@@ -303,9 +256,9 @@ pub(super) async fn setup_with_context_after_start(
     let preflight = match setup_preflight(&mut context).await {
         Ok(preflight) => preflight,
         Err(failure) => {
-            return Err(setup_failed(
+            return Err(super::fail_with_diagnostic(
                 diagnostics,
-                SetupStage::Preflight,
+                SetupStage::Preflight.diagnostic_name(),
                 DiagnosticCause::Validation,
                 failure,
             ));
@@ -329,9 +282,9 @@ pub(super) async fn setup_with_context_after_start(
     })()
     .is_err()
     {
-        return Err(setup_failed(
+        return Err(super::fail_with_diagnostic(
             diagnostics,
-            SetupStage::Binary,
+            SetupStage::Binary.diagnostic_name(),
             DiagnosticCause::Validation,
             UserFailure::Ordinary(OrdinaryFailure::SetupInstallationFilesRetry),
         ));
@@ -359,9 +312,9 @@ pub(super) async fn setup_with_context_after_start(
     })()
     .is_err()
     {
-        return Err(setup_failed(
+        return Err(super::fail_with_diagnostic(
             diagnostics,
-            SetupStage::Configuration,
+            SetupStage::Configuration.diagnostic_name(),
             DiagnosticCause::Validation,
             UserFailure::Ordinary(OrdinaryFailure::SetupInstallationFilesRetry),
         ));
@@ -371,9 +324,9 @@ pub(super) async fn setup_with_context_after_start(
     let _projection_changed = match reconcile_projection(paths, &preflight.projection) {
         Ok(changed) => changed,
         Err(_) => {
-            return Err(setup_failed(
+            return Err(super::fail_with_diagnostic(
                 diagnostics,
-                SetupStage::Projection,
+                SetupStage::Projection.diagnostic_name(),
                 DiagnosticCause::CliIntegration,
                 UserFailure::Ordinary(OrdinaryFailure::SetupCliIntegrationRetry),
             ));
@@ -385,9 +338,9 @@ pub(super) async fn setup_with_context_after_start(
         match reconcile_marketplace(&preflight.codex, &paths.codex_home, &paths.marketplace) {
             Ok(changed) => changed,
             Err(error) => {
-                return Err(setup_failed(
+                return Err(super::fail_with_diagnostic(
                     diagnostics,
-                    SetupStage::PluginMarketplace,
+                    SetupStage::PluginMarketplace.diagnostic_name(),
                     DiagnosticCause::CliIntegration,
                     setup_cli_reconciliation_failure(&error),
                 ));
@@ -403,9 +356,9 @@ pub(super) async fn setup_with_context_after_start(
     ) {
         Ok(changed) => changed,
         Err(error) => {
-            return Err(setup_failed(
+            return Err(super::fail_with_diagnostic(
                 diagnostics,
-                SetupStage::PluginInstall,
+                SetupStage::PluginInstall.diagnostic_name(),
                 DiagnosticCause::CliIntegration,
                 setup_cli_reconciliation_failure(&error),
             ));
@@ -420,9 +373,9 @@ pub(super) async fn setup_with_context_after_start(
         let published = match publish_descriptor(&target.identity, descriptor) {
             Ok(published) => published,
             Err(failure) => {
-                return Err(setup_failed(
+                return Err(super::fail_with_diagnostic(
                     diagnostics,
-                    SetupStage::Descriptor,
+                    SetupStage::Descriptor.diagnostic_name(),
                     DiagnosticCause::DesktopIntegration,
                     setup_descriptor_publication_failure(failure),
                 ));
@@ -463,9 +416,9 @@ pub(super) async fn setup_with_context_after_start(
                 } else {
                     UserFailure::Ordinary(OrdinaryFailure::SetupDesktopIntegrationRetry)
                 };
-                return Err(setup_failed(
+                return Err(super::fail_with_diagnostic(
                     diagnostics,
-                    SetupStage::Descriptor,
+                    SetupStage::Descriptor.diagnostic_name(),
                     DiagnosticCause::DesktopIntegration,
                     failure,
                 ));
@@ -475,9 +428,9 @@ pub(super) async fn setup_with_context_after_start(
                 if published && remove_expected_descriptor(&target.identity, descriptor).is_err() {
                     residue.push(target.identity.descriptor_path.clone());
                 }
-                return Err(setup_failed(
+                return Err(super::fail_with_diagnostic(
                     diagnostics,
-                    SetupStage::Descriptor,
+                    SetupStage::Descriptor.diagnostic_name(),
                     DiagnosticCause::DesktopIntegration,
                     setup_desktop_rollback(residue),
                 ));
@@ -591,18 +544,18 @@ pub(super) async fn setup_with_context_after_start(
         desktop_attachment: preflight.desktop.attachment.clone(),
     };
     let mut manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|_| {
-        setup_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            SetupStage::Manifest,
+            SetupStage::Manifest.diagnostic_name(),
             DiagnosticCause::Validation,
             UserFailure::Ordinary(OrdinaryFailure::SetupInstallationFilesRetry),
         )
     })?;
     manifest_bytes.push(b'\n');
     if reconcile_file(&paths.manifest, &manifest_bytes, 0o600, paths.euid).is_err() {
-        return Err(setup_failed(
+        return Err(super::fail_with_diagnostic(
             diagnostics,
-            SetupStage::Manifest,
+            SetupStage::Manifest.diagnostic_name(),
             DiagnosticCause::Validation,
             UserFailure::Ordinary(OrdinaryFailure::SetupInstallationFilesRetry),
         ));
@@ -829,7 +782,7 @@ fn fail_after_descriptor_publication(
             _ => unreachable!("post-publication setup uses a setup service primary"),
         }),
     };
-    setup_failed(diagnostics, stage, cause, failure)
+    super::fail_with_diagnostic(diagnostics, stage.diagnostic_name(), cause, failure)
 }
 
 fn validate_manifestless_setup_artifacts(

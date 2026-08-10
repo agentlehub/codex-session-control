@@ -93,6 +93,23 @@ fn without_verbose_diagnostics(stderr: &str) -> String {
         .collect()
 }
 
+fn assert_default_verbose_parity(
+    default: &crate::cli_output::RenderedCli,
+    verbose: &crate::cli_output::RenderedCli,
+    diagnostics: &crate::diagnostics::Diagnostics,
+    diagnostic_prefix: &str,
+) {
+    assert_eq!(default.stdout, verbose.stdout);
+    assert_eq!(default.stderr, without_verbose_diagnostics(&verbose.stderr));
+    assert_eq!(default.exit_code, verbose.exit_code);
+    assert!(
+        diagnostics
+            .recorded_lines()
+            .iter()
+            .all(|line| line.starts_with(diagnostic_prefix))
+    );
+}
+
 fn write_executable_fixture(path: &std::path::Path, contents: impl AsRef<[u8]>) {
     use std::os::unix::fs::PermissionsExt;
 

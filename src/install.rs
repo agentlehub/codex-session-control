@@ -5,10 +5,12 @@ use std::{
 };
 
 use crate::{
+    cli_output::UserFailure,
     desktop::{
         DescriptorPublicationFailure, DescriptorPublicationResidue, DesktopTarget,
         remove_expected_descriptor, render_descriptor,
     },
+    diagnostics::{DiagnosticCause, Diagnostics},
     error::ControllerError,
 };
 use sha2::{Digest, Sha256};
@@ -29,6 +31,16 @@ pub(crate) use wrapper::codex_wrapper;
 
 use evidence::SelectedHomeEvidence;
 use service::{ServiceActivity, query_service_activity, verify_absent_control_socket};
+
+fn fail_with_diagnostic(
+    diagnostics: &mut Diagnostics,
+    stage: &'static str,
+    cause: DiagnosticCause,
+    failure: UserFailure,
+) -> UserFailure {
+    diagnostics.failed(stage, cause);
+    failure
+}
 
 fn display_command_for_paths(paths: &ResolvedUserPaths, path_environment: &OsStr) -> String {
     let install_bin = paths.home.join(".local/bin");

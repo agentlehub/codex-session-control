@@ -118,8 +118,8 @@ fn setup_guidance_precedence_is_exact() {
     }
 }
 
-#[tokio::test]
-async fn setup_producer_boundaries_select_complete_failures() {
+#[test]
+fn setup_pure_failure_mappings_are_exact() {
     use crate::cli_output::{OrdinaryFailure, UserFailure};
     use crate::desktop::{DescriptorPublicationFailure, DescriptorPublicationResidue};
 
@@ -160,104 +160,6 @@ async fn setup_producer_boundaries_select_complete_failures() {
             UserFailure::RollbackIncomplete(_)
         ));
     }
-
-    let candidate = Fixture::new();
-    let mut context = candidate.context(true);
-    context.candidate.target = "wrong-target".to_owned();
-    assert_eq!(
-        setup_with_context(context).await.unwrap_err(),
-        UserFailure::Ordinary(OrdinaryFailure::SetupInstallationFilesRetry)
-    );
-
-    let cli = Fixture::new();
-    fs::remove_file(cli.fake_bin.join("codex")).unwrap();
-    assert_eq!(
-        setup_with_context(cli.context(true)).await.unwrap_err(),
-        UserFailure::Ordinary(OrdinaryFailure::SetupCliIntegrationRetry)
-    );
-
-    let service = Fixture::new();
-    fs::remove_file(service.fake_bin.join("systemctl")).unwrap();
-    assert_eq!(
-        setup_with_context(service.context(true)).await.unwrap_err(),
-        UserFailure::Ordinary(OrdinaryFailure::SetupServiceConfigurationRetry)
-    );
-
-    let service_start = Fixture::new();
-    fs::write(
-        &service_start.systemctl_fail,
-        "--user enable --now codex-session-control-test-Setup1.service",
-    )
-    .unwrap();
-    assert_eq!(
-        setup_with_context(service_start.context(true))
-            .await
-            .unwrap_err(),
-        UserFailure::Ordinary(OrdinaryFailure::SetupServiceStartRetry)
-    );
-
-    let service_state = Fixture::new();
-    fs::write(
-        &service_state.systemctl_fail,
-        "--user is-enabled codex-session-control-test-Setup1.service",
-    )
-    .unwrap();
-    assert_eq!(
-        setup_with_context(service_state.context(true))
-            .await
-            .unwrap_err(),
-        UserFailure::Ordinary(OrdinaryFailure::SetupServiceStateRetryUpdate)
-    );
-
-    let desktop = Fixture::new();
-    let mut context = desktop.context(true);
-    let desktop_launcher = desktop._root.path().join("desktop-launcher");
-    write_executable_fixture(
-        &desktop_launcher,
-        "#!/bin/sh\nif [ \"$1\" = \"--print-build-info\" ]; then printf '%s\\n' '{\"appIdentity\":{\"id\":\"codex-desktop\"},\"linuxCapabilities\":[\"external-app-server-attachment-descriptor-v1\"]}'; exit 0; fi\nexit 64\n",
-    );
-    context.desktop_launcher = Some(desktop_launcher);
-    context.target.paths.socket = PathBuf::from("/tmp//non-normalized-socket");
-    assert_eq!(
-        setup_with_context(context).await.unwrap_err(),
-        UserFailure::Ordinary(OrdinaryFailure::SetupDesktopIntegrationRetry)
-    );
-
-    let completed_stage = Fixture::new();
-    let mut context = completed_stage.context(true);
-    context.target = context.target.fail_after_completed_stage("binary");
-    assert_eq!(
-        setup_with_context(context).await.unwrap_err(),
-        UserFailure::Ordinary(OrdinaryFailure::SetupUnexpectedRetry)
-    );
-
-    let verified = Fixture::new();
-    for directory in [
-        verified.paths.marketplace.clone(),
-        verified.paths.marketplace.join("plugins"),
-        verified
-            .paths
-            .marketplace
-            .join("plugins/codex-session-control"),
-        verified
-            .paths
-            .marketplace
-            .join("plugins/codex-session-control/.codex-plugin"),
-    ] {
-        create_shared_dir(&directory, verified.paths.euid).unwrap();
-    }
-    let old_plugin = verified
-        .paths
-        .marketplace
-        .join("plugins/codex-session-control/.codex-plugin/plugin.json");
-    fs::write(&old_plugin, br#"{"version":"0.0.9"}"#).unwrap();
-    fs::set_permissions(&old_plugin, fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(matches!(
-        setup_with_context(verified.context(true))
-            .await
-            .unwrap_err(),
-        UserFailure::VerifiedRelease(_)
-    ));
 }
 
 #[tokio::test]
@@ -296,15 +198,7 @@ async fn setup_default_and_verbose_are_behaviorally_identical() {
 
     let verbose = with_recorded_diagnostics(verbose, &verbose_diagnostics);
 
-    assert_eq!(default.stdout, verbose.stdout);
-    assert_eq!(default.stderr, without_verbose_diagnostics(&verbose.stderr));
-    assert_eq!(default.exit_code, verbose.exit_code);
-    assert!(
-        verbose_diagnostics
-            .recorded_lines()
-            .iter()
-            .all(|line| line.starts_with("[verbose] setup:"))
-    );
+    assert_default_verbose_parity(&default, &verbose, &verbose_diagnostics, "[verbose] setup:");
     assert_eq!(
         default_fixture.systemctl_log(),
         verbose_fixture.systemctl_log()

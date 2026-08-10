@@ -1267,278 +1267,186 @@ mod tests {
         format!("{headline}\n\n{problem}\n\n{recovery}")
     }
 
-    fn retry(command: &str) -> String {
-        format!("Try again:\n  {command}\n")
-    }
-
-    fn ordinary_oracle(failure: &OrdinaryFailure) -> String {
-        let setup = "Codex Session Control could not be installed.";
-        let update = "Codex Session Control could not be updated.";
-        let enable = "Codex Session Control could not be started.";
-        let disable = "Codex Session Control could not be stopped.";
-        let uninstall = "Codex Session Control could not be uninstalled.";
-        let status = "Check what needs attention:\n  codex-session-control status\n";
-        let logs =
-            "Check the service logs:\n  journalctl --user -u codex-session-control.service\n";
-        let (headline, problem, recovery) = match failure {
-            OrdinaryFailure::SetupUnsafeTerminalRetry => (
-                setup,
-                "The operation could not safely continue from this terminal.",
-                retry("codex-session-control setup"),
-            ),
-            OrdinaryFailure::SetupUnexpectedRetry => (
-                setup,
-                "The operation failed unexpectedly.",
-                retry("codex-session-control setup"),
-            ),
-            OrdinaryFailure::SetupInstalledStateCheckStatus => (
-                setup,
-                "The installed Codex Session Control state could not be verified.",
-                status.to_owned(),
-            ),
-            OrdinaryFailure::SetupInstallationFilesRetryUpdate => (
-                setup,
-                "The installation files could not be updated.",
-                retry("codex-session-control update"),
-            ),
-            OrdinaryFailure::SetupInstalledStateRepair { binary } => (
-                setup,
-                "The installed Codex Session Control state could not be verified.",
-                format!(
-                    "Repair Codex Session Control:\n  {} setup\n",
-                    binary.display()
-                ),
-            ),
-            OrdinaryFailure::SetupCliIntegrationRetry => (
-                setup,
-                "Codex CLI integration could not be updated.",
-                retry("codex-session-control setup"),
-            ),
-            OrdinaryFailure::SetupCliIntegrationCheckStatus => (
-                setup,
-                "Codex CLI integration could not be updated.",
-                status.to_owned(),
-            ),
-            OrdinaryFailure::SetupInstallationFilesRetry => (
-                setup,
-                "The installation files could not be updated.",
-                retry("codex-session-control setup"),
-            ),
-            OrdinaryFailure::SetupServiceConfigurationRetry => (
-                setup,
-                "The service could not be configured.",
-                retry("codex-session-control setup"),
-            ),
-            OrdinaryFailure::SetupDesktopIntegrationRetry => (
-                setup,
-                "Codex Desktop integration could not be updated.",
-                retry("codex-session-control setup"),
-            ),
-            OrdinaryFailure::SetupDesktopIntegrationCheckStatus => (
-                setup,
-                "Codex Desktop integration could not be updated.",
-                status.to_owned(),
-            ),
-            OrdinaryFailure::SetupServiceStartRetry => (
-                setup,
-                "The service could not be started.",
-                retry("codex-session-control setup"),
-            ),
-            OrdinaryFailure::SetupServiceStateRetryUpdate => (
-                setup,
-                "The service state could not be verified.",
-                retry("codex-session-control update"),
-            ),
-            OrdinaryFailure::UpdateUnexpectedRetry => (
-                update,
-                "The operation failed unexpectedly.",
-                retry("codex-session-control update"),
-            ),
-            OrdinaryFailure::UpdateInstalledStateCheckStatus
-            | OrdinaryFailure::UpdateInstalledStatePostMutationCheckStatus => (
-                update,
-                "The installed Codex Session Control state could not be verified.",
-                status.to_owned(),
-            ),
-            OrdinaryFailure::UpdateReleaseRetry => (
-                update,
-                "The latest release could not be retrieved.",
-                retry("codex-session-control update"),
-            ),
-            OrdinaryFailure::UpdateChecksumRetry => (
-                update,
-                "The downloaded release could not be verified.",
-                retry("codex-session-control update"),
-            ),
-            OrdinaryFailure::UpdateCliIntegrationRetry => (
-                update,
-                "Codex CLI integration could not be updated.",
-                retry("codex-session-control update"),
-            ),
-            OrdinaryFailure::UpdateCliIntegrationCheckStatus => (
-                update,
-                "Codex CLI integration could not be updated.",
-                status.to_owned(),
-            ),
-            OrdinaryFailure::UpdateServiceConfigurationRetry => (
-                update,
-                "The service could not be configured.",
-                retry("codex-session-control update"),
-            ),
-            OrdinaryFailure::UpdateServiceStateCheckStatus => (
-                update,
-                "The service state could not be verified.",
-                status.to_owned(),
-            ),
-            OrdinaryFailure::UpdateActiveTasksRetry => (
-                update,
-                "Active tasks could not be checked safely.",
-                retry("codex-session-control update"),
-            ),
-            OrdinaryFailure::UpdateInstallationFilesRetry => (
-                update,
-                "The installation files could not be updated.",
-                retry("codex-session-control update"),
-            ),
-            OrdinaryFailure::UpdateDesktopIntegrationRetry => (
-                update,
-                "Codex Desktop integration could not be updated.",
-                retry("codex-session-control update"),
-            ),
-            OrdinaryFailure::UpdateDesktopIntegrationCheckStatus => (
-                update,
-                "Codex Desktop integration could not be updated.",
-                status.to_owned(),
-            ),
-            OrdinaryFailure::UpdateServiceConfigurationLogs => (
-                update,
-                "The service could not be configured.",
-                logs.to_owned(),
-            ),
-            OrdinaryFailure::UpdateServiceStartLogs => {
-                (update, "The service could not be started.", logs.to_owned())
-            }
-            OrdinaryFailure::UpdateServiceStateLogs => (
-                update,
-                "The service state could not be verified.",
-                logs.to_owned(),
-            ),
-            OrdinaryFailure::EnableUnexpectedRetry => (
-                enable,
-                "The operation failed unexpectedly.",
-                retry("codex-session-control enable"),
-            ),
-            OrdinaryFailure::EnableInstalledStateRepairSetup => (
-                enable,
-                "The installed Codex Session Control state could not be verified.",
-                "Repair Codex Session Control:\n  codex-session-control setup\n".to_owned(),
-            ),
-            OrdinaryFailure::EnableServiceConfigurationRepairSetup => (
-                enable,
-                "The service could not be configured.",
-                "Repair Codex Session Control:\n  codex-session-control setup\n".to_owned(),
-            ),
-            OrdinaryFailure::EnableDesktopIntegrationCheckStatus => (
-                enable,
-                "Codex Desktop integration could not be updated.",
-                status.to_owned(),
-            ),
-            OrdinaryFailure::EnableDesktopIntegrationRetry => (
-                enable,
-                "Codex Desktop integration could not be updated.",
-                retry("codex-session-control enable"),
-            ),
-            OrdinaryFailure::EnableServiceStartRetry => (
-                enable,
-                "The service could not be started.",
-                retry("codex-session-control enable"),
-            ),
-            OrdinaryFailure::EnableServiceStateRetry => (
-                enable,
-                "The service state could not be verified.",
-                retry("codex-session-control enable"),
-            ),
-            OrdinaryFailure::EnableUnexpectedCheckStatus => (
-                enable,
-                "The operation failed unexpectedly.",
-                status.to_owned(),
-            ),
-            OrdinaryFailure::DisableUnexpectedRetry => (
-                disable,
-                "The operation failed unexpectedly.",
-                retry("codex-session-control disable"),
-            ),
-            OrdinaryFailure::DisableServiceStopRetry => (
-                disable,
-                "The service could not be stopped.",
-                retry("codex-session-control disable"),
-            ),
-            OrdinaryFailure::DisableUnexpectedCheckStatus => (
-                disable,
-                "The operation failed unexpectedly.",
-                status.to_owned(),
-            ),
-            OrdinaryFailure::UninstallUnexpectedRetry => (
-                uninstall,
-                "The operation failed unexpectedly.",
-                retry("codex-session-control uninstall"),
-            ),
-            OrdinaryFailure::UninstallServiceStopRetry => (
-                uninstall,
-                "The service could not be stopped.",
-                retry("codex-session-control uninstall"),
-            ),
-        };
-        failure_oracle(headline, problem, &recovery)
-    }
-
-    fn ordinary_cases() -> Vec<OrdinaryFailure> {
+    fn ordinary_literal_cases() -> Vec<(OrdinaryFailure, &'static str)> {
         vec![
-            OrdinaryFailure::SetupUnsafeTerminalRetry,
-            OrdinaryFailure::SetupUnexpectedRetry,
-            OrdinaryFailure::SetupInstalledStateCheckStatus,
-            OrdinaryFailure::SetupInstallationFilesRetryUpdate,
-            OrdinaryFailure::SetupInstalledStateRepair {
-                binary: PathBuf::from("/opt/codex-session-control"),
-            },
-            OrdinaryFailure::SetupCliIntegrationRetry,
-            OrdinaryFailure::SetupCliIntegrationCheckStatus,
-            OrdinaryFailure::SetupInstallationFilesRetry,
-            OrdinaryFailure::SetupServiceConfigurationRetry,
-            OrdinaryFailure::SetupDesktopIntegrationRetry,
-            OrdinaryFailure::SetupDesktopIntegrationCheckStatus,
-            OrdinaryFailure::SetupServiceStartRetry,
-            OrdinaryFailure::SetupServiceStateRetryUpdate,
-            OrdinaryFailure::UpdateUnexpectedRetry,
-            OrdinaryFailure::UpdateInstalledStateCheckStatus,
-            OrdinaryFailure::UpdateReleaseRetry,
-            OrdinaryFailure::UpdateChecksumRetry,
-            OrdinaryFailure::UpdateCliIntegrationRetry,
-            OrdinaryFailure::UpdateCliIntegrationCheckStatus,
-            OrdinaryFailure::UpdateServiceConfigurationRetry,
-            OrdinaryFailure::UpdateServiceStateCheckStatus,
-            OrdinaryFailure::UpdateActiveTasksRetry,
-            OrdinaryFailure::UpdateInstallationFilesRetry,
-            OrdinaryFailure::UpdateDesktopIntegrationRetry,
-            OrdinaryFailure::UpdateDesktopIntegrationCheckStatus,
-            OrdinaryFailure::UpdateServiceConfigurationLogs,
-            OrdinaryFailure::UpdateServiceStartLogs,
-            OrdinaryFailure::UpdateServiceStateLogs,
-            OrdinaryFailure::UpdateInstalledStatePostMutationCheckStatus,
-            OrdinaryFailure::EnableUnexpectedRetry,
-            OrdinaryFailure::EnableInstalledStateRepairSetup,
-            OrdinaryFailure::EnableServiceConfigurationRepairSetup,
-            OrdinaryFailure::EnableDesktopIntegrationCheckStatus,
-            OrdinaryFailure::EnableDesktopIntegrationRetry,
-            OrdinaryFailure::EnableServiceStartRetry,
-            OrdinaryFailure::EnableServiceStateRetry,
-            OrdinaryFailure::EnableUnexpectedCheckStatus,
-            OrdinaryFailure::DisableUnexpectedRetry,
-            OrdinaryFailure::DisableServiceStopRetry,
-            OrdinaryFailure::DisableUnexpectedCheckStatus,
-            OrdinaryFailure::UninstallUnexpectedRetry,
-            OrdinaryFailure::UninstallServiceStopRetry,
+            (
+                OrdinaryFailure::SetupUnsafeTerminalRetry,
+                "Codex Session Control could not be installed.\n\nThe operation could not safely continue from this terminal.\n\nTry again:\n  codex-session-control setup\n",
+            ),
+            (
+                OrdinaryFailure::SetupUnexpectedRetry,
+                "Codex Session Control could not be installed.\n\nThe operation failed unexpectedly.\n\nTry again:\n  codex-session-control setup\n",
+            ),
+            (
+                OrdinaryFailure::SetupInstalledStateCheckStatus,
+                "Codex Session Control could not be installed.\n\nThe installed Codex Session Control state could not be verified.\n\nCheck what needs attention:\n  codex-session-control status\n",
+            ),
+            (
+                OrdinaryFailure::SetupInstallationFilesRetryUpdate,
+                "Codex Session Control could not be installed.\n\nThe installation files could not be updated.\n\nTry again:\n  codex-session-control update\n",
+            ),
+            (
+                OrdinaryFailure::SetupInstalledStateRepair {
+                    binary: PathBuf::from("/opt/codex-session-control"),
+                },
+                "Codex Session Control could not be installed.\n\nThe installed Codex Session Control state could not be verified.\n\nRepair Codex Session Control:\n  /opt/codex-session-control setup\n",
+            ),
+            (
+                OrdinaryFailure::SetupCliIntegrationRetry,
+                "Codex Session Control could not be installed.\n\nCodex CLI integration could not be updated.\n\nTry again:\n  codex-session-control setup\n",
+            ),
+            (
+                OrdinaryFailure::SetupCliIntegrationCheckStatus,
+                "Codex Session Control could not be installed.\n\nCodex CLI integration could not be updated.\n\nCheck what needs attention:\n  codex-session-control status\n",
+            ),
+            (
+                OrdinaryFailure::SetupInstallationFilesRetry,
+                "Codex Session Control could not be installed.\n\nThe installation files could not be updated.\n\nTry again:\n  codex-session-control setup\n",
+            ),
+            (
+                OrdinaryFailure::SetupServiceConfigurationRetry,
+                "Codex Session Control could not be installed.\n\nThe service could not be configured.\n\nTry again:\n  codex-session-control setup\n",
+            ),
+            (
+                OrdinaryFailure::SetupDesktopIntegrationRetry,
+                "Codex Session Control could not be installed.\n\nCodex Desktop integration could not be updated.\n\nTry again:\n  codex-session-control setup\n",
+            ),
+            (
+                OrdinaryFailure::SetupDesktopIntegrationCheckStatus,
+                "Codex Session Control could not be installed.\n\nCodex Desktop integration could not be updated.\n\nCheck what needs attention:\n  codex-session-control status\n",
+            ),
+            (
+                OrdinaryFailure::SetupServiceStartRetry,
+                "Codex Session Control could not be installed.\n\nThe service could not be started.\n\nTry again:\n  codex-session-control setup\n",
+            ),
+            (
+                OrdinaryFailure::SetupServiceStateRetryUpdate,
+                "Codex Session Control could not be installed.\n\nThe service state could not be verified.\n\nTry again:\n  codex-session-control update\n",
+            ),
+            (
+                OrdinaryFailure::UpdateUnexpectedRetry,
+                "Codex Session Control could not be updated.\n\nThe operation failed unexpectedly.\n\nTry again:\n  codex-session-control update\n",
+            ),
+            (
+                OrdinaryFailure::UpdateInstalledStateCheckStatus,
+                "Codex Session Control could not be updated.\n\nThe installed Codex Session Control state could not be verified.\n\nCheck what needs attention:\n  codex-session-control status\n",
+            ),
+            (
+                OrdinaryFailure::UpdateReleaseRetry,
+                "Codex Session Control could not be updated.\n\nThe latest release could not be retrieved.\n\nTry again:\n  codex-session-control update\n",
+            ),
+            (
+                OrdinaryFailure::UpdateChecksumRetry,
+                "Codex Session Control could not be updated.\n\nThe downloaded release could not be verified.\n\nTry again:\n  codex-session-control update\n",
+            ),
+            (
+                OrdinaryFailure::UpdateCliIntegrationRetry,
+                "Codex Session Control could not be updated.\n\nCodex CLI integration could not be updated.\n\nTry again:\n  codex-session-control update\n",
+            ),
+            (
+                OrdinaryFailure::UpdateCliIntegrationCheckStatus,
+                "Codex Session Control could not be updated.\n\nCodex CLI integration could not be updated.\n\nCheck what needs attention:\n  codex-session-control status\n",
+            ),
+            (
+                OrdinaryFailure::UpdateServiceConfigurationRetry,
+                "Codex Session Control could not be updated.\n\nThe service could not be configured.\n\nTry again:\n  codex-session-control update\n",
+            ),
+            (
+                OrdinaryFailure::UpdateServiceStateCheckStatus,
+                "Codex Session Control could not be updated.\n\nThe service state could not be verified.\n\nCheck what needs attention:\n  codex-session-control status\n",
+            ),
+            (
+                OrdinaryFailure::UpdateActiveTasksRetry,
+                "Codex Session Control could not be updated.\n\nActive tasks could not be checked safely.\n\nTry again:\n  codex-session-control update\n",
+            ),
+            (
+                OrdinaryFailure::UpdateInstallationFilesRetry,
+                "Codex Session Control could not be updated.\n\nThe installation files could not be updated.\n\nTry again:\n  codex-session-control update\n",
+            ),
+            (
+                OrdinaryFailure::UpdateDesktopIntegrationRetry,
+                "Codex Session Control could not be updated.\n\nCodex Desktop integration could not be updated.\n\nTry again:\n  codex-session-control update\n",
+            ),
+            (
+                OrdinaryFailure::UpdateDesktopIntegrationCheckStatus,
+                "Codex Session Control could not be updated.\n\nCodex Desktop integration could not be updated.\n\nCheck what needs attention:\n  codex-session-control status\n",
+            ),
+            (
+                OrdinaryFailure::UpdateServiceConfigurationLogs,
+                "Codex Session Control could not be updated.\n\nThe service could not be configured.\n\nCheck the service logs:\n  journalctl --user -u codex-session-control.service\n",
+            ),
+            (
+                OrdinaryFailure::UpdateServiceStartLogs,
+                "Codex Session Control could not be updated.\n\nThe service could not be started.\n\nCheck the service logs:\n  journalctl --user -u codex-session-control.service\n",
+            ),
+            (
+                OrdinaryFailure::UpdateServiceStateLogs,
+                "Codex Session Control could not be updated.\n\nThe service state could not be verified.\n\nCheck the service logs:\n  journalctl --user -u codex-session-control.service\n",
+            ),
+            (
+                OrdinaryFailure::UpdateInstalledStatePostMutationCheckStatus,
+                "Codex Session Control could not be updated.\n\nThe installed Codex Session Control state could not be verified.\n\nCheck what needs attention:\n  codex-session-control status\n",
+            ),
+            (
+                OrdinaryFailure::EnableUnexpectedRetry,
+                "Codex Session Control could not be started.\n\nThe operation failed unexpectedly.\n\nTry again:\n  codex-session-control enable\n",
+            ),
+            (
+                OrdinaryFailure::EnableInstalledStateRepairSetup,
+                "Codex Session Control could not be started.\n\nThe installed Codex Session Control state could not be verified.\n\nRepair Codex Session Control:\n  codex-session-control setup\n",
+            ),
+            (
+                OrdinaryFailure::EnableServiceConfigurationRepairSetup,
+                "Codex Session Control could not be started.\n\nThe service could not be configured.\n\nRepair Codex Session Control:\n  codex-session-control setup\n",
+            ),
+            (
+                OrdinaryFailure::EnableDesktopIntegrationCheckStatus,
+                "Codex Session Control could not be started.\n\nCodex Desktop integration could not be updated.\n\nCheck what needs attention:\n  codex-session-control status\n",
+            ),
+            (
+                OrdinaryFailure::EnableDesktopIntegrationRetry,
+                "Codex Session Control could not be started.\n\nCodex Desktop integration could not be updated.\n\nTry again:\n  codex-session-control enable\n",
+            ),
+            (
+                OrdinaryFailure::EnableServiceStartRetry,
+                "Codex Session Control could not be started.\n\nThe service could not be started.\n\nTry again:\n  codex-session-control enable\n",
+            ),
+            (
+                OrdinaryFailure::EnableServiceStateRetry,
+                "Codex Session Control could not be started.\n\nThe service state could not be verified.\n\nTry again:\n  codex-session-control enable\n",
+            ),
+            (
+                OrdinaryFailure::EnableUnexpectedCheckStatus,
+                "Codex Session Control could not be started.\n\nThe operation failed unexpectedly.\n\nCheck what needs attention:\n  codex-session-control status\n",
+            ),
+            (
+                OrdinaryFailure::DisableUnexpectedRetry,
+                "Codex Session Control could not be stopped.\n\nThe operation failed unexpectedly.\n\nTry again:\n  codex-session-control disable\n",
+            ),
+            (
+                OrdinaryFailure::DisableServiceStopRetry,
+                "Codex Session Control could not be stopped.\n\nThe service could not be stopped.\n\nTry again:\n  codex-session-control disable\n",
+            ),
+            (
+                OrdinaryFailure::DisableUnexpectedCheckStatus,
+                "Codex Session Control could not be stopped.\n\nThe operation failed unexpectedly.\n\nCheck what needs attention:\n  codex-session-control status\n",
+            ),
+            (
+                OrdinaryFailure::UninstallUnexpectedRetry,
+                "Codex Session Control could not be uninstalled.\n\nThe operation failed unexpectedly.\n\nTry again:\n  codex-session-control uninstall\n",
+            ),
+            (
+                OrdinaryFailure::UninstallServiceStopRetry,
+                "Codex Session Control could not be uninstalled.\n\nThe service could not be stopped.\n\nTry again:\n  codex-session-control uninstall\n",
+            ),
         ]
+    }
+
+    fn ordinary_expected(failure: &OrdinaryFailure) -> &'static str {
+        ordinary_literal_cases()
+            .into_iter()
+            .find_map(|(candidate, expected)| (candidate == *failure).then_some(expected))
+            .expect("ordinary failure has one literal expected block")
     }
 
     fn rendered_failure(stderr: impl Into<String>) -> RenderedCli {
@@ -1562,22 +1470,22 @@ mod tests {
     fn rollback_primary_oracle(primary: RollbackPrimary) -> String {
         match primary {
             RollbackPrimary::SetupDesktopRetry => {
-                ordinary_oracle(&OrdinaryFailure::SetupDesktopIntegrationRetry)
+                ordinary_expected(&OrdinaryFailure::SetupDesktopIntegrationRetry).to_owned()
             }
             RollbackPrimary::SetupServiceConfigurationRetry => {
-                ordinary_oracle(&OrdinaryFailure::SetupServiceConfigurationRetry)
+                ordinary_expected(&OrdinaryFailure::SetupServiceConfigurationRetry).to_owned()
             }
             RollbackPrimary::SetupServiceStartRetry => {
-                ordinary_oracle(&OrdinaryFailure::SetupServiceStartRetry)
+                ordinary_expected(&OrdinaryFailure::SetupServiceStartRetry).to_owned()
             }
             RollbackPrimary::SetupServiceStateRetryUpdate => {
-                ordinary_oracle(&OrdinaryFailure::SetupServiceStateRetryUpdate)
+                ordinary_expected(&OrdinaryFailure::SetupServiceStateRetryUpdate).to_owned()
             }
             RollbackPrimary::UpdateDesktopRetry => {
-                ordinary_oracle(&OrdinaryFailure::UpdateDesktopIntegrationRetry)
+                ordinary_expected(&OrdinaryFailure::UpdateDesktopIntegrationRetry).to_owned()
             }
             RollbackPrimary::EnableDesktopRetry => {
-                ordinary_oracle(&OrdinaryFailure::EnableDesktopIntegrationRetry)
+                ordinary_expected(&OrdinaryFailure::EnableDesktopIntegrationRetry).to_owned()
             }
             RollbackPrimary::EnableServiceStateCheckStatus => failure_oracle(
                 "Codex Session Control could not be started.",
@@ -1689,7 +1597,7 @@ mod tests {
                 ),
             )),
             rendered_failure(rollback_oracle(
-                ordinary_oracle(&OrdinaryFailure::UpdateDesktopIntegrationRetry),
+                ordinary_expected(&OrdinaryFailure::UpdateDesktopIntegrationRetry).to_owned(),
                 &["/managed/one", "/managed/two"],
             )),
         ));
@@ -2516,8 +2424,7 @@ mod tests {
 
     #[test]
     fn every_materially_distinct_failure_block_is_exact() {
-        for ordinary in ordinary_cases() {
-            let expected = ordinary_oracle(&ordinary);
+        for (ordinary, expected) in ordinary_literal_cases() {
             assert_eq!(
                 UserFailure::Ordinary(ordinary).render(),
                 rendered_failure(expected)

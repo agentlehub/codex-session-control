@@ -390,14 +390,11 @@ async fn update_default_and_verbose_are_behaviorally_identical() {
     .render();
     let verbose = with_recorded_diagnostics(verbose, &verbose_diagnostics);
 
-    assert_eq!(default.stdout, verbose.stdout);
-    assert_eq!(default.stderr, without_verbose_diagnostics(&verbose.stderr));
-    assert_eq!(default.exit_code, verbose.exit_code);
-    assert!(
-        verbose_diagnostics
-            .recorded_lines()
-            .iter()
-            .all(|line| line.starts_with("[verbose] update/apply:"))
+    assert_default_verbose_parity(
+        &default,
+        &verbose,
+        &verbose_diagnostics,
+        "[verbose] update/apply:",
     );
     for fixture in [&default_fixture, &verbose_fixture] {
         assert_eq!(

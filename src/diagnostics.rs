@@ -98,54 +98,6 @@ pub(crate) enum DiagnosticEvent {
     SelectedCodexHome {
         codex_home: PathBuf,
     },
-    CompletedPreflight,
-    CompletedBinary,
-    CompletedConfiguration,
-    CompletedProjection,
-    CompletedPluginMarketplace,
-    CompletedPluginInstall,
-    CompletedDesktopDiscovery,
-    CompletedDescriptor,
-    CompletedServiceUnit,
-    CompletedDaemonReload,
-    CompletedServiceEnable,
-    CompletedServiceDisable,
-    CompletedServiceVerify,
-    CompletedDescriptorRemove,
-    CompletedManifest,
-    CompletedServiceStop,
-    CompletedServiceStopVerify,
-    CompletedServiceUnitRemove,
-    CompletedPluginRemove,
-    CompletedMarketplaceRemove,
-    CompletedProjectionRemove,
-    CompletedConfigurationRemove,
-    CompletedManifestRemove,
-    CompletedBinaryRemove,
-    FailedPreflight(DiagnosticCause),
-    FailedBinary(DiagnosticCause),
-    FailedConfiguration(DiagnosticCause),
-    FailedProjection(DiagnosticCause),
-    FailedPluginMarketplace(DiagnosticCause),
-    FailedPluginInstall(DiagnosticCause),
-    FailedDesktopDiscovery(DiagnosticCause),
-    FailedDescriptor(DiagnosticCause),
-    FailedServiceUnit(DiagnosticCause),
-    FailedDaemonReload(DiagnosticCause),
-    FailedServiceEnable(DiagnosticCause),
-    FailedServiceDisable(DiagnosticCause),
-    FailedServiceVerify(DiagnosticCause),
-    FailedDescriptorRemove(DiagnosticCause),
-    FailedManifest(DiagnosticCause),
-    FailedServiceUnitRemove(DiagnosticCause),
-    FailedServiceStop(DiagnosticCause),
-    FailedServiceStopVerify(DiagnosticCause),
-    FailedPluginRemove(DiagnosticCause),
-    FailedMarketplaceRemove(DiagnosticCause),
-    FailedProjectionRemove(DiagnosticCause),
-    FailedConfigurationRemove(DiagnosticCause),
-    FailedManifestRemove(DiagnosticCause),
-    FailedBinaryRemove(DiagnosticCause),
 }
 
 impl Diagnostics {
@@ -184,7 +136,36 @@ impl Diagnostics {
     }
 
     pub(crate) fn emit(&mut self, event: DiagnosticEvent) {
-        let line = self.render_event(event);
+        let detail = match event {
+            DiagnosticEvent::ControllerStarted { version, target } => {
+                format!("controller {version} ({})", target.label())
+            }
+            DiagnosticEvent::CandidateVerified { version } => {
+                format!("candidate {version} verified")
+            }
+            DiagnosticEvent::StartingStagedCandidate => "starting staged candidate".to_owned(),
+            DiagnosticEvent::StagedCandidateExitedSuccessfully => {
+                "staged candidate exited successfully".to_owned()
+            }
+            DiagnosticEvent::StagedMarkerAccepted => "staged marker accepted".to_owned(),
+            DiagnosticEvent::CompletedServiceRestart => "completed service-restart".to_owned(),
+            DiagnosticEvent::SelectedCodexHome { codex_home } => {
+                format!("selected Codex home {}", codex_home.display())
+            }
+        };
+        self.write_detail(&detail);
+    }
+
+    pub(crate) fn completed(&mut self, stage: &'static str) {
+        self.write_detail(&format!("completed {stage}"));
+    }
+
+    pub(crate) fn failed(&mut self, stage: &'static str, cause: DiagnosticCause) {
+        self.write_detail(&format!("failed {stage} ({})", cause.label()));
+    }
+
+    fn write_detail(&mut self, detail: &str) {
+        let line = self.render_line(detail);
         let failed = match &mut self.sink {
             DiagnosticSink::Off => false,
             DiagnosticSink::Stderr(stderr) => stderr.write_all(line.as_bytes()).is_err(),
@@ -215,7 +196,7 @@ impl Diagnostics {
         }
     }
 
-    fn render_event(&self, event: DiagnosticEvent) -> String {
+    fn render_line(&self, detail: &str) -> String {
         let command = match self.command {
             DiagnosticCommand::Setup => "setup",
             DiagnosticCommand::Update => "update",
@@ -229,129 +210,6 @@ impl Diagnostics {
             (DiagnosticCommand::Update, Some(UpdatePhase::Outer)) => "/outer",
             (DiagnosticCommand::Update, Some(UpdatePhase::Apply)) => "/apply",
             _ => "",
-        };
-        let detail = match event {
-            DiagnosticEvent::ControllerStarted { version, target } => {
-                format!("controller {version} ({})", target.label())
-            }
-            DiagnosticEvent::CandidateVerified { version } => {
-                format!("candidate {version} verified")
-            }
-            DiagnosticEvent::StartingStagedCandidate => "starting staged candidate".to_owned(),
-            DiagnosticEvent::StagedCandidateExitedSuccessfully => {
-                "staged candidate exited successfully".to_owned()
-            }
-            DiagnosticEvent::StagedMarkerAccepted => "staged marker accepted".to_owned(),
-            DiagnosticEvent::CompletedServiceRestart => "completed service-restart".to_owned(),
-            DiagnosticEvent::SelectedCodexHome { codex_home } => {
-                format!("selected Codex home {}", codex_home.display())
-            }
-            DiagnosticEvent::CompletedPreflight => "completed preflight".to_owned(),
-            DiagnosticEvent::CompletedBinary => "completed binary".to_owned(),
-            DiagnosticEvent::CompletedConfiguration => "completed configuration".to_owned(),
-            DiagnosticEvent::CompletedProjection => "completed projection".to_owned(),
-            DiagnosticEvent::CompletedPluginMarketplace => {
-                "completed plugin-marketplace".to_owned()
-            }
-            DiagnosticEvent::CompletedPluginInstall => "completed plugin-install".to_owned(),
-            DiagnosticEvent::CompletedDesktopDiscovery => "completed desktop-discovery".to_owned(),
-            DiagnosticEvent::CompletedDescriptor => "completed descriptor".to_owned(),
-            DiagnosticEvent::CompletedServiceUnit => "completed service-unit".to_owned(),
-            DiagnosticEvent::CompletedDaemonReload => "completed daemon-reload".to_owned(),
-            DiagnosticEvent::CompletedServiceEnable => "completed service-enable".to_owned(),
-            DiagnosticEvent::CompletedServiceDisable => "completed service-disable".to_owned(),
-            DiagnosticEvent::CompletedServiceVerify => "completed service-verify".to_owned(),
-            DiagnosticEvent::CompletedDescriptorRemove => "completed descriptor-remove".to_owned(),
-            DiagnosticEvent::CompletedManifest => "completed manifest".to_owned(),
-            DiagnosticEvent::CompletedServiceStop => "completed service-stop".to_owned(),
-            DiagnosticEvent::CompletedServiceStopVerify => {
-                "completed service-stop-verify".to_owned()
-            }
-            DiagnosticEvent::CompletedServiceUnitRemove => {
-                "completed service-unit-remove".to_owned()
-            }
-            DiagnosticEvent::CompletedPluginRemove => "completed plugin-remove".to_owned(),
-            DiagnosticEvent::CompletedMarketplaceRemove => {
-                "completed marketplace-remove".to_owned()
-            }
-            DiagnosticEvent::CompletedProjectionRemove => "completed projection-remove".to_owned(),
-            DiagnosticEvent::CompletedConfigurationRemove => {
-                "completed configuration-remove".to_owned()
-            }
-            DiagnosticEvent::CompletedManifestRemove => "completed manifest-remove".to_owned(),
-            DiagnosticEvent::CompletedBinaryRemove => "completed binary-remove".to_owned(),
-            DiagnosticEvent::FailedPreflight(cause) => {
-                format!("failed preflight ({})", cause.label())
-            }
-            DiagnosticEvent::FailedBinary(cause) => {
-                format!("failed binary ({})", cause.label())
-            }
-            DiagnosticEvent::FailedConfiguration(cause) => {
-                format!("failed configuration ({})", cause.label())
-            }
-            DiagnosticEvent::FailedProjection(cause) => {
-                format!("failed projection ({})", cause.label())
-            }
-            DiagnosticEvent::FailedPluginMarketplace(cause) => {
-                format!("failed plugin-marketplace ({})", cause.label())
-            }
-            DiagnosticEvent::FailedPluginInstall(cause) => {
-                format!("failed plugin-install ({})", cause.label())
-            }
-            DiagnosticEvent::FailedDesktopDiscovery(cause) => {
-                format!("failed desktop-discovery ({})", cause.label())
-            }
-            DiagnosticEvent::FailedDescriptor(cause) => {
-                format!("failed descriptor ({})", cause.label())
-            }
-            DiagnosticEvent::FailedServiceUnit(cause) => {
-                format!("failed service-unit ({})", cause.label())
-            }
-            DiagnosticEvent::FailedDaemonReload(cause) => {
-                format!("failed daemon-reload ({})", cause.label())
-            }
-            DiagnosticEvent::FailedServiceEnable(cause) => {
-                format!("failed service-enable ({})", cause.label())
-            }
-            DiagnosticEvent::FailedServiceDisable(cause) => {
-                format!("failed service-disable ({})", cause.label())
-            }
-            DiagnosticEvent::FailedServiceVerify(cause) => {
-                format!("failed service-verify ({})", cause.label())
-            }
-            DiagnosticEvent::FailedDescriptorRemove(cause) => {
-                format!("failed descriptor-remove ({})", cause.label())
-            }
-            DiagnosticEvent::FailedManifest(cause) => {
-                format!("failed manifest ({})", cause.label())
-            }
-            DiagnosticEvent::FailedServiceUnitRemove(cause) => {
-                format!("failed service-unit-remove ({})", cause.label())
-            }
-            DiagnosticEvent::FailedServiceStop(cause) => {
-                format!("failed service-stop ({})", cause.label())
-            }
-            DiagnosticEvent::FailedServiceStopVerify(cause) => {
-                format!("failed service-stop-verify ({})", cause.label())
-            }
-            DiagnosticEvent::FailedPluginRemove(cause) => {
-                format!("failed plugin-remove ({})", cause.label())
-            }
-            DiagnosticEvent::FailedMarketplaceRemove(cause) => {
-                format!("failed marketplace-remove ({})", cause.label())
-            }
-            DiagnosticEvent::FailedProjectionRemove(cause) => {
-                format!("failed projection-remove ({})", cause.label())
-            }
-            DiagnosticEvent::FailedConfigurationRemove(cause) => {
-                format!("failed configuration-remove ({})", cause.label())
-            }
-            DiagnosticEvent::FailedManifestRemove(cause) => {
-                format!("failed manifest-remove ({})", cause.label())
-            }
-            DiagnosticEvent::FailedBinaryRemove(cause) => {
-                format!("failed binary-remove ({})", cause.label())
-            }
         };
         format!("[verbose] {command}{phase}: {detail}\n")
     }
@@ -397,46 +255,6 @@ mod tests {
 
     use super::*;
 
-    #[derive(Clone, Copy)]
-    struct ProhibitedDiagnosticContext {
-        credential: &'static str,
-        raw_error: &'static str,
-        environment: &'static str,
-        argv: &'static str,
-        configuration: &'static str,
-        task_or_rollout: &'static str,
-        full_command_line: &'static str,
-        pid: &'static str,
-        timestamp: &'static str,
-        telemetry: &'static str,
-    }
-
-    impl ProhibitedDiagnosticContext {
-        const fn sentinels(self) -> [&'static str; 10] {
-            [
-                self.credential,
-                self.raw_error,
-                self.environment,
-                self.argv,
-                self.configuration,
-                self.task_or_rollout,
-                self.full_command_line,
-                self.pid,
-                self.timestamp,
-                self.telemetry,
-            ]
-        }
-    }
-
-    fn emit_with_discarded_context(
-        diagnostics: &mut Diagnostics,
-        event: DiagnosticEvent,
-        context: ProhibitedDiagnosticContext,
-    ) {
-        std::hint::black_box(context.sentinels());
-        diagnostics.emit(event);
-    }
-
     #[derive(Debug, Eq, PartialEq)]
     struct OperationEvidence {
         result: Result<&'static str, &'static str>,
@@ -445,13 +263,13 @@ mod tests {
     }
 
     fn execute_with_diagnostics(mut diagnostics: Diagnostics) -> (OperationEvidence, Diagnostics) {
-        diagnostics.emit(DiagnosticEvent::CompletedPreflight);
+        diagnostics.completed("preflight");
         let evidence = OperationEvidence {
             result: Err("original-result"),
             mutations: vec!["original-mutation"],
             exit_code: 1,
         };
-        diagnostics.emit(DiagnosticEvent::CompletedBinary);
+        diagnostics.completed("binary");
         diagnostics.flush();
         (evidence, diagnostics)
     }
@@ -468,7 +286,8 @@ mod tests {
         diagnostics.set_phase(UpdatePhase::Apply);
         diagnostics.emit(DiagnosticEvent::StagedMarkerAccepted);
         diagnostics.emit(DiagnosticEvent::CompletedServiceRestart);
-        diagnostics.emit(DiagnosticEvent::CompletedManifest);
+        diagnostics.completed("manifest");
+        diagnostics.failed("service-verify", DiagnosticCause::ServiceState);
 
         assert_eq!(
             diagnostics.recorded_lines(),
@@ -479,6 +298,7 @@ mod tests {
                 "[verbose] update/apply: staged marker accepted\n",
                 "[verbose] update/apply: completed service-restart\n",
                 "[verbose] update/apply: completed manifest\n",
+                "[verbose] update/apply: failed service-verify (service state could not be verified)\n",
             ]
         );
 
@@ -491,7 +311,7 @@ mod tests {
             (DiagnosticCommand::Codex, "codex"),
         ] {
             let mut diagnostics = Diagnostics::record(command);
-            diagnostics.emit(DiagnosticEvent::CompletedPreflight);
+            diagnostics.completed("preflight");
             assert_eq!(
                 diagnostics.recorded_lines(),
                 [format!("[verbose] {prefix}: completed preflight\n")]
@@ -509,20 +329,9 @@ mod tests {
     }
 
     #[test]
-    fn every_constructor_excludes_all_privacy_sentinels() {
-        const CONTEXT: ProhibitedDiagnosticContext = ProhibitedDiagnosticContext {
-            credential: "credential-secret",
-            raw_error: "raw-error-secret",
-            environment: "environment-secret",
-            argv: "argv-secret",
-            configuration: "configuration-secret",
-            task_or_rollout: "task-rollout-secret",
-            full_command_line: "full-command-line-secret",
-            pid: "pid-4242",
-            timestamp: "timestamp-secret",
-            telemetry: "telemetry-secret",
-        };
-        let mut events = vec![
+    fn every_dynamic_diagnostic_field_is_exactly_rendered() {
+        let mut diagnostics = Diagnostics::record(DiagnosticCommand::Setup);
+        for event in [
             DiagnosticEvent::ControllerStarted {
                 version: Version::parse("1.2.3").unwrap(),
                 target: DiagnosticTarget::current(),
@@ -537,81 +346,63 @@ mod tests {
             DiagnosticEvent::SelectedCodexHome {
                 codex_home: PathBuf::from("/home/test/.codex"),
             },
-            DiagnosticEvent::CompletedPreflight,
-            DiagnosticEvent::CompletedBinary,
-            DiagnosticEvent::CompletedConfiguration,
-            DiagnosticEvent::CompletedProjection,
-            DiagnosticEvent::CompletedPluginMarketplace,
-            DiagnosticEvent::CompletedPluginInstall,
-            DiagnosticEvent::CompletedDesktopDiscovery,
-            DiagnosticEvent::CompletedDescriptor,
-            DiagnosticEvent::CompletedServiceUnit,
-            DiagnosticEvent::CompletedDaemonReload,
-            DiagnosticEvent::CompletedServiceEnable,
-            DiagnosticEvent::CompletedServiceDisable,
-            DiagnosticEvent::CompletedServiceVerify,
-            DiagnosticEvent::CompletedDescriptorRemove,
-            DiagnosticEvent::CompletedManifest,
-            DiagnosticEvent::CompletedServiceStop,
-            DiagnosticEvent::CompletedServiceStopVerify,
-            DiagnosticEvent::CompletedServiceUnitRemove,
-            DiagnosticEvent::CompletedPluginRemove,
-            DiagnosticEvent::CompletedMarketplaceRemove,
-            DiagnosticEvent::CompletedProjectionRemove,
-            DiagnosticEvent::CompletedConfigurationRemove,
-            DiagnosticEvent::CompletedManifestRemove,
-            DiagnosticEvent::CompletedBinaryRemove,
-            DiagnosticEvent::FailedPreflight(DiagnosticCause::Validation),
-            DiagnosticEvent::FailedBinary(DiagnosticCause::Validation),
-            DiagnosticEvent::FailedConfiguration(DiagnosticCause::Validation),
-            DiagnosticEvent::FailedProjection(DiagnosticCause::CliIntegration),
-            DiagnosticEvent::FailedPluginMarketplace(DiagnosticCause::CliIntegration),
-            DiagnosticEvent::FailedPluginInstall(DiagnosticCause::CliIntegration),
-            DiagnosticEvent::FailedDesktopDiscovery(DiagnosticCause::DesktopIntegration),
-            DiagnosticEvent::FailedDescriptor(DiagnosticCause::DesktopIntegration),
-            DiagnosticEvent::FailedServiceUnit(DiagnosticCause::ServiceConfiguration),
-            DiagnosticEvent::FailedDaemonReload(DiagnosticCause::ServiceConfiguration),
-            DiagnosticEvent::FailedServiceEnable(DiagnosticCause::ServiceStart),
-            DiagnosticEvent::FailedServiceDisable(DiagnosticCause::ServiceStop),
-            DiagnosticEvent::FailedDescriptorRemove(DiagnosticCause::Cleanup),
-            DiagnosticEvent::FailedManifest(DiagnosticCause::Validation),
-            DiagnosticEvent::FailedServiceUnitRemove(DiagnosticCause::Cleanup),
-            DiagnosticEvent::FailedServiceStop(DiagnosticCause::ServiceStop),
-            DiagnosticEvent::FailedServiceStopVerify(DiagnosticCause::ServiceState),
-            DiagnosticEvent::FailedPluginRemove(DiagnosticCause::CliIntegration),
-            DiagnosticEvent::FailedMarketplaceRemove(DiagnosticCause::CliIntegration),
-            DiagnosticEvent::FailedProjectionRemove(DiagnosticCause::Cleanup),
-            DiagnosticEvent::FailedConfigurationRemove(DiagnosticCause::Cleanup),
-            DiagnosticEvent::FailedManifestRemove(DiagnosticCause::Cleanup),
-            DiagnosticEvent::FailedBinaryRemove(DiagnosticCause::Cleanup),
-        ];
-        events.extend(
-            [
-                DiagnosticCause::Unexpected,
-                DiagnosticCause::Validation,
-                DiagnosticCause::ReleaseDownload,
-                DiagnosticCause::Checksum,
-                DiagnosticCause::ServiceConfiguration,
-                DiagnosticCause::ServiceStart,
-                DiagnosticCause::ServiceStop,
-                DiagnosticCause::ServiceState,
-                DiagnosticCause::CliIntegration,
-                DiagnosticCause::DesktopIntegration,
-                DiagnosticCause::ActiveTasks,
-                DiagnosticCause::Cleanup,
-            ]
-            .into_iter()
-            .map(DiagnosticEvent::FailedServiceVerify),
-        );
+        ] {
+            diagnostics.emit(event);
+        }
+        for cause in [
+            DiagnosticCause::Unexpected,
+            DiagnosticCause::Validation,
+            DiagnosticCause::ReleaseDownload,
+            DiagnosticCause::Checksum,
+            DiagnosticCause::ServiceConfiguration,
+            DiagnosticCause::ServiceStart,
+            DiagnosticCause::ServiceStop,
+            DiagnosticCause::ServiceState,
+            DiagnosticCause::CliIntegration,
+            DiagnosticCause::DesktopIntegration,
+            DiagnosticCause::ActiveTasks,
+            DiagnosticCause::Cleanup,
+        ] {
+            diagnostics.failed("service-verify", cause);
+        }
 
-        let mut diagnostics = Diagnostics::record(DiagnosticCommand::Setup);
-        for event in events {
-            emit_with_discarded_context(&mut diagnostics, event, CONTEXT);
-        }
-        let rendered = diagnostics.recorded_lines().concat();
-        for sentinel in CONTEXT.sentinels() {
-            assert!(!rendered.contains(sentinel));
-        }
+        assert_eq!(
+            diagnostics.recorded_lines(),
+            [
+                format!(
+                    "[verbose] setup: controller 1.2.3 ({})\n",
+                    DiagnosticTarget::current().label()
+                ),
+                "[verbose] setup: candidate 1.2.3 verified\n".to_owned(),
+                "[verbose] setup: starting staged candidate\n".to_owned(),
+                "[verbose] setup: staged candidate exited successfully\n".to_owned(),
+                "[verbose] setup: staged marker accepted\n".to_owned(),
+                "[verbose] setup: completed service-restart\n".to_owned(),
+                "[verbose] setup: selected Codex home /home/test/.codex\n".to_owned(),
+                "[verbose] setup: failed service-verify (unexpected failure)\n".to_owned(),
+                "[verbose] setup: failed service-verify (validation failed)\n".to_owned(),
+                "[verbose] setup: failed service-verify (release could not be retrieved)\n"
+                    .to_owned(),
+                "[verbose] setup: failed service-verify (downloaded release could not be verified)\n"
+                    .to_owned(),
+                "[verbose] setup: failed service-verify (service could not be configured)\n"
+                    .to_owned(),
+                "[verbose] setup: failed service-verify (service could not be started)\n"
+                    .to_owned(),
+                "[verbose] setup: failed service-verify (service could not be stopped)\n"
+                    .to_owned(),
+                "[verbose] setup: failed service-verify (service state could not be verified)\n"
+                    .to_owned(),
+                "[verbose] setup: failed service-verify (Codex CLI integration could not be updated)\n"
+                    .to_owned(),
+                "[verbose] setup: failed service-verify (Codex Desktop integration could not be updated)\n"
+                    .to_owned(),
+                "[verbose] setup: failed service-verify (active tasks could not be checked safely)\n"
+                    .to_owned(),
+                "[verbose] setup: failed service-verify (cleanup could not be completed safely)\n"
+                    .to_owned(),
+            ]
+        );
     }
 
     #[test]

@@ -12,7 +12,7 @@ mod test_support;
 
 use cli::{Cli, Command};
 use cli_output::{OrdinaryFailure, RenderedCli, UserFailure};
-use diagnostics::{DiagnosticCause, DiagnosticCommand, DiagnosticEvent, Diagnostics};
+use diagnostics::{DiagnosticCause, DiagnosticCommand, Diagnostics};
 use error::ControllerError;
 use std::io::{self, Write};
 
@@ -30,6 +30,18 @@ fn write_rendered(
 enum ProcessOutcome {
     Render(RenderedCli),
     Exit(u8),
+}
+
+enum DispatchStage {
+    Preflight,
+}
+
+impl DispatchStage {
+    const fn diagnostic_name(self) -> &'static str {
+        match self {
+            Self::Preflight => "preflight",
+        }
+    }
 }
 
 #[tokio::main]
@@ -85,9 +97,10 @@ async fn run(cli: Cli) -> Result<ProcessOutcome, ControllerError> {
             None => false,
             Some(value) if value == "1" => true,
             Some(_) => {
-                diagnostics.emit(DiagnosticEvent::FailedPreflight(
+                diagnostics.failed(
+                    DispatchStage::Preflight.diagnostic_name(),
                     DiagnosticCause::Unexpected,
-                ));
+                );
                 diagnostics.flush();
                 return Ok(ProcessOutcome::Render(
                     UserFailure::Ordinary(OrdinaryFailure::UpdateUnexpectedRetry).render(),
@@ -97,9 +110,10 @@ async fn run(cli: Cli) -> Result<ProcessOutcome, ControllerError> {
         let paths = match install::ResolvedUserPaths::from_effective_user() {
             Ok(paths) => paths,
             Err(_) => {
-                diagnostics.emit(DiagnosticEvent::FailedPreflight(
+                diagnostics.failed(
+                    DispatchStage::Preflight.diagnostic_name(),
                     DiagnosticCause::Unexpected,
-                ));
+                );
                 diagnostics.flush();
                 return Ok(ProcessOutcome::Render(
                     UserFailure::Ordinary(OrdinaryFailure::UpdateUnexpectedRetry).render(),
@@ -143,9 +157,10 @@ async fn run(cli: Cli) -> Result<ProcessOutcome, ControllerError> {
                 }
             }
             Err(_) => {
-                diagnostics.emit(DiagnosticEvent::FailedPreflight(
+                diagnostics.failed(
+                    DispatchStage::Preflight.diagnostic_name(),
                     DiagnosticCause::Validation,
-                ));
+                );
                 Err(cli_output::UserFailure::Ordinary(match &cli.command {
                     Command::Enable => cli_output::OrdinaryFailure::EnableUnexpectedRetry,
                     Command::Disable => cli_output::OrdinaryFailure::DisableUnexpectedRetry,
@@ -167,9 +182,10 @@ async fn run(cli: Cli) -> Result<ProcessOutcome, ControllerError> {
                 install::uninstall(target, &mut diagnostics).await
             }
             Err(_) => {
-                diagnostics.emit(DiagnosticEvent::FailedPreflight(
+                diagnostics.failed(
+                    DispatchStage::Preflight.diagnostic_name(),
                     DiagnosticCause::Validation,
-                ));
+                );
                 Err(cli_output::UserFailure::Ordinary(
                     cli_output::OrdinaryFailure::UninstallUnexpectedRetry,
                 ))

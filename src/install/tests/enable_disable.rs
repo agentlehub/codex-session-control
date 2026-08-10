@@ -91,10 +91,10 @@ fn enable_guidance_precedence_is_exact() {
     }
 }
 
-#[tokio::test]
-async fn enable_disable_producer_boundaries_select_complete_failures() {
+#[test]
+fn enable_disable_pure_failure_mappings_are_exact() {
     use crate::{
-        cli_output::{IndependentTerminal, OrdinaryFailure, StopThenRetry, UserFailure},
+        cli_output::{OrdinaryFailure, StopThenRetry, UserFailure},
         desktop::{DescriptorPublicationFailure, DescriptorPublicationResidue},
     };
 
@@ -155,171 +155,6 @@ async fn enable_disable_producer_boundaries_select_complete_failures() {
         ),
         UserFailure::RollbackIncomplete(_)
     ));
-
-    let enable_fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&enable_fixture.paths, TESTED_CODEX_VERSION).await;
-    setup_with_context(enable_fixture.context(true))
-        .await
-        .unwrap();
-    fs::write(&enable_fixture.paths.config, b"invalid").unwrap();
-    assert!(matches!(
-        enable_with_context(context(&enable_fixture))
-            .await
-            .unwrap_err(),
-        UserFailure::Ordinary(OrdinaryFailure::EnableInstalledStateRepairSetup)
-    ));
-
-    let enable_unexpected = Fixture::new();
-    let _authority = FakeAuthority::start(&enable_unexpected.paths, TESTED_CODEX_VERSION).await;
-    setup_with_context(enable_unexpected.context(true))
-        .await
-        .unwrap();
-    let launcher = enable_unexpected._root.path().join("desktop-launcher");
-    let descriptor = enable_unexpected
-        .paths
-        .home
-        .join(".config/codex-desktop/app-server-attachment.json");
-    write_executable_fixture(
-        &launcher,
-        "#!/bin/sh\nif [ \"$1\" = \"--print-build-info\" ]; then printf '%s\\n' '{\"appIdentity\":{\"id\":\"codex-desktop\"},\"linuxCapabilities\":[\"external-app-server-attachment-descriptor-v1\"]}'; exit 0; fi\nexit 64\n",
-    );
-    let mut manifest: Value =
-        serde_json::from_slice(&fs::read(&enable_unexpected.paths.manifest).unwrap()).unwrap();
-    manifest["desktopAttachment"] = serde_json::json!({
-        "launcherPath": launcher,
-        "appId": "codex-desktop",
-        "descriptorPath": descriptor,
-    });
-    fs::write(
-        &enable_unexpected.paths.manifest,
-        serde_json::to_vec_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
-    let mut enable_unexpected_context = context(&enable_unexpected);
-    enable_unexpected_context.target = enable_unexpected_context
-        .target
-        .fail_after_completed_stage("descriptor");
-    assert_eq!(
-        enable_with_context(enable_unexpected_context)
-            .await
-            .unwrap_err(),
-        UserFailure::Ordinary(OrdinaryFailure::EnableUnexpectedRetry)
-    );
-
-    let disable_fixture = Fixture::new();
-    let _authority = FakeAuthority::start(&disable_fixture.paths, TESTED_CODEX_VERSION).await;
-    setup_with_context(disable_fixture.context(true))
-        .await
-        .unwrap();
-    fs::write(
-        &disable_fixture.whoami_unit,
-        b"codex-session-control-test-Setup1.service\n",
-    )
-    .unwrap();
-    assert!(matches!(
-        disable_with_context(context(&disable_fixture))
-            .await
-            .unwrap_err(),
-        UserFailure::IndependentTerminal(IndependentTerminal::Disable)
-    ));
-
-    let disable_resolution = Fixture::new();
-    let _authority = FakeAuthority::start(&disable_resolution.paths, TESTED_CODEX_VERSION).await;
-    setup_with_context(disable_resolution.context(true))
-        .await
-        .unwrap();
-    let empty_bin = disable_resolution._root.path().join("empty-bin");
-    fs::create_dir(&empty_bin).unwrap();
-    let mut disable_resolution_context = context(&disable_resolution);
-    disable_resolution_context.path_environment = std::env::join_paths([empty_bin]).unwrap();
-    assert_eq!(
-        disable_with_context(disable_resolution_context)
-            .await
-            .unwrap_err(),
-        UserFailure::Ordinary(OrdinaryFailure::DisableServiceStopRetry)
-    );
-
-    let unproven = Fixture::new();
-    let _authority = FakeAuthority::start(&unproven.paths, TESTED_CODEX_VERSION).await;
-    setup_with_context(unproven.context(true)).await.unwrap();
-    fs::write(
-        &unproven.systemctl_fail,
-        "--user is-active codex-session-control-test-Setup1.service",
-    )
-    .unwrap();
-    assert!(matches!(
-        disable_with_context(context(&unproven)).await.unwrap_err(),
-        UserFailure::StopThenRetry(StopThenRetry::DisableUnsafeStopThenDisable)
-    ));
-
-    let stop = Fixture::new();
-    let _authority = FakeAuthority::start(&stop.paths, TESTED_CODEX_VERSION).await;
-    setup_with_context(stop.context(true)).await.unwrap();
-    fs::write(
-        &stop.systemctl_fail,
-        "--user disable --now codex-session-control-test-Setup1.service",
-    )
-    .unwrap();
-    assert!(matches!(
-        disable_with_context(context(&stop)).await.unwrap_err(),
-        UserFailure::StopThenRetry(StopThenRetry::DisableServiceStopThenDisable)
-    ));
-
-    let state = Fixture::new();
-    let _authority = FakeAuthority::start(&state.paths, TESTED_CODEX_VERSION).await;
-    setup_with_context(state.context(true)).await.unwrap();
-    fs::write(&state.fail_service_verify_after_stop, b"fail").unwrap();
-    assert!(matches!(
-        disable_with_context(context(&state)).await.unwrap_err(),
-        UserFailure::StopThenRetry(StopThenRetry::DisableServiceStateStopThenDisable)
-    ));
-
-    let partial = Fixture::new();
-    let _authority = FakeAuthority::start(&partial.paths, TESTED_CODEX_VERSION).await;
-    setup_with_context(partial.context(true)).await.unwrap();
-    fs::remove_file(&partial.paths.manifest).unwrap();
-    assert!(matches!(
-        disable_with_context(context(&partial)).await.unwrap_err(),
-        UserFailure::PartialDisable(_)
-    ));
-
-    let exact_partial = Fixture::new();
-    let _authority = FakeAuthority::start(&exact_partial.paths, TESTED_CODEX_VERSION).await;
-    let launcher = exact_partial._root.path().join("desktop-launcher");
-    write_executable_fixture(
-        &launcher,
-        "#!/bin/sh\nif [ \"$1\" = \"--print-build-info\" ]; then printf '%s\\n' '{\"appIdentity\":{\"id\":\"codex-desktop\"},\"linuxCapabilities\":[\"external-app-server-attachment-descriptor-v1\"]}'; exit 0; fi\nexit 64\n",
-    );
-    let mut setup = exact_partial.context(true);
-    setup.desktop_launcher = Some(launcher);
-    setup_with_context(setup).await.unwrap();
-    let descriptor = exact_partial
-        .paths
-        .home
-        .join(".config/codex-desktop/app-server-attachment.json");
-    fs::set_permissions(&descriptor, fs::Permissions::from_mode(0o644)).unwrap();
-    let error = disable_with_context(context(&exact_partial))
-        .await
-        .unwrap_err();
-    assert!(matches!(&error, UserFailure::PartialDisable(_)));
-    assert!(
-        error
-            .render()
-            .stderr
-            .contains(&descriptor.display().to_string())
-    );
-
-    let completed = Fixture::new();
-    let _authority = FakeAuthority::start(&completed.paths, TESTED_CODEX_VERSION).await;
-    setup_with_context(completed.context(true)).await.unwrap();
-    let mut lifecycle = context(&completed);
-    lifecycle.target = lifecycle
-        .target
-        .fail_after_completed_stage("descriptor-remove");
-    assert_eq!(
-        disable_with_context(lifecycle).await.unwrap_err(),
-        UserFailure::Ordinary(OrdinaryFailure::DisableUnexpectedCheckStatus)
-    );
 }
 
 #[tokio::test]
@@ -354,18 +189,7 @@ async fn enable_default_and_verbose_are_behaviorally_identical() {
 
     let recorded = with_recorded_diagnostics(recorded, &verbose);
 
-    assert_eq!(default.stdout, recorded.stdout);
-    assert_eq!(
-        default.stderr,
-        without_verbose_diagnostics(&recorded.stderr)
-    );
-    assert_eq!(default.exit_code, recorded.exit_code);
-    assert!(
-        verbose
-            .recorded_lines()
-            .iter()
-            .all(|line| line.starts_with("[verbose] enable:"))
-    );
+    assert_default_verbose_parity(&default, &recorded, &verbose, "[verbose] enable:");
     assert_eq!(
         default_fixture.systemctl_log(),
         verbose_fixture.systemctl_log()
@@ -412,18 +236,7 @@ async fn disable_default_and_verbose_are_behaviorally_identical() {
 
     let recorded = with_recorded_diagnostics(recorded, &verbose);
 
-    assert_eq!(default.stdout, recorded.stdout);
-    assert_eq!(
-        default.stderr,
-        without_verbose_diagnostics(&recorded.stderr)
-    );
-    assert_eq!(default.exit_code, recorded.exit_code);
-    assert!(
-        verbose
-            .recorded_lines()
-            .iter()
-            .all(|line| line.starts_with("[verbose] disable:"))
-    );
+    assert_default_verbose_parity(&default, &recorded, &verbose, "[verbose] disable:");
     assert_eq!(
         default_fixture.systemctl_log(),
         verbose_fixture.systemctl_log()

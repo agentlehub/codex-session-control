@@ -47,8 +47,7 @@ enum UninstallStage {
 }
 
 impl UninstallStage {
-    #[cfg(test)]
-    const fn name(self) -> &'static str {
+    const fn diagnostic_name(self) -> &'static str {
         match self {
             Self::ServiceStop => "service-stop",
             Self::ServiceStopVerify => "service-stop-verify",
@@ -62,46 +61,6 @@ impl UninstallStage {
             Self::BinaryRemove => "binary-remove",
         }
     }
-
-    fn completed_event(self) -> DiagnosticEvent {
-        match self {
-            Self::ServiceStop => DiagnosticEvent::CompletedServiceStop,
-            Self::ServiceStopVerify => DiagnosticEvent::CompletedServiceStopVerify,
-            Self::DescriptorRemove => DiagnosticEvent::CompletedDescriptorRemove,
-            Self::ServiceUnitRemove => DiagnosticEvent::CompletedServiceUnitRemove,
-            Self::PluginRemove => DiagnosticEvent::CompletedPluginRemove,
-            Self::MarketplaceRemove => DiagnosticEvent::CompletedMarketplaceRemove,
-            Self::ProjectionRemove => DiagnosticEvent::CompletedProjectionRemove,
-            Self::ConfigurationRemove => DiagnosticEvent::CompletedConfigurationRemove,
-            Self::ManifestRemove => DiagnosticEvent::CompletedManifestRemove,
-            Self::BinaryRemove => DiagnosticEvent::CompletedBinaryRemove,
-        }
-    }
-
-    fn failed_event(self, cause: DiagnosticCause) -> DiagnosticEvent {
-        match self {
-            Self::ServiceStop => DiagnosticEvent::FailedServiceStop(cause),
-            Self::ServiceStopVerify => DiagnosticEvent::FailedServiceStopVerify(cause),
-            Self::DescriptorRemove => DiagnosticEvent::FailedDescriptorRemove(cause),
-            Self::ServiceUnitRemove => DiagnosticEvent::FailedServiceUnitRemove(cause),
-            Self::PluginRemove => DiagnosticEvent::FailedPluginRemove(cause),
-            Self::MarketplaceRemove => DiagnosticEvent::FailedMarketplaceRemove(cause),
-            Self::ProjectionRemove => DiagnosticEvent::FailedProjectionRemove(cause),
-            Self::ConfigurationRemove => DiagnosticEvent::FailedConfigurationRemove(cause),
-            Self::ManifestRemove => DiagnosticEvent::FailedManifestRemove(cause),
-            Self::BinaryRemove => DiagnosticEvent::FailedBinaryRemove(cause),
-        }
-    }
-}
-
-fn uninstall_failed(
-    diagnostics: &mut Diagnostics,
-    stage: UninstallStage,
-    cause: DiagnosticCause,
-    failure: UserFailure,
-) -> UserFailure {
-    diagnostics.emit(stage.failed_event(cause));
-    failure
 }
 
 fn rollback_failure(primary: RollbackPrimary, first: PathBuf, rest: Vec<PathBuf>) -> UserFailure {
@@ -147,17 +106,17 @@ fn complete_uninstall_stage(
     stage: UninstallStage,
     _target: &LifecycleTarget,
 ) -> Result<(), UserFailure> {
-    diagnostics.emit(stage.completed_event());
+    diagnostics.completed(stage.diagnostic_name());
     #[cfg(test)]
-    if _target.test_hooks.fail_after_completed_stage == Some(stage.name()) {
+    if _target.test_hooks.fail_after_completed_stage == Some(stage.diagnostic_name()) {
         let failure = if stage == UninstallStage::ServiceStop {
             UserFailure::StopThenRetry(StopThenRetry::UninstallServiceStateStopThenUninstall)
         } else {
             UserFailure::Ordinary(OrdinaryFailure::UninstallUnexpectedRetry)
         };
-        return Err(uninstall_failed(
+        return Err(super::fail_with_diagnostic(
             diagnostics,
-            stage,
+            stage.diagnostic_name(),
             DiagnosticCause::Unexpected,
             failure,
         ));
@@ -175,9 +134,9 @@ pub(crate) async fn uninstall(
         target: DiagnosticTarget::current(),
     });
     let context = lifecycle_context(target).map_err(|_| {
-        uninstall_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UninstallStage::ServiceStop,
+            UninstallStage::ServiceStop.diagnostic_name(),
             DiagnosticCause::Validation,
             UserFailure::Ordinary(OrdinaryFailure::UninstallUnexpectedRetry),
         )
@@ -200,9 +159,9 @@ pub(super) async fn uninstall_with_context_and_diagnostics(
     let paths = &context.target.paths;
     let systemctl = resolve_named_executable(&context.path_environment, &context.cwd, "systemctl")
         .map_err(|_| {
-            uninstall_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                UninstallStage::ServiceStop,
+                UninstallStage::ServiceStop.diagnostic_name(),
                 DiagnosticCause::ServiceStop,
                 UserFailure::Ordinary(OrdinaryFailure::UninstallServiceStopRetry),
             )
@@ -213,27 +172,27 @@ pub(super) async fn uninstall_with_context_and_diagnostics(
         ServiceActivity::Active => match inspect_caller_unit(&systemctl, &context.target) {
             CallerUnitInspection::Independent => {}
             CallerUnitInspection::SelfHosted(CallerUnitEvidence::WhoAmI) => {
-                return Err(uninstall_failed(
+                return Err(super::fail_with_diagnostic(
                     diagnostics,
-                    UninstallStage::ServiceStop,
+                    UninstallStage::ServiceStop.diagnostic_name(),
                     DiagnosticCause::Validation,
                     UserFailure::IndependentTerminal(IndependentTerminal::Uninstall),
                 ));
             }
             CallerUnitInspection::SelfHosted(CallerUnitEvidence::ControlGroup)
             | CallerUnitInspection::Unknown { .. } => {
-                return Err(uninstall_failed(
+                return Err(super::fail_with_diagnostic(
                     diagnostics,
-                    UninstallStage::ServiceStop,
+                    UninstallStage::ServiceStop.diagnostic_name(),
                     DiagnosticCause::Validation,
                     UserFailure::StopThenRetry(StopThenRetry::UninstallUnsafeStopThenUninstall),
                 ));
             }
         },
         ServiceActivity::Unproven => {
-            return Err(uninstall_failed(
+            return Err(super::fail_with_diagnostic(
                 diagnostics,
-                UninstallStage::ServiceStop,
+                UninstallStage::ServiceStop.diagnostic_name(),
                 DiagnosticCause::ServiceState,
                 UserFailure::StopThenRetry(StopThenRetry::UninstallUnsafeStopThenUninstall),
             ));
@@ -252,9 +211,9 @@ pub(super) async fn uninstall_with_context_and_diagnostics(
         Ok(()) => false,
         Err(_) => {
             verify_absent_managed_unit_stop(&systemctl, &context.target).map_err(|_| {
-                uninstall_failed(
+                super::fail_with_diagnostic(
                     diagnostics,
-                    UninstallStage::ServiceStop,
+                    UninstallStage::ServiceStop.diagnostic_name(),
                     DiagnosticCause::ServiceState,
                     UserFailure::StopThenRetry(
                         StopThenRetry::UninstallServiceStateStopThenUninstall,
@@ -268,9 +227,9 @@ pub(super) async fn uninstall_with_context_and_diagnostics(
 
     if !stopped_as_absent_unit {
         verify_disabled_service(&systemctl, &context.target).map_err(|_| {
-            uninstall_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                UninstallStage::ServiceStopVerify,
+                UninstallStage::ServiceStopVerify.diagnostic_name(),
                 DiagnosticCause::ServiceState,
                 UserFailure::StopThenRetry(StopThenRetry::UninstallServiceStateStopThenUninstall),
             )
@@ -284,9 +243,9 @@ pub(super) async fn uninstall_with_context_and_diagnostics(
 
     let evidence = require_selected_home_evidence(paths, SelectedHomeOperation::Uninstall)
         .map_err(|_| {
-            uninstall_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                UninstallStage::DescriptorRemove,
+                UninstallStage::DescriptorRemove.diagnostic_name(),
                 DiagnosticCause::Validation,
                 installed_state_failure(paths),
             )
@@ -298,9 +257,9 @@ pub(super) async fn uninstall_with_context_and_diagnostics(
         .map(|identity| identity.descriptor_path.clone());
     let desktop_intent_removed =
         remove_persisted_desktop_descriptor(paths, &evidence).map_err(|_| {
-            uninstall_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                UninstallStage::DescriptorRemove,
+                UninstallStage::DescriptorRemove.diagnostic_name(),
                 DiagnosticCause::DesktopIntegration,
                 rollback_failure(
                     RollbackPrimary::UninstallDesktopCheckStatus,
@@ -320,9 +279,9 @@ pub(super) async fn uninstall_with_context_and_diagnostics(
     remove_owned_file(&paths.unit, paths.euid, 0o644)
         .and_then(|()| run_systemctl(&systemctl, ["--user", "daemon-reload"]))
         .map_err(|_| {
-            uninstall_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                UninstallStage::ServiceUnitRemove,
+                UninstallStage::ServiceUnitRemove.diagnostic_name(),
                 DiagnosticCause::Cleanup,
                 cleanup_failure(paths.unit.clone()),
             )
@@ -335,17 +294,17 @@ pub(super) async fn uninstall_with_context_and_diagnostics(
 
     let codex = cleanup_codex_executable(paths, &context.path_environment, &context.cwd);
     let codex = codex.ok_or_else(|| {
-        uninstall_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UninstallStage::PluginRemove,
+            UninstallStage::PluginRemove.diagnostic_name(),
             DiagnosticCause::CliIntegration,
             manual_cleanup_failure(NativeCleanupCommand::RemovePlugin, paths, None),
         )
     })?;
     remove_native_plugin_if_present(&codex, &paths.codex_home).map_err(|_| {
-        uninstall_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UninstallStage::PluginRemove,
+            UninstallStage::PluginRemove.diagnostic_name(),
             DiagnosticCause::CliIntegration,
             manual_cleanup_failure(NativeCleanupCommand::RemovePlugin, paths, Some(&codex)),
         )
@@ -353,9 +312,9 @@ pub(super) async fn uninstall_with_context_and_diagnostics(
     complete_uninstall_stage(diagnostics, UninstallStage::PluginRemove, &context.target)?;
 
     remove_native_marketplace_if_present(&codex, &paths.codex_home).map_err(|_| {
-        uninstall_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UninstallStage::MarketplaceRemove,
+            UninstallStage::MarketplaceRemove.diagnostic_name(),
             DiagnosticCause::CliIntegration,
             manual_cleanup_failure(NativeCleanupCommand::RemoveMarketplace, paths, Some(&codex)),
         )
@@ -367,9 +326,9 @@ pub(super) async fn uninstall_with_context_and_diagnostics(
     )?;
 
     remove_owned_tree(&paths.marketplace, paths.euid).map_err(|_| {
-        uninstall_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UninstallStage::ProjectionRemove,
+            UninstallStage::ProjectionRemove.diagnostic_name(),
             DiagnosticCause::Cleanup,
             cleanup_failure(paths.marketplace.clone()),
         )
@@ -388,9 +347,9 @@ pub(super) async fn uninstall_with_context_and_diagnostics(
     remove_owned_file(&paths.config, paths.euid, 0o600)
         .and_then(|()| remove_owned_empty_dir(&config_root, paths.euid))
         .map_err(|_| {
-            uninstall_failed(
+            super::fail_with_diagnostic(
                 diagnostics,
-                UninstallStage::ConfigurationRemove,
+                UninstallStage::ConfigurationRemove.diagnostic_name(),
                 DiagnosticCause::Cleanup,
                 cleanup_failure(config_root.clone()),
             )
@@ -407,7 +366,7 @@ pub(super) async fn uninstall_with_context_and_diagnostics(
         Some("manifest-remove" | "binary-remove")
     ) {
         let stage = if context.target.test_hooks.fail_after_completed_stage
-            == Some(UninstallStage::ManifestRemove.name())
+            == Some(UninstallStage::ManifestRemove.diagnostic_name())
         {
             UninstallStage::ManifestRemove
         } else {
@@ -418,18 +377,18 @@ pub(super) async fn uninstall_with_context_and_diagnostics(
         } else {
             UserFailure::Ordinary(OrdinaryFailure::UninstallUnexpectedRetry)
         };
-        return Err(uninstall_failed(
+        return Err(super::fail_with_diagnostic(
             diagnostics,
-            stage,
+            stage.diagnostic_name(),
             DiagnosticCause::Unexpected,
             failure,
         ));
     }
 
     remove_owned_file(&paths.manifest, paths.euid, 0o600).map_err(|_| {
-        uninstall_failed(
+        super::fail_with_diagnostic(
             diagnostics,
-            UninstallStage::ManifestRemove,
+            UninstallStage::ManifestRemove.diagnostic_name(),
             DiagnosticCause::Cleanup,
             cleanup_failure(paths.manifest.clone()),
         )
@@ -445,9 +404,9 @@ pub(super) async fn uninstall_with_context_and_diagnostics(
             complete_uninstall_stage(diagnostics, UninstallStage::BinaryRemove, &context.target)?
         }
         (None, Some(_)) => {
-            return Err(uninstall_failed(
+            return Err(super::fail_with_diagnostic(
                 diagnostics,
-                UninstallStage::BinaryRemove,
+                UninstallStage::BinaryRemove.diagnostic_name(),
                 DiagnosticCause::Cleanup,
                 UserFailure::TerminalPartialUninstall(TerminalPartialUninstall::new(
                     ManagedPaths::new(paths.binary.clone(), Vec::new()),
@@ -455,9 +414,9 @@ pub(super) async fn uninstall_with_context_and_diagnostics(
             ));
         }
         (Some(_), None) => {
-            return Err(uninstall_failed(
+            return Err(super::fail_with_diagnostic(
                 diagnostics,
-                UninstallStage::ManifestRemove,
+                UninstallStage::ManifestRemove.diagnostic_name(),
                 DiagnosticCause::Cleanup,
                 UserFailure::TerminalPartialUninstall(TerminalPartialUninstall::new(
                     ManagedPaths::new(paths.data_root.clone(), Vec::new()),
@@ -465,9 +424,9 @@ pub(super) async fn uninstall_with_context_and_diagnostics(
             ));
         }
         (Some(_), Some(_)) => {
-            return Err(uninstall_failed(
+            return Err(super::fail_with_diagnostic(
                 diagnostics,
-                UninstallStage::ManifestRemove,
+                UninstallStage::ManifestRemove.diagnostic_name(),
                 DiagnosticCause::Cleanup,
                 UserFailure::TerminalPartialUninstall(TerminalPartialUninstall::new(
                     ManagedPaths::new(paths.data_root.clone(), vec![paths.binary.clone()]),
