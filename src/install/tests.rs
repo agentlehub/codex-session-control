@@ -20,7 +20,7 @@ use crate::{
 };
 
 use super::{
-    CandidateRelease, DESKTOP_DETACH_GUIDANCE, LifecycleContext,
+    CandidateRelease, LifecycleContext,
     enable_disable::{
         disable_with_context, disable_with_context_and_diagnostics, enable_publication_failure,
         enable_service_failure, enable_with_context, enable_with_context_and_diagnostics,
@@ -61,7 +61,7 @@ use super::{
     },
     status::{StatusContext, status_with_context},
     test_target,
-    uninstall::uninstall_with_context,
+    uninstall::{uninstall_with_context, uninstall_with_context_and_diagnostics},
     update::{
         TerminalState, UpdateContext, UpdateStage, baseline_active_turn_gate, list_active_threads,
         outer_update_with_endpoints, release_failure_stage, run_candidate_apply,

@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use semver::Version;
 
+use crate::install::shell_quote_path;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RenderedCli {
     pub(crate) stdout: String,
@@ -814,10 +816,12 @@ impl IndependentTerminal {
 
 impl ManualCleanup {
     fn render(&self) -> String {
-        let executable = self
-            .codex_executable
-            .as_ref()
-            .map_or_else(|| "codex".to_owned(), |path| quote_path(path));
+        let executable = self.codex_executable.as_ref().map_or_else(
+            || "codex".to_owned(),
+            |path| {
+                shell_quote_path(path).expect("validated Codex executable path is shell-quotable")
+            },
+        );
         let arguments = match self.command {
             NativeCleanupCommand::RemovePlugin => {
                 "plugin remove codex-session-control@codex-session-control-local --json"
@@ -831,7 +835,8 @@ impl ManualCleanup {
             "Codex CLI integration could not be updated.",
             &format!(
                 "Complete Codex CLI cleanup manually:\n  CODEX_HOME={} {executable} {arguments}\n",
-                quote_path(&self.codex_home)
+                shell_quote_path(&self.codex_home)
+                    .expect("validated Codex home path is shell-quotable")
             ),
         )
     }
@@ -1193,11 +1198,6 @@ fn render_paths(paths: &ManagedPaths) -> String {
         .iter()
         .map(|path| format!("  {}\n", path.display()))
         .collect()
-}
-
-fn quote_path(path: &std::path::Path) -> String {
-    let value = path.to_string_lossy();
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn service_summary(summary: ServiceSummary) -> &'static str {

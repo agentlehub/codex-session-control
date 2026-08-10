@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::error::ControllerError;
 
-use super::paths::{FileKind, shell_quote_path, validate_existing};
+use super::paths::{FileKind, validate_existing};
 
 pub(super) fn read_installed_product_version(path: &Path, euid: u32) -> Option<String> {
     if !valid_owned_executable(path, euid) {
@@ -428,23 +428,4 @@ pub(super) fn remove_native_marketplace_if_present(
         }
     }
     Ok(())
-}
-
-pub(super) fn manual_native_removal(
-    codex_home: &Path,
-    codex: Option<&Path>,
-    marketplace: bool,
-) -> String {
-    let codex = codex
-        .and_then(|path| shell_quote_path(path).ok())
-        .unwrap_or_else(|| "codex".to_owned());
-    let arguments = if marketplace {
-        "plugin marketplace remove codex-session-control-local --json"
-    } else {
-        "plugin remove codex-session-control@codex-session-control-local --json"
-    };
-    format!(
-        "manual: CODEX_HOME={} {codex} {arguments}\n",
-        shell_quote_path(codex_home).unwrap_or_else(|_| "'<invalid-codex-home>'".to_owned())
-    )
 }

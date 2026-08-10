@@ -137,12 +137,26 @@ async fn run(cli: Cli) -> Result<ProcessOutcome, ControllerError> {
         }));
     }
     if matches!(&cli.command, Command::Uninstall) {
-        let paths = install::ResolvedUserPaths::from_effective_user()?;
-        let target = install::LifecycleTarget::production(paths);
-        let report = install::uninstall(target).await?;
-        eprint!("{}", report.stderr);
-        print!("{}", report.stdout);
-        return Ok(ProcessOutcome::Exit(0));
+        let mut diagnostics = Diagnostics::new(verbose, DiagnosticCommand::Uninstall);
+        let result = match install::ResolvedUserPaths::from_effective_user() {
+            Ok(paths) => {
+                let target = install::LifecycleTarget::production(paths);
+                install::uninstall(target, &mut diagnostics).await
+            }
+            Err(_) => {
+                diagnostics.emit(DiagnosticEvent::FailedPreflight {
+                    cause: DiagnosticCause::Validation,
+                });
+                Err(cli_output::UserFailure::Ordinary(
+                    cli_output::OrdinaryFailure::UninstallUnexpectedRetry,
+                ))
+            }
+        };
+        diagnostics.flush();
+        return Ok(ProcessOutcome::Render(match result {
+            Ok(success) => success.render(),
+            Err(failure) => failure.render(),
+        }));
     }
 
     unreachable!("all command variants are handled above")

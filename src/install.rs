@@ -30,9 +30,6 @@ pub(crate) use wrapper::codex_wrapper;
 use evidence::SelectedHomeEvidence;
 use service::{ServiceActivity, query_service_activity, verify_absent_control_socket};
 
-const DESKTOP_DETACH_GUIDANCE: &str =
-    "Desktop: fully exit and restart Desktop to return to ordinary mode.\n";
-
 fn display_command_for_paths(paths: &ResolvedUserPaths, path_environment: &OsStr) -> String {
     let install_bin = paths.home.join(".local/bin");
     if std::env::split_paths(path_environment).any(|entry| entry == install_bin) {
@@ -92,6 +89,7 @@ mod setup;
 mod uninstall;
 
 pub(crate) use enable_disable::{disable, enable};
+pub(crate) use paths::shell_quote_path;
 pub(crate) use setup::setup;
 pub(crate) use uninstall::uninstall;
 
@@ -140,10 +138,6 @@ fn remove_persisted_desktop_descriptor(
     };
     let expected = render_descriptor(&paths.socket)?;
     remove_expected_descriptor(identity, &expected)
-}
-
-fn incomplete_descriptor_cleanup(error: impl std::fmt::Display) -> String {
-    format!("Desktop descriptor cleanup is incomplete: {error}; later product state was retained")
 }
 
 fn cleanup_changed_descriptor_after_start_failure(

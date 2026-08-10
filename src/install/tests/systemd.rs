@@ -272,7 +272,8 @@ pub(super) async fn run_disposable_systemd_user() {
         let uninstall_error = uninstall_with_context(base_lifecycle.clone())
             .await
             .unwrap_err()
-            .to_string();
+            .render()
+            .stderr;
         assert_eq!(
             snapshot_live_guarded_state(&target.paths, &desktop_descriptor),
             guarded
@@ -314,7 +315,8 @@ pub(super) async fn run_disposable_systemd_user() {
         let unavailable_uninstall_error = uninstall_with_context(base_lifecycle)
             .await
             .unwrap_err()
-            .to_string();
+            .render()
+            .stderr;
         assert_eq!(
             snapshot_live_guarded_state(&target.paths, &desktop_descriptor),
             guarded

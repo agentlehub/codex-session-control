@@ -134,13 +134,6 @@ fn assert_injected(error: &ControllerError, stage: &str, command: &str) {
     assert!(error.contains(command), "{error}");
 }
 
-fn assert_injected_before_stage(error: &ControllerError, stage: &str, command: &str) {
-    let error = error.to_string();
-    assert!(error.contains(&format!("failed at {stage}:")), "{error}");
-    assert!(!error.contains(&format!("completed: {stage}\n")), "{error}");
-    assert!(error.contains(command), "{error}");
-}
-
 fn seed_preserved_normal_home_state(fixture: &Fixture) -> Vec<(PathBuf, Vec<u8>, u32)> {
     let home = &fixture.paths.codex_home;
     let preserved = vec![
@@ -721,20 +714,42 @@ async fn uninstall_retries_while_a_valid_identity_survives() {
             .await
             .unwrap_err();
 
-        if matches!(stage, "manifest-remove" | "binary-remove") {
-            assert_injected_before_stage(&error, stage, "retry: codex-session-control uninstall");
+        if stage == "service-stop" {
+            assert_eq!(
+                error,
+                crate::cli_output::UserFailure::StopThenRetry(
+                    crate::cli_output::StopThenRetry::UninstallServiceStateStopThenUninstall
+                )
+            );
+        } else if stage == "manifest-remove" {
+            assert!(matches!(
+                error,
+                crate::cli_output::UserFailure::RollbackIncomplete(_)
+            ));
+            assert!(
+                error
+                    .render()
+                    .stderr
+                    .contains(&fixture.paths.manifest.display().to_string())
+            );
         } else {
-            assert_injected(&error, stage, "retry: codex-session-control uninstall");
+            assert_eq!(
+                error,
+                crate::cli_output::UserFailure::Ordinary(
+                    crate::cli_output::OrdinaryFailure::UninstallUnexpectedRetry
+                )
+            );
         }
         assert!(fixture.paths.manifest.exists(), "{stage}");
         assert!(fixture.paths.binary.exists(), "{stage}");
         assert_no_backups(&fixture.paths.home);
         let report = uninstall_with_context(lifecycle_context_with_stage(&fixture, None))
             .await
-            .unwrap();
+            .unwrap()
+            .render();
         assert_eq!(
             report.stdout.lines().next(),
-            Some("Codex app-server service: removed")
+            Some("Codex Session Control was uninstalled.")
         );
         for removed in [
             &fixture.paths.unit,
@@ -762,10 +777,11 @@ async fn uninstall_retry_crosses_the_exact_missing_managed_unit_boundary() {
     .await
     .unwrap_err();
 
-    assert_injected(
-        &error,
-        "service-unit-remove",
-        "retry: codex-session-control uninstall",
+    assert_eq!(
+        error,
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::UninstallUnexpectedRetry
+        )
     );
     assert!(!fixture.paths.unit.exists());
     assert!(fixture.paths.config.exists());
@@ -775,11 +791,12 @@ async fn uninstall_retry_crosses_the_exact_missing_managed_unit_boundary() {
 
     let report = uninstall_with_context(lifecycle_context_with_stage(&fixture, None))
         .await
-        .unwrap();
+        .unwrap()
+        .render();
 
     assert_eq!(
         report.stdout.lines().next(),
-        Some("Codex app-server service: removed")
+        Some("Codex Session Control was uninstalled.")
     );
     assert!(!fixture.paths.config.exists());
     assert!(!fixture.paths.manifest.exists());
@@ -859,8 +876,14 @@ async fn missing_unit_retry_rejects_every_unproven_service_boundary() {
             .unwrap_err();
 
         assert!(
-            error.to_string().contains("failed at service-stop:"),
-            "{state}: {error}"
+            matches!(
+                error,
+                crate::cli_output::UserFailure::StopThenRetry(
+                    crate::cli_output::StopThenRetry::UninstallUnsafeStopThenUninstall
+                        | crate::cli_output::StopThenRetry::UninstallServiceStateStopThenUninstall
+                )
+            ),
+            "{state}: {error:?}"
         );
         assert!(fixture.paths.config.exists(), "{state}");
         assert!(fixture.paths.manifest.exists(), "{state}");
@@ -882,16 +905,23 @@ async fn binary_remove_failure_reports_terminal_partial_without_a_retry_or_full_
         .unwrap_err();
 
     fs::set_permissions(binary_parent, fs::Permissions::from_mode(0o700)).unwrap();
-    let error = error.to_string();
-    assert!(error.contains("failed at binary-remove: terminal partial uninstall:"));
-    assert!(error.contains(&format!(
-        "remaining product executable: {}",
-        fixture.paths.binary.display()
-    )));
-    assert!(error.contains("installed identity was removed; no fresh-process retry is available"));
-    assert!(!error.contains("retry:"));
-    assert!(!error.contains("Codex app-server service: removed"));
-    assert!(!error.contains("Codex home preserved:"));
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::TerminalPartialUninstall(_)
+    ));
+    let rendered = error.render();
+    assert!(
+        rendered
+            .stderr
+            .contains(&fixture.paths.binary.display().to_string())
+    );
+    assert!(
+        rendered
+            .stderr
+            .contains("Do not rerun `codex-session-control uninstall`")
+    );
+    assert!(!rendered.stderr.contains("Try again:"));
+    assert!(rendered.stdout.is_empty());
     assert!(!fixture.paths.config.exists());
     assert!(!fixture.paths.manifest.exists());
     assert!(!fixture.paths.data_root.exists());

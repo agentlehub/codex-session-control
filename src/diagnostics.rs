@@ -111,6 +111,15 @@ pub(crate) enum DiagnosticEvent {
     CompletedServiceVerify,
     CompletedDescriptorRemove,
     CompletedManifest,
+    CompletedServiceStop,
+    CompletedServiceStopVerify,
+    CompletedServiceUnitRemove,
+    CompletedPluginRemove,
+    CompletedMarketplaceRemove,
+    CompletedProjectionRemove,
+    CompletedConfigurationRemove,
+    CompletedManifestRemove,
+    CompletedBinaryRemove,
     FailedPreflight {
         cause: DiagnosticCause,
     },
@@ -154,6 +163,33 @@ pub(crate) enum DiagnosticEvent {
         cause: DiagnosticCause,
     },
     FailedManifest {
+        cause: DiagnosticCause,
+    },
+    FailedServiceUnitRemove {
+        cause: DiagnosticCause,
+    },
+    FailedServiceStop {
+        cause: DiagnosticCause,
+    },
+    FailedServiceStopVerify {
+        cause: DiagnosticCause,
+    },
+    FailedPluginRemove {
+        cause: DiagnosticCause,
+    },
+    FailedMarketplaceRemove {
+        cause: DiagnosticCause,
+    },
+    FailedProjectionRemove {
+        cause: DiagnosticCause,
+    },
+    FailedConfigurationRemove {
+        cause: DiagnosticCause,
+    },
+    FailedManifestRemove {
+        cause: DiagnosticCause,
+    },
+    FailedBinaryRemove {
         cause: DiagnosticCause,
     },
 }
@@ -269,6 +305,23 @@ impl Diagnostics {
             DiagnosticEvent::CompletedServiceVerify => "completed service-verify".to_owned(),
             DiagnosticEvent::CompletedDescriptorRemove => "completed descriptor-remove".to_owned(),
             DiagnosticEvent::CompletedManifest => "completed manifest".to_owned(),
+            DiagnosticEvent::CompletedServiceStop => "completed service-stop".to_owned(),
+            DiagnosticEvent::CompletedServiceStopVerify => {
+                "completed service-stop-verify".to_owned()
+            }
+            DiagnosticEvent::CompletedServiceUnitRemove => {
+                "completed service-unit-remove".to_owned()
+            }
+            DiagnosticEvent::CompletedPluginRemove => "completed plugin-remove".to_owned(),
+            DiagnosticEvent::CompletedMarketplaceRemove => {
+                "completed marketplace-remove".to_owned()
+            }
+            DiagnosticEvent::CompletedProjectionRemove => "completed projection-remove".to_owned(),
+            DiagnosticEvent::CompletedConfigurationRemove => {
+                "completed configuration-remove".to_owned()
+            }
+            DiagnosticEvent::CompletedManifestRemove => "completed manifest-remove".to_owned(),
+            DiagnosticEvent::CompletedBinaryRemove => "completed binary-remove".to_owned(),
             DiagnosticEvent::FailedPreflight { cause } => {
                 format!("failed preflight ({})", cause.label())
             }
@@ -313,6 +366,33 @@ impl Diagnostics {
             }
             DiagnosticEvent::FailedManifest { cause } => {
                 format!("failed manifest ({})", cause.label())
+            }
+            DiagnosticEvent::FailedServiceUnitRemove { cause } => {
+                format!("failed service-unit-remove ({})", cause.label())
+            }
+            DiagnosticEvent::FailedServiceStop { cause } => {
+                format!("failed service-stop ({})", cause.label())
+            }
+            DiagnosticEvent::FailedServiceStopVerify { cause } => {
+                format!("failed service-stop-verify ({})", cause.label())
+            }
+            DiagnosticEvent::FailedPluginRemove { cause } => {
+                format!("failed plugin-remove ({})", cause.label())
+            }
+            DiagnosticEvent::FailedMarketplaceRemove { cause } => {
+                format!("failed marketplace-remove ({})", cause.label())
+            }
+            DiagnosticEvent::FailedProjectionRemove { cause } => {
+                format!("failed projection-remove ({})", cause.label())
+            }
+            DiagnosticEvent::FailedConfigurationRemove { cause } => {
+                format!("failed configuration-remove ({})", cause.label())
+            }
+            DiagnosticEvent::FailedManifestRemove { cause } => {
+                format!("failed manifest-remove ({})", cause.label())
+            }
+            DiagnosticEvent::FailedBinaryRemove { cause } => {
+                format!("failed binary-remove ({})", cause.label())
             }
         };
         format!("[verbose] {command}{phase}: {detail}\n")
@@ -436,6 +516,15 @@ mod tests {
             DiagnosticEvent::CompletedServiceVerify,
             DiagnosticEvent::CompletedDescriptorRemove,
             DiagnosticEvent::CompletedManifest,
+            DiagnosticEvent::CompletedServiceStop,
+            DiagnosticEvent::CompletedServiceStopVerify,
+            DiagnosticEvent::CompletedServiceUnitRemove,
+            DiagnosticEvent::CompletedPluginRemove,
+            DiagnosticEvent::CompletedMarketplaceRemove,
+            DiagnosticEvent::CompletedProjectionRemove,
+            DiagnosticEvent::CompletedConfigurationRemove,
+            DiagnosticEvent::CompletedManifestRemove,
+            DiagnosticEvent::CompletedBinaryRemove,
             DiagnosticEvent::FailedPreflight {
                 cause: DiagnosticCause::Validation,
             },
@@ -477,6 +566,33 @@ mod tests {
             },
             DiagnosticEvent::FailedManifest {
                 cause: DiagnosticCause::Validation,
+            },
+            DiagnosticEvent::FailedServiceUnitRemove {
+                cause: DiagnosticCause::Cleanup,
+            },
+            DiagnosticEvent::FailedServiceStop {
+                cause: DiagnosticCause::ServiceStop,
+            },
+            DiagnosticEvent::FailedServiceStopVerify {
+                cause: DiagnosticCause::ServiceState,
+            },
+            DiagnosticEvent::FailedPluginRemove {
+                cause: DiagnosticCause::CliIntegration,
+            },
+            DiagnosticEvent::FailedMarketplaceRemove {
+                cause: DiagnosticCause::CliIntegration,
+            },
+            DiagnosticEvent::FailedProjectionRemove {
+                cause: DiagnosticCause::Cleanup,
+            },
+            DiagnosticEvent::FailedConfigurationRemove {
+                cause: DiagnosticCause::Cleanup,
+            },
+            DiagnosticEvent::FailedManifestRemove {
+                cause: DiagnosticCause::Cleanup,
+            },
+            DiagnosticEvent::FailedBinaryRemove {
+                cause: DiagnosticCause::Cleanup,
             },
         ];
         events.extend(

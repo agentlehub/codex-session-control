@@ -232,7 +232,12 @@ async fn unproven_service_stop_retains_descriptor_and_every_later_product_stage(
 
     let error = uninstall_with_context(context(&fixture)).await.unwrap_err();
 
-    assert!(error.to_string().contains("failed at service-stop-verify:"));
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::StopThenRetry(
+            crate::cli_output::StopThenRetry::UninstallServiceStateStopThenUninstall
+        )
+    ));
     assert!(descriptor(&fixture).exists());
     assert_later_product_state_is_retained(&fixture);
 }
@@ -248,11 +253,12 @@ async fn present_socket_after_inactive_service_proof_blocks_descriptor_and_later
 
     let error = uninstall_with_context(context(&fixture)).await.unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("failed at service-stop-verify: invalid socket: still exists")
-    );
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::StopThenRetry(
+            crate::cli_output::StopThenRetry::UninstallServiceStateStopThenUninstall
+        )
+    ));
     assert!(fixture.paths.socket.exists());
     assert!(descriptor(&fixture).exists());
     assert_later_product_state_is_retained(&fixture);
@@ -285,12 +291,12 @@ async fn descriptor_drift_blocks_uninstall_before_every_later_removal() {
         let error = uninstall_with_context(context(&fixture)).await.unwrap_err();
 
         assert!(
-            error.to_string().contains("failed at descriptor-remove:"),
-            "{state}: {error}"
+            matches!(error, crate::cli_output::UserFailure::RollbackIncomplete(_)),
+            "{state}: {error:?}"
         );
         assert!(descriptor.exists(), "{state}");
         assert_later_product_state_is_retained(&fixture);
-        assert!(!error.to_string().contains(DESKTOP_DETACH_GUIDANCE));
+        assert!(error.render().stdout.is_empty());
     }
 }
 
@@ -303,13 +309,10 @@ async fn configuration_only_uninstall_stops_at_descriptor_remove_without_guessin
 
     let error = uninstall_with_context(context(&fixture)).await.unwrap_err();
 
-    assert!(error.to_string().contains("completed: service-stop\n"));
-    assert!(
-        error
-            .to_string()
-            .contains("completed: service-stop-verify\n")
-    );
-    assert!(error.to_string().contains("failed at descriptor-remove:"));
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::RollbackIncomplete(_)
+    ));
     assert!(descriptor(&fixture).exists());
     for retained in [
         &fixture.paths.unit,
@@ -343,37 +346,18 @@ async fn successful_uninstall_removes_product_state_and_preserves_normal_home_st
     }
     fixture.clear_logs();
 
-    let report = uninstall_with_context(context(&fixture)).await.unwrap();
+    let report = uninstall_with_context(context(&fixture))
+        .await
+        .unwrap()
+        .render();
 
     assert_eq!(
         report.stdout,
-        format!(
-            "Codex app-server service: removed\n\
-Product descriptor: removed\n\
-Product projection: removed\n\
-Product configuration: removed\n\
-Product executable: removed\n\
-Codex home preserved: {}\n\
-Authentication preserved: yes\n\
-Tasks preserved: yes\n\
-Rollouts preserved: yes\n",
-            fixture.paths.codex_home.display()
-        )
+        "Codex Session Control was uninstalled.\n\n\
+Your Codex data is unchanged.\n\
+If Codex Desktop is already running, restart it to continue without Codex Session Control.\n"
     );
-    assert_eq!(
-        report.stderr,
-        "completed: service-stop\n\
-completed: service-stop-verify\n\
-completed: descriptor-remove\n\
-completed: service-unit-remove\n\
-completed: plugin-remove\n\
-completed: marketplace-remove\n\
-completed: projection-remove\n\
-completed: configuration-remove\n\
-completed: manifest-remove\n\
-completed: binary-remove\n\
-Desktop: fully exit and restart Desktop to return to ordinary mode.\n"
-    );
+    assert!(report.stderr.is_empty());
     assert!(!descriptor(&fixture).exists());
     for removed in [
         &fixture.paths.unit,
@@ -396,7 +380,7 @@ Desktop: fully exit and restart Desktop to return to ordinary mode.\n"
 }
 
 #[tokio::test]
-async fn failure_after_descriptor_removal_reports_desktop_restart_guidance() {
+async fn failure_after_descriptor_removal_selects_typed_manual_cleanup() {
     let fixture = Fixture::new();
     let _authority = setup_attached(&fixture).await;
     fs::write(
@@ -408,8 +392,16 @@ async fn failure_after_descriptor_removal_reports_desktop_restart_guidance() {
 
     let error = uninstall_with_context(context(&fixture)).await.unwrap_err();
 
-    assert!(error.to_string().contains("failed at marketplace-remove:"));
-    assert!(error.to_string().contains(DESKTOP_DETACH_GUIDANCE));
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::ManualCleanup(_)
+    ));
+    assert!(
+        error
+            .render()
+            .stderr
+            .contains("Complete Codex CLI cleanup manually:")
+    );
     assert!(!descriptor(&fixture).exists());
     assert!(fixture.paths.config.exists());
     assert!(fixture.paths.manifest.exists());
