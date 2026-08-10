@@ -1,6 +1,8 @@
 mod app_server;
 mod cli;
+mod cli_output;
 mod desktop;
+mod diagnostics;
 mod error;
 mod install;
 mod mcp;
@@ -9,7 +11,25 @@ mod model;
 mod test_support;
 
 use cli::{Cli, Command};
+use cli_output::RenderedCli;
 use error::ControllerError;
+use std::io::{self, Write};
+
+fn write_rendered(
+    rendered: &RenderedCli,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> io::Result<()> {
+    stdout.write_all(rendered.stdout.as_bytes())?;
+    stdout.flush()?;
+    stderr.write_all(rendered.stderr.as_bytes())?;
+    stderr.flush()
+}
+
+enum ProcessOutcome {
+    Render(RenderedCli),
+    Exit(u8),
+}
 
 #[tokio::main]
 async fn main() {
@@ -103,4 +123,97 @@ async fn run_mcp_server() -> Result<(), ControllerError> {
         .await
         .map(|_| ())
         .map_err(|error| ControllerError::Operational(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        cell::RefCell,
+        io::{self, Write},
+        rc::Rc,
+    };
+
+    use crate::cli_output::RenderedCli;
+
+    use super::write_rendered;
+
+    struct RecordingWriter {
+        label: &'static str,
+        events: Rc<RefCell<Vec<&'static str>>>,
+        fail_write: bool,
+    }
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.fail_write {
+                return Err(io::Error::other("injected writer failure"));
+            }
+            self.events.borrow_mut().push(self.label);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.events.borrow_mut().push(match self.label {
+                "stdout" => "flush-stdout",
+                "stderr" => "flush-stderr",
+                _ => unreachable!(),
+            });
+            Ok(())
+        }
+    }
+
+    fn success_with_notice() -> RenderedCli {
+        RenderedCli {
+            stdout: "success\n".to_owned(),
+            stderr: "notice\n".to_owned(),
+            exit_code: 0,
+        }
+    }
+
+    #[test]
+    fn success_writer_flushes_stdout_before_default_visible_stderr() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mut stdout = RecordingWriter {
+            label: "stdout",
+            events: Rc::clone(&events),
+            fail_write: false,
+        };
+        let mut stderr = RecordingWriter {
+            label: "stderr",
+            events: Rc::clone(&events),
+            fail_write: false,
+        };
+
+        write_rendered(&success_with_notice(), &mut stdout, &mut stderr).unwrap();
+
+        assert_eq!(
+            events.take(),
+            ["stdout", "flush-stdout", "stderr", "flush-stderr"]
+        );
+    }
+
+    #[test]
+    fn writer_failure_exits_one_without_a_second_friendly_or_raw_error() {
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let mut stdout = RecordingWriter {
+            label: "stdout",
+            events: Rc::clone(&events),
+            fail_write: true,
+        };
+        let mut stderr = RecordingWriter {
+            label: "stderr",
+            events: Rc::clone(&events),
+            fail_write: false,
+        };
+
+        let exit_code = if write_rendered(&success_with_notice(), &mut stdout, &mut stderr).is_err()
+        {
+            1
+        } else {
+            0
+        };
+
+        assert_eq!(exit_code, 1);
+        assert!(events.borrow().is_empty());
+    }
 }
