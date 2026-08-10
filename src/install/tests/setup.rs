@@ -317,6 +317,32 @@ async fn setup_default_and_verbose_are_behaviorally_identical() {
     );
 }
 
+#[tokio::test]
+async fn setup_public_diagnostic_ownership_emits_controller_started_once() {
+    use crate::diagnostics::{DiagnosticCommand, DiagnosticEvent, DiagnosticTarget, Diagnostics};
+
+    let fixture = Fixture::new();
+    let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
+    let mut diagnostics = Diagnostics::record(DiagnosticCommand::Setup);
+    diagnostics.emit(DiagnosticEvent::ControllerStarted {
+        version: semver::Version::parse(env!("CARGO_PKG_VERSION")).unwrap(),
+        target: DiagnosticTarget::current(),
+    });
+
+    setup_with_context_after_start(fixture.context(true), &mut diagnostics)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        diagnostics
+            .recorded_lines()
+            .iter()
+            .filter(|line| line.contains(": controller "))
+            .count(),
+        1
+    );
+}
+
 fn snapshot_mutation_files(paths: impl IntoIterator<Item = PathBuf>) -> Vec<MutationFileSnapshot> {
     paths
         .into_iter()

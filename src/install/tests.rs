@@ -59,7 +59,7 @@ use super::{
     setup::{
         SetupContext, setup_cli_reconciliation_failure, setup_descriptor_publication_failure,
         setup_invocation_failure, setup_preflight, setup_with_context,
-        setup_with_context_and_diagnostics,
+        setup_with_context_after_start, setup_with_context_and_diagnostics,
     },
     status::{StatusContext, status_with_context},
     test_target,

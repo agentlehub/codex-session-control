@@ -272,7 +272,7 @@ pub(crate) async fn setup(
             setup_invocation_failure(),
         )
     })?;
-    setup_with_context_and_diagnostics(
+    setup_with_context_after_start(
         SetupContext {
             target: LifecycleTarget::production(paths),
             candidate,
@@ -293,7 +293,7 @@ pub(super) async fn setup_with_context(context: SetupContext) -> Result<UserSucc
 }
 
 pub(super) async fn setup_with_context_and_diagnostics(
-    mut context: SetupContext,
+    context: SetupContext,
     diagnostics: &mut Diagnostics,
 ) -> Result<UserSuccess, UserFailure> {
     diagnostics.emit(DiagnosticEvent::ControllerStarted {
@@ -301,6 +301,13 @@ pub(super) async fn setup_with_context_and_diagnostics(
             .unwrap_or_else(|_| semver::Version::new(0, 0, 0)),
         target: DiagnosticTarget::current(),
     });
+    setup_with_context_after_start(context, diagnostics).await
+}
+
+pub(super) async fn setup_with_context_after_start(
+    mut context: SetupContext,
+    diagnostics: &mut Diagnostics,
+) -> Result<UserSuccess, UserFailure> {
     let preflight = match setup_preflight(&mut context).await {
         Ok(preflight) => preflight,
         Err(failure) => {
