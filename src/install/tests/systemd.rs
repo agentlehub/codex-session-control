@@ -1040,7 +1040,7 @@ exit "$status"
     assert_eq!(
         result.unavailable_disable_error,
         crate::cli_output::UserFailure::StopThenRetry(
-            crate::cli_output::StopThenRetry::DisableServiceStopThenDisable,
+            crate::cli_output::StopThenRetry::DisableUnsafeStopThenDisable,
         )
         .render()
         .stderr
@@ -1048,7 +1048,7 @@ exit "$status"
     assert_eq!(
         result.unavailable_uninstall_error,
         crate::cli_output::UserFailure::StopThenRetry(
-            crate::cli_output::StopThenRetry::UninstallServiceStateStopThenUninstall,
+            crate::cli_output::StopThenRetry::UninstallUnsafeStopThenUninstall,
         )
         .render()
         .stderr
