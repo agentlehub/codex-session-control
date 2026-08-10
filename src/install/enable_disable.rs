@@ -2,24 +2,28 @@ use std::{collections::BTreeMap, ffi::OsString, path::Path};
 
 use crate::{
     app_server::TESTED_CODEX_VERSION,
-    cli_output::RunningClientFacts,
-    desktop::{
-        DescriptorState, DesktopAvailability, DesktopTarget, inspect_descriptor,
-        preflight_descriptor_switch, probe_persisted_desktop_capability, publish_descriptor,
-        render_descriptor,
+    cli_output::{
+        DesktopAvailability as OutputDesktopAvailability, DisableSuccess, EnableSuccess,
+        IndependentTerminal, ManagedPaths, OrdinaryFailure, PartialDisable, RollbackIncomplete,
+        RollbackPrimary, StopThenRetry, UserFailure, UserNotice, UserSuccess,
     },
+    desktop::{
+        DescriptorPublicationFailure, DescriptorPublicationResidue, DescriptorState,
+        DesktopAvailability, DesktopTarget, inspect_descriptor, preflight_descriptor_switch,
+        probe_persisted_desktop_capability, publish_descriptor, render_descriptor,
+    },
+    diagnostics::{DiagnosticCause, DiagnosticEvent, DiagnosticTarget, Diagnostics},
     error::ControllerError,
     model::{InstalledRelease, ProductConfig},
 };
 
 use super::{
-    DESKTOP_DETACH_GUIDANCE, DesktopAttachmentStatus, LifecycleContext, LifecycleDesktopPlan,
-    LifecycleReceipt, LifecycleTarget, append_legacy_unattached_client_guidance,
-    cleanup_changed_descriptor_after_start_failure, display_command_for_paths,
+    DesktopAttachmentStatus, LifecycleContext, LifecycleDesktopPlan, LifecycleTarget,
+    UNKNOWN_CODEX_VERSION, cleanup_changed_descriptor_after_start_failure,
     evidence::{ResolvedUserPaths, SelectedHomeOperation, require_selected_home_evidence},
-    incomplete_descriptor_cleanup, lifecycle_context,
+    lifecycle_context,
     native::{read_codex_version, resolve_named_executable},
-    paths::{lifecycle_file_error, read_product_evidence_file, read_status_file},
+    paths::{read_product_evidence_file, read_status_file},
     remove_persisted_desktop_descriptor,
     render::render_unit,
     service::{
@@ -41,88 +45,246 @@ enum LifecycleStage {
 }
 
 impl LifecycleStage {
-    const fn name(self) -> &'static str {
+    fn completed_event(self) -> DiagnosticEvent {
         match self {
-            Self::Configuration => "configuration",
-            Self::ServiceUnit => "service-unit",
-            Self::Descriptor => "descriptor",
-            Self::DescriptorRemove => "descriptor-remove",
-            Self::ServiceEnable => "service-enable",
-            Self::ServiceDisable => "service-disable",
-            Self::ServiceVerify => "service-verify",
+            Self::Configuration => DiagnosticEvent::CompletedConfiguration,
+            Self::ServiceUnit => DiagnosticEvent::CompletedServiceUnit,
+            Self::Descriptor => DiagnosticEvent::CompletedDescriptor,
+            Self::DescriptorRemove => DiagnosticEvent::CompletedDescriptorRemove,
+            Self::ServiceEnable => DiagnosticEvent::CompletedServiceEnable,
+            Self::ServiceDisable => DiagnosticEvent::CompletedServiceDisable,
+            Self::ServiceVerify => DiagnosticEvent::CompletedServiceVerify,
+        }
+    }
+
+    fn failed_event(self, cause: DiagnosticCause) -> DiagnosticEvent {
+        match self {
+            Self::Configuration => DiagnosticEvent::FailedConfiguration { cause },
+            Self::ServiceUnit => DiagnosticEvent::FailedServiceUnit { cause },
+            Self::Descriptor => DiagnosticEvent::FailedDescriptor { cause },
+            Self::DescriptorRemove => DiagnosticEvent::FailedDescriptorRemove { cause },
+            Self::ServiceEnable => DiagnosticEvent::FailedServiceEnable { cause },
+            Self::ServiceDisable => DiagnosticEvent::FailedServiceDisable { cause },
+            Self::ServiceVerify => DiagnosticEvent::FailedServiceVerify { cause },
         }
     }
 }
 
-#[derive(Default)]
-struct LifecycleProgress {
-    completed: Vec<LifecycleStage>,
+fn lifecycle_failed(
+    diagnostics: &mut Diagnostics,
+    stage: LifecycleStage,
+    cause: DiagnosticCause,
+    failure: UserFailure,
+) -> UserFailure {
+    diagnostics.emit(stage.failed_event(cause));
+    failure
 }
 
-impl LifecycleProgress {
-    fn complete(&mut self, stage: LifecycleStage) {
-        self.completed.push(stage);
-    }
-
-    fn stderr(&self) -> String {
-        self.completed
-            .iter()
-            .map(|stage| format!("completed: {}\n", stage.name()))
-            .collect()
-    }
-
-    fn fail(
-        &self,
-        stage: LifecycleStage,
-        cause: impl std::fmt::Display,
-        retry: &str,
-    ) -> ControllerError {
-        ControllerError::Operational(format!(
-            "{}failed at {}: {cause}\nretry: {retry}\n",
-            self.stderr(),
-            stage.name()
-        ))
+fn descriptor_residue_path(residue: DescriptorPublicationResidue) -> std::path::PathBuf {
+    match residue {
+        DescriptorPublicationResidue::Stage(path) | DescriptorPublicationResidue::Final(path) => {
+            path
+        }
     }
 }
 
-pub(crate) async fn enable(target: LifecycleTarget) -> Result<LifecycleReceipt, ControllerError> {
-    enable_with_context(lifecycle_context(target)?).await
+pub(super) fn enable_publication_failure(failure: DescriptorPublicationFailure) -> UserFailure {
+    match failure.residue {
+        Some(residue) => UserFailure::RollbackIncomplete(RollbackIncomplete::new(
+            RollbackPrimary::EnableDesktopRetry,
+            ManagedPaths::new(descriptor_residue_path(residue), Vec::new()),
+        )),
+        None => UserFailure::Ordinary(OrdinaryFailure::EnableDesktopIntegrationRetry),
+    }
 }
 
-pub(crate) async fn disable(target: LifecycleTarget) -> Result<LifecycleReceipt, ControllerError> {
-    disable_with_context(lifecycle_context(target)?).await
+pub(super) fn enable_service_failure(
+    primary: StopThenRetry,
+    descriptor_changed: bool,
+    cleanup: Result<(), DescriptorPublicationFailure>,
+) -> UserFailure {
+    if !descriptor_changed {
+        return UserFailure::StopThenRetry(primary);
+    }
+    match cleanup {
+        Ok(()) => UserFailure::Ordinary(match primary {
+            StopThenRetry::EnableServiceStartStopThenEnable => {
+                OrdinaryFailure::EnableServiceStartRetry
+            }
+            StopThenRetry::EnableServiceStateStopThenEnable => {
+                OrdinaryFailure::EnableServiceStateRetry
+            }
+            _ => unreachable!("enable cleanup receives an enable primary"),
+        }),
+        Err(failure) => {
+            let residue = failure
+                .residue
+                .expect("changed descriptor cleanup failure has exact residue");
+            UserFailure::RollbackIncomplete(RollbackIncomplete::new(
+                RollbackPrimary::EnableServiceStateCheckStatus,
+                ManagedPaths::new(descriptor_residue_path(residue), Vec::new()),
+            ))
+        }
+    }
 }
 
+fn complete_enable_stage(
+    diagnostics: &mut Diagnostics,
+    stage: LifecycleStage,
+    _target: &LifecycleTarget,
+) -> Result<(), UserFailure> {
+    diagnostics.emit(stage.completed_event());
+    #[cfg(test)]
+    if _target.test_hooks.fail_after_completed_stage
+        == Some(match stage {
+            LifecycleStage::Descriptor => "descriptor",
+            LifecycleStage::ServiceEnable => "service-enable",
+            LifecycleStage::ServiceVerify => "service-verify",
+            _ => "",
+        })
+    {
+        let failure = match stage {
+            LifecycleStage::Descriptor => {
+                UserFailure::Ordinary(OrdinaryFailure::EnableUnexpectedRetry)
+            }
+            LifecycleStage::ServiceEnable => {
+                UserFailure::StopThenRetry(StopThenRetry::EnableServiceStateStopThenEnable)
+            }
+            LifecycleStage::ServiceVerify => {
+                UserFailure::Ordinary(OrdinaryFailure::EnableUnexpectedCheckStatus)
+            }
+            _ => unreachable!("enable does not complete this injected stage"),
+        };
+        return Err(lifecycle_failed(
+            diagnostics,
+            stage,
+            DiagnosticCause::Unexpected,
+            failure,
+        ));
+    }
+    Ok(())
+}
+
+fn complete_disable_stage(
+    diagnostics: &mut Diagnostics,
+    stage: LifecycleStage,
+    _target: &LifecycleTarget,
+) -> Result<(), UserFailure> {
+    diagnostics.emit(stage.completed_event());
+    #[cfg(test)]
+    if _target.test_hooks.fail_after_completed_stage
+        == Some(match stage {
+            LifecycleStage::ServiceDisable => "service-disable",
+            LifecycleStage::ServiceVerify => "service-verify",
+            LifecycleStage::DescriptorRemove => "descriptor-remove",
+            _ => "",
+        })
+    {
+        let failure = match stage {
+            LifecycleStage::ServiceDisable => {
+                UserFailure::StopThenRetry(StopThenRetry::DisableServiceStopThenDisable)
+            }
+            LifecycleStage::ServiceVerify => UserFailure::PartialDisable(PartialDisable::new(None)),
+            LifecycleStage::DescriptorRemove => {
+                UserFailure::Ordinary(OrdinaryFailure::DisableUnexpectedCheckStatus)
+            }
+            _ => unreachable!("disable does not complete this injected stage"),
+        };
+        return Err(lifecycle_failed(
+            diagnostics,
+            stage,
+            DiagnosticCause::Unexpected,
+            failure,
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn enable(
+    target: LifecycleTarget,
+    diagnostics: &mut Diagnostics,
+) -> Result<UserSuccess, UserFailure> {
+    diagnostics.emit(DiagnosticEvent::ControllerStarted {
+        version: semver::Version::parse(env!("CARGO_PKG_VERSION"))
+            .expect("package version is semantic"),
+        target: DiagnosticTarget::current(),
+    });
+    let context = lifecycle_context(target).map_err(|_| {
+        lifecycle_failed(
+            diagnostics,
+            LifecycleStage::Configuration,
+            DiagnosticCause::Validation,
+            UserFailure::Ordinary(OrdinaryFailure::EnableUnexpectedRetry),
+        )
+    })?;
+    enable_with_context_and_diagnostics(context, diagnostics).await
+}
+
+pub(crate) async fn disable(
+    target: LifecycleTarget,
+    diagnostics: &mut Diagnostics,
+) -> Result<UserSuccess, UserFailure> {
+    diagnostics.emit(DiagnosticEvent::ControllerStarted {
+        version: semver::Version::parse(env!("CARGO_PKG_VERSION"))
+            .expect("package version is semantic"),
+        target: DiagnosticTarget::current(),
+    });
+    let context = lifecycle_context(target).map_err(|_| {
+        lifecycle_failed(
+            diagnostics,
+            LifecycleStage::ServiceDisable,
+            DiagnosticCause::Validation,
+            UserFailure::Ordinary(OrdinaryFailure::DisableUnexpectedRetry),
+        )
+    })?;
+    disable_with_context_and_diagnostics(context, diagnostics).await
+}
+
+#[cfg(test)]
 pub(super) async fn enable_with_context(
     context: LifecycleContext,
-) -> Result<LifecycleReceipt, ControllerError> {
-    let mut progress = LifecycleProgress::default();
-    let display_command =
-        display_command_for_paths(&context.target.paths, &context.path_environment);
-    let retry = format!("{display_command} enable");
+) -> Result<UserSuccess, UserFailure> {
+    let mut diagnostics = Diagnostics::new(false, crate::diagnostics::DiagnosticCommand::Enable);
+    enable_with_context_and_diagnostics(context, &mut diagnostics).await
+}
+
+pub(super) async fn enable_with_context_and_diagnostics(
+    context: LifecycleContext,
+    diagnostics: &mut Diagnostics,
+) -> Result<UserSuccess, UserFailure> {
     let paths = &context.target.paths;
-    let evidence = require_selected_home_evidence(paths, SelectedHomeOperation::Enable)
-        .map_err(|error| progress.fail(LifecycleStage::Configuration, error, &retry))?;
+    let evidence =
+        require_selected_home_evidence(paths, SelectedHomeOperation::Enable).map_err(|_| {
+            lifecycle_failed(
+                diagnostics,
+                LifecycleStage::Configuration,
+                DiagnosticCause::Validation,
+                UserFailure::Ordinary(OrdinaryFailure::EnableInstalledStateRepairSetup),
+            )
+        })?;
     let expected_config = evidence.configuration.ok_or_else(|| {
-        progress.fail(
+        lifecycle_failed(
+            diagnostics,
             LifecycleStage::Configuration,
-            "invalid installed configuration",
-            &retry,
+            DiagnosticCause::Validation,
+            UserFailure::Ordinary(OrdinaryFailure::EnableInstalledStateRepairSetup),
         )
     })?;
     let manifest = evidence.manifest.as_ref().ok_or_else(|| {
-        progress.fail(
+        lifecycle_failed(
+            diagnostics,
             LifecycleStage::Configuration,
-            "invalid installed manifest",
-            &retry,
+            DiagnosticCause::Validation,
+            UserFailure::Ordinary(OrdinaryFailure::EnableInstalledStateRepairSetup),
         )
     })?;
     let config_bytes = read_product_evidence_file(&paths.home, paths.euid, &paths.config, 0o600)
-        .map_err(|error| {
-            progress.fail(
+        .map_err(|_| {
+            lifecycle_failed(
+                diagnostics,
                 LifecycleStage::Configuration,
-                lifecycle_file_error(&paths.config, error),
-                &retry,
+                DiagnosticCause::Validation,
+                UserFailure::Ordinary(OrdinaryFailure::EnableInstalledStateRepairSetup),
             )
         })?;
     let config = std::str::from_utf8(&config_bytes)
@@ -130,52 +292,88 @@ pub(super) async fn enable_with_context(
         .and_then(|text| toml::from_str::<ProductConfig>(text).ok())
         .filter(|config| config.validate(&paths.codex_home, &paths.socket).is_ok())
         .ok_or_else(|| {
-            progress.fail(
+            lifecycle_failed(
+                diagnostics,
                 LifecycleStage::Configuration,
-                "invalid installed configuration",
-                &retry,
+                DiagnosticCause::Validation,
+                UserFailure::Ordinary(OrdinaryFailure::EnableInstalledStateRepairSetup),
             )
         })?;
     if config != expected_config {
-        return Err(progress.fail(
+        return Err(lifecycle_failed(
+            diagnostics,
             LifecycleStage::Configuration,
-            "installed configuration changed during validation",
-            &retry,
+            DiagnosticCause::Validation,
+            UserFailure::Ordinary(OrdinaryFailure::EnableInstalledStateRepairSetup),
         ));
     }
 
-    let unit = read_status_file(&paths.unit, paths.euid, 0o644).map_err(|error| {
-        progress.fail(
+    let unit = read_status_file(&paths.unit, paths.euid, 0o644).map_err(|_| {
+        lifecycle_failed(
+            diagnostics,
             LifecycleStage::ServiceUnit,
-            lifecycle_file_error(&paths.unit, error),
-            &retry,
+            DiagnosticCause::ServiceConfiguration,
+            UserFailure::Ordinary(OrdinaryFailure::EnableServiceConfigurationRepairSetup),
         )
     })?;
-    let expected_unit = render_unit(paths, &config.codex_executable)
-        .map_err(|error| progress.fail(LifecycleStage::ServiceUnit, error, &retry))?;
-    if unit != expected_unit {
-        return Err(progress.fail(
+    let expected_unit = render_unit(paths, &config.codex_executable).map_err(|_| {
+        lifecycle_failed(
+            diagnostics,
             LifecycleStage::ServiceUnit,
-            "installed unit does not match configuration",
-            &retry,
+            DiagnosticCause::ServiceConfiguration,
+            UserFailure::Ordinary(OrdinaryFailure::EnableServiceConfigurationRepairSetup),
+        )
+    })?;
+    if unit != expected_unit {
+        return Err(lifecycle_failed(
+            diagnostics,
+            LifecycleStage::ServiceUnit,
+            DiagnosticCause::ServiceConfiguration,
+            UserFailure::Ordinary(OrdinaryFailure::EnableServiceConfigurationRepairSetup),
         ));
     }
 
     let desktop = resolve_enable_desktop(manifest, paths, &context.desktop_environment)
         .await
-        .map_err(|error| progress.fail(LifecycleStage::Descriptor, error, &retry))?;
+        .map_err(|_| {
+            lifecycle_failed(
+                diagnostics,
+                LifecycleStage::Descriptor,
+                DiagnosticCause::DesktopIntegration,
+                UserFailure::Ordinary(OrdinaryFailure::EnableDesktopIntegrationCheckStatus),
+            )
+        })?;
     let (codex_version, expected_running_version) =
-        read_codex_version(&config.codex_executable, &paths.codex_home)
-            .map_err(|error| progress.fail(LifecycleStage::Configuration, error, &retry))?;
+        read_codex_version(&config.codex_executable, &paths.codex_home).map_err(|_| {
+            lifecycle_failed(
+                diagnostics,
+                LifecycleStage::Configuration,
+                DiagnosticCause::CliIntegration,
+                UserFailure::Ordinary(OrdinaryFailure::EnableInstalledStateRepairSetup),
+            )
+        })?;
     let systemctl = resolve_named_executable(&context.path_environment, &context.cwd, "systemctl")
-        .map_err(|error| progress.fail(LifecycleStage::ServiceEnable, error, &retry))?;
+        .map_err(|_| {
+            lifecycle_failed(
+                diagnostics,
+                LifecycleStage::ServiceEnable,
+                DiagnosticCause::ServiceStart,
+                UserFailure::Ordinary(OrdinaryFailure::EnableServiceStartRetry),
+            )
+        })?;
     let desktop_published = if let (Some(target), Some(descriptor)) =
         (&desktop.target, &desktop.descriptor)
     {
-        let published = publish_descriptor(&target.identity, descriptor)
-            .map_err(|failure| progress.fail(LifecycleStage::Descriptor, failure.source, &retry))?;
+        let published = publish_descriptor(&target.identity, descriptor).map_err(|failure| {
+            lifecycle_failed(
+                diagnostics,
+                LifecycleStage::Descriptor,
+                DiagnosticCause::DesktopIntegration,
+                enable_publication_failure(failure),
+            )
+        })?;
         if published {
-            complete_lifecycle_stage!(progress, LifecycleStage::Descriptor, context.target, &retry);
+            complete_enable_stage(diagnostics, LifecycleStage::Descriptor, &context.target)?;
         }
         published
     } else {
@@ -192,87 +390,75 @@ pub(super) async fn enable_with_context(
             context.target.unit_name.as_str(),
         ],
     )
-    .map_err(|error| {
-        let error = cleanup_enable_descriptor(
+    .map_err(|_| {
+        let cleanup = cleanup_enable_descriptor(
             &systemctl,
             &context.target,
             desktop_published,
             desktop.target.as_ref(),
             desktop.descriptor.as_deref(),
+        );
+        lifecycle_failed(
+            diagnostics,
+            LifecycleStage::ServiceEnable,
+            DiagnosticCause::ServiceStart,
+            enable_service_failure(
+                StopThenRetry::EnableServiceStartStopThenEnable,
+                desktop_published,
+                cleanup,
+            ),
         )
-        .err()
-        .map(|cleanup| {
-            format!(
-                "{error}; cleanup after published Desktop descriptor failed: {}; Desktop routing state is unverified",
-                cleanup.source
-            )
-        })
-        .unwrap_or_else(|| error.to_string());
-        progress.fail(LifecycleStage::ServiceEnable, error, &retry)
     })?;
-    complete_lifecycle_stage!(
-        progress,
-        LifecycleStage::ServiceEnable,
-        context.target,
-        &retry
-    );
+    complete_enable_stage(diagnostics, LifecycleStage::ServiceEnable, &context.target)?;
 
     verify_enabled_service(&systemctl, &context.target, &expected_running_version)
         .await
-        .map_err(|error| {
-            let error = cleanup_enable_descriptor(
+        .map_err(|_| {
+            let cleanup = cleanup_enable_descriptor(
                 &systemctl,
                 &context.target,
                 desktop_published,
                 desktop.target.as_ref(),
                 desktop.descriptor.as_deref(),
+            );
+            lifecycle_failed(
+                diagnostics,
+                LifecycleStage::ServiceVerify,
+                DiagnosticCause::ServiceState,
+                enable_service_failure(
+                    StopThenRetry::EnableServiceStateStopThenEnable,
+                    desktop_published,
+                    cleanup,
+                ),
             )
-            .err()
-            .map(|cleanup| {
-                format!(
-                    "{error}; cleanup after published Desktop descriptor failed: {}; Desktop routing state is unverified",
-                    cleanup.source
-                )
-            })
-            .unwrap_or_else(|| error.to_string());
-            progress.fail(LifecycleStage::ServiceVerify, error, &retry)
         })?;
-    complete_lifecycle_stage!(
-        progress,
-        LifecycleStage::ServiceVerify,
-        context.target,
-        &retry
-    );
+    complete_enable_stage(diagnostics, LifecycleStage::ServiceVerify, &context.target)?;
 
-    let mut stderr = progress.stderr();
+    let mut notices = Vec::new();
     if expected_running_version != TESTED_CODEX_VERSION {
-        stderr.push_str(&format!(
-            "Compatibility warning: Codex app-server {codex_version} has not been tested with codex-session-control {}; native results remain authoritative.\n",
-            env!("CARGO_PKG_VERSION")
-        ));
+        notices.push(UserNotice::Compatibility {
+            codex: semver::Version::parse(&codex_version).unwrap_or_else(|_| {
+                semver::Version::parse(UNKNOWN_CODEX_VERSION)
+                    .expect("unknown Codex version sentinel is semantic")
+            }),
+            product: semver::Version::parse(env!("CARGO_PKG_VERSION"))
+                .expect("package version is semantic"),
+        });
     }
-    if let Some(warning) = desktop.warning {
-        stderr.push_str(&warning);
-        stderr.push('\n');
+    if desktop.warning.is_some() {
+        notices.push(UserNotice::DesktopLauncherUnavailable);
     }
-    let mut stdout = format!(
-        "Codex app-server service: enabled, active\n\
-CLI attachment: available through codex-session-control codex\n\
-Desktop attachment: {}\n\
-Desktop restart required: {}\n",
-        desktop.status.receipt(),
-        if desktop_published { "yes" } else { "no" },
-    );
-    if desktop.setup_required {
-        stdout.push_str("Run codex-session-control setup to attach Desktop.\n");
-    }
-    let legacy_running_clients = if desktop.status == DesktopAttachmentStatus::Available {
-        running_clients
-    } else {
-        RunningClientFacts::default()
+    let desktop_status = match desktop.status {
+        DesktopAttachmentStatus::Available => OutputDesktopAvailability::Available,
+        DesktopAttachmentStatus::Unavailable if desktop.setup_required => {
+            OutputDesktopAvailability::SetupRequired
+        }
+        DesktopAttachmentStatus::Unavailable => OutputDesktopAvailability::Unavailable,
+        DesktopAttachmentStatus::Unverified => OutputDesktopAvailability::CouldNotVerify,
     };
-    append_legacy_unattached_client_guidance(&mut stdout, &legacy_running_clients);
-    Ok(LifecycleReceipt { stdout, stderr })
+    let success = EnableSuccess::new(running_clients, desktop_status, desktop_published, notices)
+        .expect("enable Desktop evidence forms a valid output state");
+    Ok(UserSuccess::Enable(success))
 }
 
 fn cleanup_enable_descriptor(
@@ -288,54 +474,55 @@ fn cleanup_enable_descriptor(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) async fn disable_with_context(
     context: LifecycleContext,
-) -> Result<LifecycleReceipt, ControllerError> {
-    let mut progress = LifecycleProgress::default();
-    let display_command =
-        display_command_for_paths(&context.target.paths, &context.path_environment);
-    let retry = format!("{display_command} disable");
+) -> Result<UserSuccess, UserFailure> {
+    let mut diagnostics = Diagnostics::new(false, crate::diagnostics::DiagnosticCommand::Disable);
+    disable_with_context_and_diagnostics(context, &mut diagnostics).await
+}
+
+pub(super) async fn disable_with_context_and_diagnostics(
+    context: LifecycleContext,
+    diagnostics: &mut Diagnostics,
+) -> Result<UserSuccess, UserFailure> {
     let systemctl = resolve_named_executable(&context.path_environment, &context.cwd, "systemctl")
-        .map_err(|error| progress.fail(LifecycleStage::ServiceDisable, error, &retry))?;
+        .map_err(|_| {
+            lifecycle_failed(
+                diagnostics,
+                LifecycleStage::ServiceDisable,
+                DiagnosticCause::ServiceStop,
+                UserFailure::Ordinary(OrdinaryFailure::DisableServiceStopRetry),
+            )
+        })?;
     match query_service_activity(&systemctl, &context.target.unit_name) {
         ServiceActivity::Inactive => {}
         ServiceActivity::Active => match inspect_caller_unit(&systemctl, &context.target) {
             CallerUnitInspection::Independent => {}
             CallerUnitInspection::SelfHosted(CallerUnitEvidence::WhoAmI) => {
-                let recovery =
-                    format!("run from an independent terminal:\n{display_command} disable\n");
-                return Err(progress.fail(
+                return Err(lifecycle_failed(
+                    diagnostics,
                     LifecycleStage::ServiceDisable,
-                    "refusing disable: this command is running inside the managed app-server",
-                    &recovery,
+                    DiagnosticCause::Validation,
+                    UserFailure::IndependentTerminal(IndependentTerminal::Disable),
                 ));
             }
             CallerUnitInspection::SelfHosted(CallerUnitEvidence::ControlGroup)
             | CallerUnitInspection::Unknown { .. } => {
-                let recovery = format!(
-                    "caller independence could not be proven; from an independent terminal:\n\
-                     systemctl --user stop {}\n\
-                     {display_command} disable\n",
-                    context.target.unit_name,
-                );
-                return Err(progress.fail(
+                return Err(lifecycle_failed(
+                    diagnostics,
                     LifecycleStage::ServiceDisable,
-                    "refusing disable: caller independence cannot be proven",
-                    &recovery,
+                    DiagnosticCause::Validation,
+                    UserFailure::StopThenRetry(StopThenRetry::DisableUnsafeStopThenDisable),
                 ));
             }
         },
         ServiceActivity::Unproven => {
-            let recovery = format!(
-                "service activity could not be proven; from an independent terminal:\n\
-                 systemctl --user stop {}\n\
-                 {display_command} disable\n",
-                context.target.unit_name,
-            );
-            return Err(progress.fail(
+            return Err(lifecycle_failed(
+                diagnostics,
                 LifecycleStage::ServiceDisable,
-                "refusing disable: service activity cannot be proven",
-                &recovery,
+                DiagnosticCause::ServiceState,
+                UserFailure::StopThenRetry(StopThenRetry::DisableUnsafeStopThenDisable),
             ));
         }
     }
@@ -348,66 +535,59 @@ pub(super) async fn disable_with_context(
             context.target.unit_name.as_str(),
         ],
     )
-    .map_err(|error| progress.fail(LifecycleStage::ServiceDisable, error, &retry))?;
-    complete_lifecycle_stage!(
-        progress,
-        LifecycleStage::ServiceDisable,
-        context.target,
-        &retry
-    );
+    .map_err(|_| {
+        lifecycle_failed(
+            diagnostics,
+            LifecycleStage::ServiceDisable,
+            DiagnosticCause::ServiceStop,
+            UserFailure::StopThenRetry(StopThenRetry::DisableServiceStopThenDisable),
+        )
+    })?;
+    complete_disable_stage(diagnostics, LifecycleStage::ServiceDisable, &context.target)?;
 
-    verify_disabled_service(&systemctl, &context.target)
-        .map_err(|error| progress.fail(LifecycleStage::ServiceVerify, error, &retry))?;
-    complete_lifecycle_stage!(
-        progress,
-        LifecycleStage::ServiceVerify,
-        context.target,
-        &retry
-    );
+    verify_disabled_service(&systemctl, &context.target).map_err(|_| {
+        lifecycle_failed(
+            diagnostics,
+            LifecycleStage::ServiceVerify,
+            DiagnosticCause::ServiceState,
+            UserFailure::StopThenRetry(StopThenRetry::DisableServiceStateStopThenDisable),
+        )
+    })?;
+    complete_disable_stage(diagnostics, LifecycleStage::ServiceVerify, &context.target)?;
 
     let evidence =
         require_selected_home_evidence(&context.target.paths, SelectedHomeOperation::Disable)
-            .map_err(|error| {
-                progress.fail(
+            .map_err(|_| {
+                lifecycle_failed(
+                    diagnostics,
                     LifecycleStage::DescriptorRemove,
-                    incomplete_descriptor_cleanup(error),
-                    &retry,
+                    DiagnosticCause::Cleanup,
+                    UserFailure::PartialDisable(PartialDisable::new(None)),
                 )
             })?;
+    let managed_path = evidence
+        .manifest
+        .as_ref()
+        .and_then(|manifest| manifest.desktop_attachment.as_ref())
+        .map(|identity| identity.descriptor_path.clone());
     let desktop_intent_removed =
-        remove_persisted_desktop_descriptor(&context.target.paths, &evidence).map_err(|error| {
-            progress.fail(
+        remove_persisted_desktop_descriptor(&context.target.paths, &evidence).map_err(|_| {
+            lifecycle_failed(
+                diagnostics,
                 LifecycleStage::DescriptorRemove,
-                incomplete_descriptor_cleanup(error),
-                &retry,
+                DiagnosticCause::Cleanup,
+                UserFailure::PartialDisable(PartialDisable::new(managed_path)),
             )
         })?;
-    #[cfg(test)]
-    let descriptor_recovery = if desktop_intent_removed {
-        format!("{DESKTOP_DETACH_GUIDANCE}{retry}")
-    } else {
-        retry.clone()
-    };
-    complete_lifecycle_stage!(
-        progress,
+    complete_disable_stage(
+        diagnostics,
         LifecycleStage::DescriptorRemove,
-        context.target,
-        &descriptor_recovery
-    );
+        &context.target,
+    )?;
 
-    let mut stdout = format!(
-        "Codex app-server service: disabled, inactive\n\
-Native Codex sessions: preserved\n\
-Desktop restart required: {}\n",
-        if desktop_intent_removed { "yes" } else { "no" }
-    );
-    if desktop_intent_removed {
-        stdout.push_str(DESKTOP_DETACH_GUIDANCE);
-    }
-    Ok(LifecycleReceipt {
-        stdout,
-        stderr: progress.stderr(),
-    })
+    Ok(UserSuccess::Disable(DisableSuccess::new(
+        desktop_intent_removed,
+    )))
 }
 
 async fn resolve_enable_desktop(

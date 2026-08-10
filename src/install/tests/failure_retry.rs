@@ -654,7 +654,23 @@ async fn enable_and_disable_retry_after_each_completed_service_stage() {
                     enable_with_context(lifecycle_context_with_stage(&fixture, Some(stage)))
                         .await
                         .unwrap_err();
-                assert_injected(&error, stage, "retry: codex-session-control enable");
+                assert!(
+                    matches!(
+                        (stage, error),
+                        (
+                            "service-enable",
+                            crate::cli_output::UserFailure::StopThenRetry(
+                                crate::cli_output::StopThenRetry::EnableServiceStateStopThenEnable
+                            )
+                        ) | (
+                            "service-verify",
+                            crate::cli_output::UserFailure::Ordinary(
+                                crate::cli_output::OrdinaryFailure::EnableUnexpectedCheckStatus
+                            )
+                        )
+                    ),
+                    "{stage}"
+                );
                 enable_with_context(lifecycle_context_with_stage(&fixture, None))
                     .await
                     .unwrap();
@@ -667,7 +683,21 @@ async fn enable_and_disable_retry_after_each_completed_service_stage() {
                     disable_with_context(lifecycle_context_with_stage(&fixture, Some(stage)))
                         .await
                         .unwrap_err();
-                assert_injected(&error, stage, "retry: codex-session-control disable");
+                assert!(
+                    matches!(
+                        (stage, error),
+                        (
+                            "service-disable",
+                            crate::cli_output::UserFailure::StopThenRetry(
+                                crate::cli_output::StopThenRetry::DisableServiceStopThenDisable
+                            )
+                        ) | (
+                            "service-verify",
+                            crate::cli_output::UserFailure::PartialDisable(_)
+                        )
+                    ),
+                    "{stage}"
+                );
                 disable_with_context(lifecycle_context_with_stage(&fixture, None))
                     .await
                     .unwrap();

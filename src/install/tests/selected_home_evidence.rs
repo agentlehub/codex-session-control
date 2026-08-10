@@ -974,12 +974,8 @@ async fn invalid_evidence_command_matrix_preserves_identity_state_and_service_bo
                         .await
                         .unwrap_err();
                     assert!(
-                        error.to_string().contains(
-                            "completed: service-disable\n\
-completed: service-verify\n\
-failed at descriptor-remove:"
-                        ),
-                        "{evidence:?}: {error}"
+                        matches!(error, crate::cli_output::UserFailure::PartialDisable(_)),
+                        "{evidence:?}: {error:?}"
                     );
                     assert_eq!(
                         fixture.systemctl_log(),

@@ -86,13 +86,12 @@ async fn active_self_hosted_disable_refuses_before_stop_and_descriptor_removal()
 
     let error = disable_with_context(context(&fixture)).await.unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("running inside the managed app-server")
-    );
-    assert!(error.to_string().contains("codex-session-control disable"));
-    assert!(!error.to_string().contains("completed:"));
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::IndependentTerminal(
+            crate::cli_output::IndependentTerminal::Disable
+        )
+    ));
     assert_eq!(
         fixture.systemctl_log(),
         service_log_prefix(&fixture) + "--user whoami\n"
@@ -161,29 +160,27 @@ async fn disable_stop_preflight_is_fail_closed_and_preserves_independent_or_inac
             "self-hosted-control-group" | "unknown-caller" => {
                 let error = result.unwrap_err();
                 assert!(
-                    error
-                        .to_string()
-                        .contains("caller independence cannot be proven"),
-                    "{case}: {error}"
+                    matches!(
+                        error,
+                        crate::cli_output::UserFailure::StopThenRetry(
+                            crate::cli_output::StopThenRetry::DisableUnsafeStopThenDisable
+                        )
+                    ),
+                    "{case}: {error:?}"
                 );
-                assert!(error.to_string().contains(&format!(
-                    "systemctl --user stop {}\ncodex-session-control disable",
-                    fixture.context(true).target.unit_name
-                )));
                 assert_active_stop_was_not_attempted(&fixture);
             }
             "unproven-activity" => {
                 let error = result.unwrap_err();
                 assert!(
-                    error
-                        .to_string()
-                        .contains("service activity cannot be proven"),
-                    "{error}"
+                    matches!(
+                        error,
+                        crate::cli_output::UserFailure::StopThenRetry(
+                            crate::cli_output::StopThenRetry::DisableUnsafeStopThenDisable
+                        )
+                    ),
+                    "{error:?}"
                 );
-                assert!(error.to_string().contains(&format!(
-                    "systemctl --user stop {}\ncodex-session-control disable",
-                    fixture.context(true).target.unit_name
-                )));
                 assert!(!fixture.systemctl_log().contains("--user whoami"));
                 assert!(!fixture.systemctl_log().contains("disable --now"));
             }
@@ -203,7 +200,10 @@ async fn disable_removes_only_the_exact_descriptor_after_service_proof() {
     let _authority = setup_attached(&fixture).await;
     fixture.clear_logs();
 
-    let report = disable_with_context(context(&fixture)).await.unwrap();
+    let report = disable_with_context(context(&fixture))
+        .await
+        .unwrap()
+        .render();
 
     assert!(!fixture.enabled.exists());
     assert!(!fixture.active.exists());
@@ -217,14 +217,10 @@ async fn disable_removes_only_the_exact_descriptor_after_service_proof() {
             + "--user is-enabled codex-session-control-test-Setup1.service\n"
             + "--user is-active codex-session-control-test-Setup1.service\n"
     );
-    assert_eq!(
-        report.stderr,
-        "completed: service-disable\n\
-completed: service-verify\n\
-completed: descriptor-remove\n"
-    );
-    assert!(report.stdout.contains("Desktop restart required: yes\n"));
-    assert!(report.stdout.contains(DESKTOP_DETACH_GUIDANCE));
+    assert!(report.stderr.is_empty());
+    assert!(report.stdout.contains(
+        "If Codex Desktop is already running, restart it to continue without Codex Session Control."
+    ));
 }
 
 #[tokio::test]

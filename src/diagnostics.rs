@@ -107,7 +107,9 @@ pub(crate) enum DiagnosticEvent {
     CompletedServiceUnit,
     CompletedDaemonReload,
     CompletedServiceEnable,
+    CompletedServiceDisable,
     CompletedServiceVerify,
+    CompletedDescriptorRemove,
     CompletedManifest,
     FailedPreflight {
         cause: DiagnosticCause,
@@ -142,7 +144,13 @@ pub(crate) enum DiagnosticEvent {
     FailedServiceEnable {
         cause: DiagnosticCause,
     },
+    FailedServiceDisable {
+        cause: DiagnosticCause,
+    },
     FailedServiceVerify {
+        cause: DiagnosticCause,
+    },
+    FailedDescriptorRemove {
         cause: DiagnosticCause,
     },
     FailedManifest {
@@ -257,7 +265,9 @@ impl Diagnostics {
             DiagnosticEvent::CompletedServiceUnit => "completed service-unit".to_owned(),
             DiagnosticEvent::CompletedDaemonReload => "completed daemon-reload".to_owned(),
             DiagnosticEvent::CompletedServiceEnable => "completed service-enable".to_owned(),
+            DiagnosticEvent::CompletedServiceDisable => "completed service-disable".to_owned(),
             DiagnosticEvent::CompletedServiceVerify => "completed service-verify".to_owned(),
+            DiagnosticEvent::CompletedDescriptorRemove => "completed descriptor-remove".to_owned(),
             DiagnosticEvent::CompletedManifest => "completed manifest".to_owned(),
             DiagnosticEvent::FailedPreflight { cause } => {
                 format!("failed preflight ({})", cause.label())
@@ -292,8 +302,14 @@ impl Diagnostics {
             DiagnosticEvent::FailedServiceEnable { cause } => {
                 format!("failed service-enable ({})", cause.label())
             }
+            DiagnosticEvent::FailedServiceDisable { cause } => {
+                format!("failed service-disable ({})", cause.label())
+            }
             DiagnosticEvent::FailedServiceVerify { cause } => {
                 format!("failed service-verify ({})", cause.label())
+            }
+            DiagnosticEvent::FailedDescriptorRemove { cause } => {
+                format!("failed descriptor-remove ({})", cause.label())
             }
             DiagnosticEvent::FailedManifest { cause } => {
                 format!("failed manifest ({})", cause.label())
@@ -416,7 +432,9 @@ mod tests {
             DiagnosticEvent::CompletedServiceUnit,
             DiagnosticEvent::CompletedDaemonReload,
             DiagnosticEvent::CompletedServiceEnable,
+            DiagnosticEvent::CompletedServiceDisable,
             DiagnosticEvent::CompletedServiceVerify,
+            DiagnosticEvent::CompletedDescriptorRemove,
             DiagnosticEvent::CompletedManifest,
             DiagnosticEvent::FailedPreflight {
                 cause: DiagnosticCause::Validation,
@@ -450,6 +468,12 @@ mod tests {
             },
             DiagnosticEvent::FailedServiceEnable {
                 cause: DiagnosticCause::ServiceStart,
+            },
+            DiagnosticEvent::FailedServiceDisable {
+                cause: DiagnosticCause::ServiceStop,
+            },
+            DiagnosticEvent::FailedDescriptorRemove {
+                cause: DiagnosticCause::Cleanup,
             },
             DiagnosticEvent::FailedManifest {
                 cause: DiagnosticCause::Validation,

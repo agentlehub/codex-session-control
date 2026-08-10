@@ -804,14 +804,17 @@ async fn disabled_update_retains_desktop_identity_without_publishing_then_enable
         cwd: setup.cwd,
     })
     .await
-    .unwrap();
+    .unwrap()
+    .render();
     let authority = starter.await.unwrap();
 
     assert_eq!(
         fs::read(&attachment.descriptor_path).unwrap(),
         render_descriptor(&fixture.paths.socket).unwrap()
     );
-    assert!(enabled.stdout.contains("Desktop restart required: yes\n"));
+    assert!(enabled.stdout.contains(
+        "If Codex Desktop is already running, restart it to make Codex Session Control available there."
+    ));
     drop(authority);
 }
 

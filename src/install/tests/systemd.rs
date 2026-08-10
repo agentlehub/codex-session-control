@@ -261,7 +261,8 @@ pub(super) async fn run_disposable_systemd_user() {
         let disable_error = disable_with_context(base_lifecycle.clone())
             .await
             .unwrap_err()
-            .to_string();
+            .render()
+            .stderr;
         assert_eq!(
             snapshot_live_guarded_state(&target.paths, &desktop_descriptor),
             guarded
@@ -303,7 +304,8 @@ pub(super) async fn run_disposable_systemd_user() {
         let unavailable_disable_error = disable_with_context(base_lifecycle.clone())
             .await
             .unwrap_err()
-            .to_string();
+            .render()
+            .stderr;
         assert_eq!(
             snapshot_live_guarded_state(&target.paths, &desktop_descriptor),
             guarded

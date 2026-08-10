@@ -12,7 +12,7 @@ mod test_support;
 
 use cli::{Cli, Command};
 use cli_output::RenderedCli;
-use diagnostics::{DiagnosticCommand, Diagnostics};
+use diagnostics::{DiagnosticCause, DiagnosticCommand, DiagnosticEvent, Diagnostics};
 use error::ControllerError;
 use std::io::{self, Write};
 
@@ -104,16 +104,37 @@ async fn run(cli: Cli) -> Result<ProcessOutcome, ControllerError> {
         return Ok(ProcessOutcome::Exit(if report.healthy { 0 } else { 1 }));
     }
     if matches!(&cli.command, Command::Enable | Command::Disable) {
-        let paths = install::ResolvedUserPaths::from_effective_user()?;
-        let target = install::LifecycleTarget::production(paths);
-        let report = match &cli.command {
-            Command::Enable => install::enable(target).await?,
-            Command::Disable => install::disable(target).await?,
+        let command = match &cli.command {
+            Command::Enable => DiagnosticCommand::Enable,
+            Command::Disable => DiagnosticCommand::Disable,
             _ => unreachable!("guarded above"),
         };
-        eprint!("{}", report.stderr);
-        print!("{}", report.stdout);
-        return Ok(ProcessOutcome::Exit(0));
+        let mut diagnostics = Diagnostics::new(verbose, command);
+        let result = match install::ResolvedUserPaths::from_effective_user() {
+            Ok(paths) => {
+                let target = install::LifecycleTarget::production(paths);
+                match &cli.command {
+                    Command::Enable => install::enable(target, &mut diagnostics).await,
+                    Command::Disable => install::disable(target, &mut diagnostics).await,
+                    _ => unreachable!("guarded above"),
+                }
+            }
+            Err(_) => {
+                diagnostics.emit(DiagnosticEvent::FailedPreflight {
+                    cause: DiagnosticCause::Validation,
+                });
+                Err(cli_output::UserFailure::Ordinary(match &cli.command {
+                    Command::Enable => cli_output::OrdinaryFailure::EnableUnexpectedRetry,
+                    Command::Disable => cli_output::OrdinaryFailure::DisableUnexpectedRetry,
+                    _ => unreachable!("guarded above"),
+                }))
+            }
+        };
+        diagnostics.flush();
+        return Ok(ProcessOutcome::Render(match result {
+            Ok(success) => success.render(),
+            Err(failure) => failure.render(),
+        }));
     }
     if matches!(&cli.command, Command::Uninstall) {
         let paths = install::ResolvedUserPaths::from_effective_user()?;

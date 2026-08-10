@@ -5,7 +5,6 @@ use std::{
 };
 
 use crate::{
-    cli_output::RunningClientFacts,
     desktop::{
         DescriptorPublicationFailure, DescriptorPublicationResidue, DesktopTarget,
         remove_expected_descriptor, render_descriptor,
@@ -33,28 +32,6 @@ use service::{ServiceActivity, query_service_activity, verify_absent_control_soc
 
 const DESKTOP_DETACH_GUIDANCE: &str =
     "Desktop: fully exit and restart Desktop to return to ordinary mode.\n";
-
-fn append_legacy_unattached_client_guidance(stdout: &mut String, facts: &RunningClientFacts) {
-    let mut clients = Vec::new();
-    if facts.cli {
-        clients.push("CLI");
-    }
-    if facts.desktop {
-        clients.push("Desktop");
-    }
-    if clients.is_empty() {
-        return;
-    }
-    stdout.push_str(&format!(
-        "Unattached running clients: {}\n",
-        clients.join(", ")
-    ));
-    stdout.push_str(
-        "This running client was not attached or migrated.\n\
-Desktop: fully exit and restart Desktop to use the shared app-server.\n\
-CLI: exit and resume through codex-session-control codex.\n",
-    );
-}
 
 fn display_command_for_paths(paths: &ResolvedUserPaths, path_environment: &OsStr) -> String {
     let install_bin = paths.home.join(".local/bin");

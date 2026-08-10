@@ -80,6 +80,7 @@ enum SetupStage {
 }
 
 impl SetupStage {
+    #[cfg(test)]
     const fn name(self) -> &'static str {
         match self {
             Self::Preflight => "preflight",
@@ -148,11 +149,11 @@ fn setup_failed(
 fn complete_setup_stage(
     diagnostics: &mut Diagnostics,
     stage: SetupStage,
-    target: &LifecycleTarget,
+    _target: &LifecycleTarget,
 ) -> Result<(), UserFailure> {
     diagnostics.emit(stage.completed_event());
     #[cfg(test)]
-    if target.test_hooks.fail_after_completed_stage == Some(stage.name()) {
+    if _target.test_hooks.fail_after_completed_stage == Some(stage.name()) {
         return Err(setup_failed(
             diagnostics,
             stage,
@@ -281,6 +282,7 @@ pub(crate) async fn setup(
     .await
 }
 
+#[cfg(test)]
 pub(super) async fn setup_with_context(context: SetupContext) -> Result<UserSuccess, UserFailure> {
     let mut diagnostics = Diagnostics::new(false, crate::diagnostics::DiagnosticCommand::Setup);
     setup_with_context_and_diagnostics(context, &mut diagnostics).await

@@ -21,7 +21,10 @@ use crate::{
 
 use super::{
     CandidateRelease, DESKTOP_DETACH_GUIDANCE, LifecycleContext,
-    enable_disable::{disable_with_context, enable_with_context},
+    enable_disable::{
+        disable_with_context, disable_with_context_and_diagnostics, enable_publication_failure,
+        enable_service_failure, enable_with_context, enable_with_context_and_diagnostics,
+    },
     evidence::{
         InstalledEvidenceCase, InvalidEvidence, NativeProductResidue, ResolvedUserPaths,
         SelectedHomeOperation, StoredEvidence, classify_selected_home_evidence,
