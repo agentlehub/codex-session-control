@@ -108,10 +108,7 @@ fn enable_disable_pure_failure_mappings_are_exact() {
     );
 
     assert_eq!(
-        enable_publication_failure(DescriptorPublicationFailure {
-            source: ControllerError::Operational("sentinel".to_owned()),
-            residue: None,
-        }),
+        enable_publication_failure(DescriptorPublicationFailure { residue: None }),
         UserFailure::Ordinary(OrdinaryFailure::EnableDesktopIntegrationRetry)
     );
     for residue in [
@@ -120,7 +117,6 @@ fn enable_disable_pure_failure_mappings_are_exact() {
     ] {
         assert!(matches!(
             enable_publication_failure(DescriptorPublicationFailure {
-                source: ControllerError::Operational("sentinel".to_owned()),
                 residue: Some(residue),
             }),
             UserFailure::RollbackIncomplete(_)
@@ -147,7 +143,6 @@ fn enable_disable_pure_failure_mappings_are_exact() {
             StopThenRetry::EnableServiceStateStopThenEnable,
             true,
             Err(DescriptorPublicationFailure {
-                source: ControllerError::Operational("sentinel".to_owned()),
                 residue: Some(DescriptorPublicationResidue::Final(PathBuf::from(
                     "/managed/final",
                 ))),

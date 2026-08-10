@@ -140,10 +140,7 @@ fn setup_pure_failure_mappings_are_exact() {
         UserFailure::Ordinary(OrdinaryFailure::SetupCliIntegrationCheckStatus)
     );
 
-    let clean = DescriptorPublicationFailure {
-        source: ControllerError::Operational("sentinel".to_owned()),
-        residue: None,
-    };
+    let clean = DescriptorPublicationFailure { residue: None };
     assert_eq!(
         setup_descriptor_publication_failure(clean),
         UserFailure::Ordinary(OrdinaryFailure::SetupDesktopIntegrationRetry)
@@ -154,7 +151,6 @@ fn setup_pure_failure_mappings_are_exact() {
     ] {
         assert!(matches!(
             setup_descriptor_publication_failure(DescriptorPublicationFailure {
-                source: ControllerError::Operational("sentinel".to_owned()),
                 residue: Some(residue),
             }),
             UserFailure::RollbackIncomplete(_)

@@ -133,26 +133,20 @@ fn cleanup_changed_descriptor_after_start_failure(
         .zip(descriptor)
         .expect("changed Desktop descriptor has exact identity and bytes");
     let residue = desktop.identity.descriptor_path.clone();
-    let failed = |source| DescriptorPublicationFailure {
-        source,
+    let failed = || DescriptorPublicationFailure {
         residue: Some(DescriptorPublicationResidue::Final(residue.clone())),
     };
     match query_service_activity(systemctl, &target.unit_name) {
         ServiceActivity::Active => {
-            return Err(failed(ControllerError::Operational(
-                "service is active; exact Desktop descriptor was retained".to_owned(),
-            )));
+            return Err(failed());
         }
         ServiceActivity::Unproven => {
-            return Err(failed(ControllerError::Operational(
-                "service activity could not be proven; exact Desktop descriptor was retained"
-                    .to_owned(),
-            )));
+            return Err(failed());
         }
         ServiceActivity::Inactive => {}
     }
-    verify_absent_control_socket(target).map_err(&failed)?;
-    remove_expected_descriptor(&desktop.identity, descriptor).map_err(failed)?;
+    verify_absent_control_socket(target).map_err(|_| failed())?;
+    remove_expected_descriptor(&desktop.identity, descriptor).map_err(|_| failed())?;
     Ok(())
 }
 

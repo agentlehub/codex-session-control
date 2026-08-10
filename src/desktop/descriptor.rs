@@ -22,6 +22,20 @@ pub(crate) enum DescriptorState {
     Foreign,
 }
 
+#[derive(Debug)]
+pub(crate) enum DescriptorInspectionFailure {
+    Fault(ControllerError),
+    Inconclusive(ControllerError),
+}
+
+impl DescriptorInspectionFailure {
+    fn into_source(self) -> ControllerError {
+        match self {
+            Self::Fault(source) | Self::Inconclusive(source) => source,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum DescriptorPublicationResidue {
     Stage(PathBuf),
@@ -38,16 +52,12 @@ impl DescriptorPublicationResidue {
 
 #[derive(Debug)]
 pub(crate) struct DescriptorPublicationFailure {
-    pub(crate) source: ControllerError,
     pub(crate) residue: Option<DescriptorPublicationResidue>,
 }
 
 impl DescriptorPublicationFailure {
-    fn clean(source: ControllerError) -> Self {
-        Self {
-            source,
-            residue: None,
-        }
+    fn clean() -> Self {
+        Self { residue: None }
     }
 }
 
@@ -73,17 +83,26 @@ pub(crate) fn inspect_descriptor(
     identity: &DesktopAttachmentIdentity,
     expected: &[u8],
 ) -> Result<DescriptorState, ControllerError> {
-    identity.validate()?;
-    let expected = parse_descriptor(expected)?;
-    let parent = match open_descriptor_parent(identity)? {
+    inspect_descriptor_classified(identity, expected)
+        .map_err(DescriptorInspectionFailure::into_source)
+}
+
+pub(crate) fn inspect_descriptor_classified(
+    identity: &DesktopAttachmentIdentity,
+    expected: &[u8],
+) -> Result<DescriptorState, DescriptorInspectionFailure> {
+    identity
+        .validate()
+        .map_err(DescriptorInspectionFailure::Fault)?;
+    let expected = parse_descriptor(expected).map_err(DescriptorInspectionFailure::Fault)?;
+    let parent = match open_descriptor_parent_classified(identity)? {
         Some(parent) => parent,
         None => return Ok(DescriptorState::Absent),
     };
-    let file_name = identity
-        .descriptor_path
-        .file_name()
-        .ok_or_else(|| desktop_error("descriptor path has no file name"))?;
-    inspect_open_descriptor(&parent, file_name, &expected)
+    let file_name = identity.descriptor_path.file_name().ok_or_else(|| {
+        DescriptorInspectionFailure::Fault(desktop_error("descriptor path has no file name"))
+    })?;
+    inspect_open_descriptor_classified(&parent, file_name, &expected)
 }
 
 pub(super) fn inspect_open_descriptor(
@@ -91,6 +110,15 @@ pub(super) fn inspect_open_descriptor(
     file_name: &OsStr,
     expected: &DescriptorDocument,
 ) -> Result<DescriptorState, ControllerError> {
+    inspect_open_descriptor_classified(parent, file_name, expected)
+        .map_err(DescriptorInspectionFailure::into_source)
+}
+
+fn inspect_open_descriptor_classified(
+    parent: &File,
+    file_name: &OsStr,
+    expected: &DescriptorDocument,
+) -> Result<DescriptorState, DescriptorInspectionFailure> {
     let file = match rustix::fs::openat(
         parent,
         Path::new(file_name),
@@ -99,24 +127,29 @@ pub(super) fn inspect_open_descriptor(
     ) {
         Ok(file) => File::from(file),
         Err(error) if error == rustix::io::Errno::NOENT => return Ok(DescriptorState::Absent),
-        Err(_) => return Err(desktop_error("descriptor cannot be opened safely")),
+        Err(_) => {
+            return Err(DescriptorInspectionFailure::Inconclusive(desktop_error(
+                "descriptor cannot be opened safely",
+            )));
+        }
     };
-    let metadata = file
-        .metadata()
-        .map_err(|_| desktop_error("descriptor cannot be inspected"))?;
+    let metadata = file.metadata().map_err(|_| {
+        DescriptorInspectionFailure::Inconclusive(desktop_error("descriptor cannot be inspected"))
+    })?;
     if !metadata.file_type().is_file()
         || metadata.uid() != effective_uid()
         || metadata.mode() & 0o7777 != 0o600
     {
-        return Err(desktop_error(
+        return Err(DescriptorInspectionFailure::Fault(desktop_error(
             "descriptor is not an owner-only regular file",
-        ));
+        )));
     }
     let mut bytes = Vec::new();
     let mut file = file;
-    file.read_to_end(&mut bytes)
-        .map_err(|_| desktop_error("descriptor cannot be read"))?;
-    let actual = parse_descriptor(&bytes)?;
+    file.read_to_end(&mut bytes).map_err(|_| {
+        DescriptorInspectionFailure::Inconclusive(desktop_error("descriptor cannot be read"))
+    })?;
+    let actual = parse_descriptor(&bytes).map_err(DescriptorInspectionFailure::Fault)?;
     Ok(if &actual == expected {
         DescriptorState::Expected
     } else {
@@ -185,37 +218,30 @@ fn publish_descriptor_internal(
 ) -> Result<bool, DescriptorPublicationFailure> {
     identity
         .validate()
-        .map_err(DescriptorPublicationFailure::clean)?;
+        .map_err(|_| DescriptorPublicationFailure::clean())?;
     let expected_document =
-        parse_descriptor(expected).map_err(DescriptorPublicationFailure::clean)?;
-    prepare_descriptor_parent(identity).map_err(DescriptorPublicationFailure::clean)?;
+        parse_descriptor(expected).map_err(|_| DescriptorPublicationFailure::clean())?;
+    prepare_descriptor_parent(identity).map_err(|_| DescriptorPublicationFailure::clean())?;
     let parent = open_descriptor_parent(identity)
-        .map_err(DescriptorPublicationFailure::clean)?
-        .ok_or_else(|| {
-            DescriptorPublicationFailure::clean(desktop_error(
-                "descriptor parent disappeared after preparation",
-            ))
-        })?;
-    let file_name = identity.descriptor_path.file_name().ok_or_else(|| {
-        DescriptorPublicationFailure::clean(desktop_error("descriptor path has no file name"))
-    })?;
+        .map_err(|_| DescriptorPublicationFailure::clean())?
+        .ok_or_else(DescriptorPublicationFailure::clean)?;
+    let file_name = identity
+        .descriptor_path
+        .file_name()
+        .ok_or_else(DescriptorPublicationFailure::clean)?;
     match inspect_open_descriptor(&parent, file_name, &expected_document)
-        .map_err(DescriptorPublicationFailure::clean)?
+        .map_err(|_| DescriptorPublicationFailure::clean())?
     {
         DescriptorState::Expected => return Ok(false),
         DescriptorState::Foreign => {
-            return Err(DescriptorPublicationFailure::clean(desktop_error(
-                "Desktop descriptor is foreign",
-            )));
+            return Err(DescriptorPublicationFailure::clean());
         }
         DescriptorState::Absent => {}
     }
 
     #[cfg(test)]
     if test_point == Some(DescriptorPublicationTestPoint::BeforeStage) {
-        return Err(DescriptorPublicationFailure::clean(desktop_error(
-            "injected failure before descriptor stage",
-        )));
+        return Err(DescriptorPublicationFailure::clean());
     }
 
     let temporary = OsString::from(format!(
@@ -237,11 +263,7 @@ fn publish_descriptor_internal(
         Mode::RUSR | Mode::WUSR,
     )
     .map(File::from)
-    .map_err(|_| {
-        DescriptorPublicationFailure::clean(desktop_error(
-            "descriptor stage file cannot be created safely",
-        ))
-    })?;
+    .map_err(|_| DescriptorPublicationFailure::clean())?;
 
     #[cfg(test)]
     if let Some(DescriptorPublicationTestPoint::AfterStage { cleanup_unverified }) = test_point {
@@ -251,10 +273,7 @@ fn publish_descriptor_internal(
         } else {
             cleanup_descriptor_stage(&parent, temporary_path, &temporary_full_path)
         };
-        return Err(DescriptorPublicationFailure {
-            source: desktop_error("injected failure after descriptor stage"),
-            residue,
-        });
+        return Err(DescriptorPublicationFailure { residue });
     }
 
     let mut renamed = false;
@@ -290,7 +309,7 @@ fn publish_descriptor_internal(
     })();
     match result {
         Ok(changed) => Ok(changed),
-        Err(source) => {
+        Err(_) => {
             let residue = if renamed {
                 Some(DescriptorPublicationResidue::Final(
                     identity.descriptor_path.clone(),
@@ -298,7 +317,7 @@ fn publish_descriptor_internal(
             } else {
                 cleanup_descriptor_stage(&parent, temporary_path, &temporary_full_path)
             };
-            Err(DescriptorPublicationFailure { source, residue })
+            Err(DescriptorPublicationFailure { residue })
         }
     }
 }
@@ -556,29 +575,38 @@ fn validate_existing_owned_directory(path: &Path) -> Result<(), ControllerError>
 pub(super) fn open_descriptor_parent(
     identity: &DesktopAttachmentIdentity,
 ) -> Result<Option<File>, ControllerError> {
-    let parent = identity
-        .descriptor_path
-        .parent()
-        .ok_or_else(|| desktop_error("descriptor path has no parent"))?;
-    let mut directory = open_root_directory()?;
+    open_descriptor_parent_classified(identity).map_err(DescriptorInspectionFailure::into_source)
+}
+
+fn open_descriptor_parent_classified(
+    identity: &DesktopAttachmentIdentity,
+) -> Result<Option<File>, DescriptorInspectionFailure> {
+    let parent = identity.descriptor_path.parent().ok_or_else(|| {
+        DescriptorInspectionFailure::Fault(desktop_error("descriptor path has no parent"))
+    })?;
+    let mut directory = open_root_directory().map_err(DescriptorInspectionFailure::Inconclusive)?;
     let mut entered_user_tree = directory
         .metadata()
-        .map_err(|_| desktop_error("descriptor ancestor cannot be inspected"))?
+        .map_err(|_| {
+            DescriptorInspectionFailure::Inconclusive(desktop_error(
+                "descriptor ancestor cannot be inspected",
+            ))
+        })?
         .uid()
         == effective_uid();
     for component in parent.components() {
         let Component::Normal(component) = component else {
             continue;
         };
-        match open_directory(&directory, component, &mut entered_user_tree)? {
+        match open_directory_classified(&directory, component, &mut entered_user_tree)? {
             Some(next) => directory = next,
             None => return Ok(None),
         }
     }
     if !entered_user_tree {
-        return Err(desktop_error(
+        return Err(DescriptorInspectionFailure::Fault(desktop_error(
             "descriptor parent is not owned by the effective user",
-        ));
+        )));
     }
     Ok(Some(directory))
 }
@@ -599,6 +627,15 @@ fn open_directory(
     component: &OsStr,
     entered_user_tree: &mut bool,
 ) -> Result<Option<File>, ControllerError> {
+    open_directory_classified(parent, component, entered_user_tree)
+        .map_err(DescriptorInspectionFailure::into_source)
+}
+
+fn open_directory_classified(
+    parent: &File,
+    component: &OsStr,
+    entered_user_tree: &mut bool,
+) -> Result<Option<File>, DescriptorInspectionFailure> {
     let directory = rustix::fs::openat(
         parent.as_fd(),
         Path::new(component),
@@ -610,20 +647,28 @@ fn open_directory(
         Err(error) if error == rustix::io::Errno::NOENT => {
             return Ok(None);
         }
-        Err(_) => return Err(desktop_error("descriptor ancestor cannot be opened safely")),
+        Err(_) => {
+            return Err(DescriptorInspectionFailure::Inconclusive(desktop_error(
+                "descriptor ancestor cannot be opened safely",
+            )));
+        }
     };
-    let metadata = directory
-        .metadata()
-        .map_err(|_| desktop_error("descriptor ancestor cannot be inspected"))?;
+    let metadata = directory.metadata().map_err(|_| {
+        DescriptorInspectionFailure::Inconclusive(desktop_error(
+            "descriptor ancestor cannot be inspected",
+        ))
+    })?;
     if !metadata.file_type().is_dir() || metadata.mode() & 0o022 != 0 {
-        return Err(desktop_error("descriptor ancestor is unsafe"));
+        return Err(DescriptorInspectionFailure::Fault(desktop_error(
+            "descriptor ancestor is unsafe",
+        )));
     }
     if metadata.uid() == effective_uid() {
         *entered_user_tree = true;
     } else if *entered_user_tree {
-        return Err(desktop_error(
+        return Err(DescriptorInspectionFailure::Fault(desktop_error(
             "descriptor ancestor leaves the effective-user tree",
-        ));
+        )));
     }
     Ok(Some(directory))
 }

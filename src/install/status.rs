@@ -13,8 +13,8 @@ use crate::{
     app_server::{AppServerClient, socket_mode_is_owner_only},
     cli_output::{IntegrationState, ServiceSummary, StatusProblem, StatusResult, StatusState},
     desktop::{
-        DescriptorState, DesktopStructure, inspect_descriptor, inspect_desktop_structure,
-        render_descriptor,
+        DescriptorInspectionFailure, DescriptorState, DesktopStructure,
+        inspect_descriptor_classified, inspect_desktop_structure, render_descriptor,
     },
     diagnostics::{DiagnosticCause, Diagnostics},
     error::ControllerError,
@@ -639,15 +639,20 @@ fn inspect_status_descriptor(
             return DescriptorStatusEvidence::Unverified;
         }
     };
-    match inspect_descriptor(identity, &expected) {
+    match inspect_descriptor_classified(identity, &expected) {
         Ok(DescriptorState::Foreign) => {
             push_problem(problems, StatusProblem::DesktopDescriptorFault);
             DescriptorStatusEvidence::NotReady
         }
         Ok(DescriptorState::Absent) => DescriptorStatusEvidence::NotReady,
         Ok(DescriptorState::Expected) => DescriptorStatusEvidence::Expected,
-        Err(error) => {
-            let evidence = classify_descriptor_inspection_error(&error);
+        Err(failure) => {
+            let evidence = match failure {
+                DescriptorInspectionFailure::Fault(_) => DescriptorStatusEvidence::NotReady,
+                DescriptorInspectionFailure::Inconclusive(_) => {
+                    DescriptorStatusEvidence::Unverified
+                }
+            };
             push_problem(
                 problems,
                 if evidence == DescriptorStatusEvidence::NotReady {
@@ -658,28 +663,6 @@ fn inspect_status_descriptor(
             );
             evidence
         }
-    }
-}
-
-fn classify_descriptor_inspection_error(error: &ControllerError) -> DescriptorStatusEvidence {
-    const PREFIX: &str = "Desktop descriptor safety error: ";
-
-    match error {
-        ControllerError::InvalidData { .. } => DescriptorStatusEvidence::NotReady,
-        ControllerError::Operational(detail) => match detail.strip_prefix(PREFIX) {
-            Some(
-                "descriptor ancestor is unsafe"
-                | "descriptor ancestor leaves the effective-user tree"
-                | "descriptor parent is not owned by the effective user"
-                | "descriptor is not an owner-only regular file"
-                | "descriptor JSON is invalid"
-                | "descriptor schema is unsupported"
-                | "descriptor socket path must be UTF-8"
-                | "descriptor socket path is not a normalized absolute path",
-            ) => DescriptorStatusEvidence::NotReady,
-            // Safe-open, metadata, read, race, and unknown inspection failures do not prove drift.
-            _ => DescriptorStatusEvidence::Unverified,
-        },
     }
 }
 

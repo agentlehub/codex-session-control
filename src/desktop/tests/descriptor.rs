@@ -8,13 +8,13 @@ use crate::model::DesktopAttachmentIdentity;
 
 use super::{
     super::{
-        DESCRIPTOR_FILE_NAME, DescriptorState,
+        DESCRIPTOR_FILE_NAME, DescriptorInspectionFailure, DescriptorState,
         descriptor::{
             DescriptorPublicationResidue, DescriptorPublicationTestPoint, inspect_open_descriptor,
             open_descriptor_parent, parse_descriptor, publish_descriptor_with_test_point,
         },
-        inspect_descriptor, preflight_descriptor_switch, prepare_descriptor_parent,
-        remove_expected_descriptor, render_descriptor,
+        inspect_descriptor, inspect_descriptor_classified, preflight_descriptor_switch,
+        prepare_descriptor_parent, remove_expected_descriptor, render_descriptor,
     },
     write_file,
 };
@@ -291,6 +291,10 @@ fn descriptor_bytes_and_open_parent_race_checks_are_exact_and_non_following() {
     assert!(
         inspect_open_descriptor(&parent, file_name, &parse_descriptor(&expected).unwrap()).is_err()
     );
+    assert!(matches!(
+        inspect_descriptor_classified(&identity, &expected),
+        Err(DescriptorInspectionFailure::Inconclusive(_))
+    ));
     fs::remove_file(&identity.descriptor_path).unwrap();
     fs::set_permissions(
         identity.descriptor_path.parent().unwrap(),
@@ -298,6 +302,10 @@ fn descriptor_bytes_and_open_parent_race_checks_are_exact_and_non_following() {
     )
     .unwrap();
     assert!(inspect_descriptor(&identity, &expected).is_err());
+    assert!(matches!(
+        inspect_descriptor_classified(&identity, &expected),
+        Err(DescriptorInspectionFailure::Fault(_))
+    ));
 }
 
 #[test]

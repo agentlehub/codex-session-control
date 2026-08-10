@@ -322,10 +322,7 @@ fn update_producer_boundaries_select_complete_failures() {
     );
 
     assert_eq!(
-        update_descriptor_publication_failure(DescriptorPublicationFailure {
-            source: ControllerError::Operational("sentinel".to_owned()),
-            residue: None,
-        }),
+        update_descriptor_publication_failure(DescriptorPublicationFailure { residue: None }),
         UserFailure::Ordinary(OrdinaryFailure::UpdateDesktopIntegrationRetry)
     );
     for residue in [
@@ -338,7 +335,6 @@ fn update_producer_boundaries_select_complete_failures() {
         };
         assert_eq!(
             update_descriptor_publication_failure(DescriptorPublicationFailure {
-                source: ControllerError::Operational("sentinel".to_owned()),
                 residue: Some(residue),
             }),
             UserFailure::RollbackIncomplete(RollbackIncomplete::new(

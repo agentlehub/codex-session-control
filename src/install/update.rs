@@ -272,7 +272,6 @@ pub(super) fn update_cli_reconciliation_failure(error: &ControllerError) -> User
 pub(super) fn update_descriptor_publication_failure(
     failure: DescriptorPublicationFailure,
 ) -> UserFailure {
-    let _ = &failure.source;
     match failure.residue {
         None => UserFailure::Ordinary(OrdinaryFailure::UpdateDesktopIntegrationRetry),
         Some(residue) => UserFailure::RollbackIncomplete(RollbackIncomplete::new(
@@ -1000,7 +999,7 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
         UserFailure::Ordinary(OrdinaryFailure::UpdateInstallationFilesRetry),
     )?;
 
-    let projection_changed = reconcile_projection(paths, &desired_projection).map_err(|error| {
+    reconcile_projection(paths, &desired_projection).map_err(|error| {
         let failure = update_cli_reconciliation_failure(&error);
         super::fail_with_diagnostic(
             diagnostics,
@@ -1016,16 +1015,15 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
         cli_failure(),
     )?;
 
-    let marketplace_changed = reconcile_marketplace(&codex, &paths.codex_home, &paths.marketplace)
-        .map_err(|error| {
-            let failure = update_cli_reconciliation_failure(&error);
-            super::fail_with_diagnostic(
-                diagnostics,
-                UpdateStage::PluginMarketplace.diagnostic_name(),
-                DiagnosticCause::CliIntegration,
-                failure,
-            )
-        })?;
+    reconcile_marketplace(&codex, &paths.codex_home, &paths.marketplace).map_err(|error| {
+        let failure = update_cli_reconciliation_failure(&error);
+        super::fail_with_diagnostic(
+            diagnostics,
+            UpdateStage::PluginMarketplace.diagnostic_name(),
+            DiagnosticCause::CliIntegration,
+            failure,
+        )
+    })?;
     complete_update_stage(
         diagnostics,
         UpdateStage::PluginMarketplace,
@@ -1033,7 +1031,7 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
         cli_failure(),
     )?;
 
-    let plugin_changed = reconcile_plugin(
+    reconcile_plugin(
         &codex,
         &paths.codex_home,
         &paths.marketplace,
@@ -1294,7 +1292,6 @@ pub(super) async fn staged_update_with_context_and_diagnostics(
     if desktop_warning.is_some() {
         notices.push(UserNotice::DesktopLauncherUnavailable);
     }
-    let _projection_changed = projection_changed || marketplace_changed || plugin_changed;
     Ok(UserSuccess::Update(UpdateSuccess::new(
         UpdateState::Applied,
         candidate_version,

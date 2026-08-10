@@ -322,49 +322,42 @@ pub(super) async fn setup_with_context_after_start(
     }
     complete_setup_stage(diagnostics, SetupStage::Configuration, &context.target)?;
 
-    let _projection_changed = match reconcile_projection(paths, &preflight.projection) {
-        Ok(changed) => changed,
-        Err(_) => {
-            return Err(super::fail_with_diagnostic(
-                diagnostics,
-                SetupStage::Projection.diagnostic_name(),
-                DiagnosticCause::CliIntegration,
-                UserFailure::Ordinary(OrdinaryFailure::SetupCliIntegrationRetry),
-            ));
-        }
-    };
+    reconcile_projection(paths, &preflight.projection).map_err(|_| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            SetupStage::Projection.diagnostic_name(),
+            DiagnosticCause::CliIntegration,
+            UserFailure::Ordinary(OrdinaryFailure::SetupCliIntegrationRetry),
+        )
+    })?;
     complete_setup_stage(diagnostics, SetupStage::Projection, &context.target)?;
 
-    let _marketplace_changed =
-        match reconcile_marketplace(&preflight.codex, &paths.codex_home, &paths.marketplace) {
-            Ok(changed) => changed,
-            Err(error) => {
-                return Err(super::fail_with_diagnostic(
-                    diagnostics,
-                    SetupStage::PluginMarketplace.diagnostic_name(),
-                    DiagnosticCause::CliIntegration,
-                    setup_cli_reconciliation_failure(&error),
-                ));
-            }
-        };
+    reconcile_marketplace(&preflight.codex, &paths.codex_home, &paths.marketplace).map_err(
+        |error| {
+            super::fail_with_diagnostic(
+                diagnostics,
+                SetupStage::PluginMarketplace.diagnostic_name(),
+                DiagnosticCause::CliIntegration,
+                setup_cli_reconciliation_failure(&error),
+            )
+        },
+    )?;
     complete_setup_stage(diagnostics, SetupStage::PluginMarketplace, &context.target)?;
 
-    let _plugin_changed = match reconcile_plugin(
+    reconcile_plugin(
         &preflight.codex,
         &paths.codex_home,
         &paths.marketplace,
         &context.candidate.product_version,
-    ) {
-        Ok(changed) => changed,
-        Err(error) => {
-            return Err(super::fail_with_diagnostic(
-                diagnostics,
-                SetupStage::PluginInstall.diagnostic_name(),
-                DiagnosticCause::CliIntegration,
-                setup_cli_reconciliation_failure(&error),
-            ));
-        }
-    };
+    )
+    .map_err(|error| {
+        super::fail_with_diagnostic(
+            diagnostics,
+            SetupStage::PluginInstall.diagnostic_name(),
+            DiagnosticCause::CliIntegration,
+            setup_cli_reconciliation_failure(&error),
+        )
+    })?;
     complete_setup_stage(diagnostics, SetupStage::PluginInstall, &context.target)?;
 
     complete_setup_stage(diagnostics, SetupStage::DesktopDiscovery, &context.target)?;
