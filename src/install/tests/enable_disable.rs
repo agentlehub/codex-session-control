@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, os::unix::fs::PermissionsExt};
 
 use super::support::{FakeAuthority, Fixture};
 use super::*;
@@ -420,7 +420,7 @@ async fn enable_with_null_attachment_does_not_auto_select_desktop() {
 }
 
 #[tokio::test]
-async fn enable_publishes_a_verified_persisted_descriptor_before_service_enable() {
+async fn enable_publishes_a_verified_descriptor_and_disable_reports_exact_residue() {
     let fixture = Fixture::new();
     let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
@@ -464,6 +464,21 @@ async fn enable_publishes_a_verified_persisted_descriptor_before_service_enable(
     assert!(report.stdout.contains(
         "If Codex Desktop is already running, restart it to make Codex Session Control available there."
     ));
+
+    fs::set_permissions(&descriptor, fs::Permissions::from_mode(0o644)).unwrap();
+    fixture.clear_logs();
+    let error = disable_with_context(context(&fixture)).await.unwrap_err();
+
+    assert!(matches!(
+        &error,
+        crate::cli_output::UserFailure::PartialDisable(_)
+    ));
+    assert!(
+        error
+            .render()
+            .stderr
+            .contains(&descriptor.display().to_string())
+    );
 }
 
 #[tokio::test]
@@ -667,7 +682,23 @@ async fn disable_without_install_metadata_stops_safely_and_reports_incomplete_de
 }
 
 #[tokio::test]
-async fn lifecycle_stage_failure_has_exact_exit_one_error_and_no_false_receipt() {
+async fn disable_producer_failures_have_exact_typed_results_and_preserve_state() {
+    let resolution = Fixture::new();
+    let _authority = FakeAuthority::start(&resolution.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(resolution.context(true)).await.unwrap();
+    let empty_bin = resolution._root.path().join("empty-bin");
+    fs::create_dir(&empty_bin).unwrap();
+    let mut resolution_context = context(&resolution);
+    resolution_context.path_environment = std::env::join_paths([empty_bin]).unwrap();
+    assert_eq!(
+        disable_with_context(resolution_context).await.unwrap_err(),
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::DisableServiceStopRetry
+        )
+    );
+    assert!(resolution.enabled.exists());
+    assert!(resolution.active.exists());
+
     let fixture = Fixture::new();
     let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     setup_with_context(fixture.context(true)).await.unwrap();
@@ -690,4 +721,20 @@ async fn lifecycle_stage_failure_has_exact_exit_one_error_and_no_false_receipt()
     assert!(fixture.enabled.is_file());
     assert!(fixture.active.is_file());
     assert!(fixture.paths.socket.exists());
+
+    let completed = Fixture::new();
+    let _authority = FakeAuthority::start(&completed.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(completed.context(true)).await.unwrap();
+    let mut completed_context = context(&completed);
+    completed_context.target = completed_context
+        .target
+        .fail_after_completed_stage("descriptor-remove");
+    assert_eq!(
+        disable_with_context(completed_context).await.unwrap_err(),
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::DisableUnexpectedCheckStatus
+        )
+    );
+    assert!(!completed.enabled.exists());
+    assert!(!completed.active.exists());
 }

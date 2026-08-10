@@ -544,6 +544,35 @@ async fn nonempty_product_root_preserves_unknown_content_as_terminal_partial() {
 
 #[tokio::test]
 async fn stop_or_verification_failure_removes_nothing_after_service_boundary() {
+    let resolution = Fixture::new();
+    let _authority = FakeAuthority::start(&resolution.paths, TESTED_CODEX_VERSION).await;
+    setup_with_context(resolution.context(true)).await.unwrap();
+    let empty_bin = resolution._root.path().join("empty-bin");
+    fs::create_dir(&empty_bin).unwrap();
+    resolution.clear_logs();
+    let mut resolution_context = context(&resolution);
+    resolution_context.path_environment = std::env::join_paths([empty_bin]).unwrap();
+    let error = uninstall_with_context(resolution_context)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::UninstallServiceStopRetry
+        )
+    );
+    for retained in [
+        &resolution.paths.unit,
+        &resolution.paths.marketplace,
+        &resolution.paths.config,
+        &resolution.paths.manifest,
+        &resolution.paths.binary,
+    ] {
+        assert!(retained.exists(), "{}", retained.display());
+    }
+    assert!(resolution.systemctl_log().is_empty());
+    assert!(resolution.codex_log().is_empty());
+
     for verification_failure in [false, true] {
         let fixture = Fixture::new();
         let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;

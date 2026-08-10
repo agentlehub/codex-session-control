@@ -500,7 +500,7 @@ async fn setup_service_verify_accepts_mode_0700_owner_only_socket() {
 }
 
 #[tokio::test]
-async fn manifestless_older_release_routes_to_its_exact_executable() {
+async fn manifestless_older_release_routes_to_its_exact_recovery() {
     let fixture = Fixture::new();
     let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     create_shared_dir(fixture.paths.binary.parent().unwrap(), fixture.paths.euid).unwrap();
@@ -524,6 +524,38 @@ async fn manifestless_older_release_routes_to_its_exact_executable() {
     );
     assert!(!fixture.paths.manifest.exists());
     assert!(fixture.systemctl_log().is_empty());
+
+    let plugin_fixture = Fixture::new();
+    for directory in [
+        plugin_fixture.paths.marketplace.clone(),
+        plugin_fixture.paths.marketplace.join("plugins"),
+        plugin_fixture
+            .paths
+            .marketplace
+            .join("plugins/codex-session-control/.codex-plugin"),
+    ] {
+        create_shared_dir(&directory, plugin_fixture.paths.euid).unwrap();
+    }
+    let plugin = plugin_fixture
+        .paths
+        .marketplace
+        .join("plugins/codex-session-control/.codex-plugin/plugin.json");
+    fs::write(&plugin, br#"{"version":"0.0.9"}"#).unwrap();
+    fs::set_permissions(&plugin, fs::Permissions::from_mode(0o644)).unwrap();
+
+    let error = setup_with_context(plugin_fixture.context(true))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        &error,
+        crate::cli_output::UserFailure::VerifiedRelease(_)
+    ));
+    let rendered = error.render();
+    assert!(rendered.stderr.contains("/releases/download/v0.0.9/"));
+    assert!(rendered.stderr.contains("/v0.0.9/SHA256SUMS"));
+    assert!(!plugin_fixture.paths.manifest.exists());
+    assert!(plugin_fixture.systemctl_log().is_empty());
 }
 
 #[tokio::test]
@@ -705,7 +737,20 @@ async fn exact_product_native_plugin_drift_is_repaired_without_marketplace_churn
 }
 
 #[tokio::test]
-async fn running_version_mismatch_and_stage_failure_never_write_manifest() {
+async fn preflight_mismatch_and_stage_failure_never_write_manifest() {
+    let candidate = Fixture::new();
+    let mut candidate_context = candidate.context(true);
+    candidate_context.candidate.target = "wrong-target".to_owned();
+    let error = setup_with_context(candidate_context).await.unwrap_err();
+    assert_eq!(
+        error,
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::SetupInstallationFilesRetry
+        )
+    );
+    assert!(!candidate.paths.manifest.exists());
+    assert!(candidate.systemctl_log().is_empty());
+
     let mismatch = Fixture::new();
     let untested_version = crate::test_support::different_stable_version(TESTED_CODEX_VERSION);
     let _authority = FakeAuthority::start(&mismatch.paths, &untested_version).await;
