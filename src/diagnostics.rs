@@ -92,7 +92,9 @@ pub(crate) enum DiagnosticEvent {
         version: Version,
     },
     StartingStagedCandidate,
+    StagedCandidateExitedSuccessfully,
     StagedMarkerAccepted,
+    CompletedServiceRestart,
     SelectedCodexHome {
         codex_home: PathBuf,
     },
@@ -284,7 +286,11 @@ impl Diagnostics {
                 format!("candidate {version} verified")
             }
             DiagnosticEvent::StartingStagedCandidate => "starting staged candidate".to_owned(),
+            DiagnosticEvent::StagedCandidateExitedSuccessfully => {
+                "staged candidate exited successfully".to_owned()
+            }
             DiagnosticEvent::StagedMarkerAccepted => "staged marker accepted".to_owned(),
+            DiagnosticEvent::CompletedServiceRestart => "completed service-restart".to_owned(),
             DiagnosticEvent::SelectedCodexHome { codex_home } => {
                 format!("selected Codex home {}", codex_home.display())
             }
@@ -506,8 +512,10 @@ mod tests {
             version: Version::parse("1.2.3").unwrap(),
         });
         diagnostics.emit(DiagnosticEvent::StartingStagedCandidate);
+        diagnostics.emit(DiagnosticEvent::StagedCandidateExitedSuccessfully);
         diagnostics.set_phase(UpdatePhase::Apply);
         diagnostics.emit(DiagnosticEvent::StagedMarkerAccepted);
+        diagnostics.emit(DiagnosticEvent::CompletedServiceRestart);
         diagnostics.emit(DiagnosticEvent::CompletedManifest);
 
         assert_eq!(
@@ -515,7 +523,9 @@ mod tests {
             [
                 "[verbose] update/outer: candidate 1.2.3 verified\n",
                 "[verbose] update/outer: starting staged candidate\n",
+                "[verbose] update/outer: staged candidate exited successfully\n",
                 "[verbose] update/apply: staged marker accepted\n",
+                "[verbose] update/apply: completed service-restart\n",
                 "[verbose] update/apply: completed manifest\n",
             ]
         );
@@ -569,7 +579,9 @@ mod tests {
                 version: Version::parse("1.2.3").unwrap(),
             },
             DiagnosticEvent::StartingStagedCandidate,
+            DiagnosticEvent::StagedCandidateExitedSuccessfully,
             DiagnosticEvent::StagedMarkerAccepted,
+            DiagnosticEvent::CompletedServiceRestart,
             DiagnosticEvent::SelectedCodexHome {
                 codex_home: PathBuf::from("/home/test/.codex"),
             },

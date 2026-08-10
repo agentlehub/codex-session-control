@@ -2,6 +2,36 @@ use std::{ffi::OsString, fs, os::unix::fs::PermissionsExt, path::PathBuf, sync::
 
 use super::support::{FakeAuthority, Fixture};
 use super::*;
+use crate::cli_output::{OrdinaryFailure, StopThenRetry, UserFailure};
+
+fn expected_staged_injection(stage: &str) -> UserFailure {
+    match stage {
+        "candidate-preflight" => UserFailure::Ordinary(OrdinaryFailure::UpdateChecksumRetry),
+        "service-snapshot" => UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStateCheckStatus),
+        "restart-inspection" => {
+            UserFailure::StopThenRetry(StopThenRetry::UpdateServiceStateDisableUpdateEnable)
+        }
+        "active-turn-gate" => UserFailure::Ordinary(OrdinaryFailure::UpdateActiveTasksRetry),
+        "binary" | "configuration" => {
+            UserFailure::Ordinary(OrdinaryFailure::UpdateInstallationFilesRetry)
+        }
+        "projection" | "plugin-marketplace" | "plugin-install" => {
+            UserFailure::Ordinary(OrdinaryFailure::UpdateCliIntegrationRetry)
+        }
+        "desktop-discovery" | "descriptor" => {
+            UserFailure::Ordinary(OrdinaryFailure::UpdateUnexpectedRetry)
+        }
+        "service-unit" | "daemon-reload" => {
+            UserFailure::Ordinary(OrdinaryFailure::UpdateServiceConfigurationLogs)
+        }
+        "service-apply" => UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStartLogs),
+        "service-verify" => UserFailure::Ordinary(OrdinaryFailure::UpdateServiceStateLogs),
+        "manifest" => {
+            UserFailure::Ordinary(OrdinaryFailure::UpdateInstalledStatePostMutationCheckStatus)
+        }
+        _ => panic!("unexpected staged update injection: {stage}"),
+    }
+}
 use serde_json::json;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -123,15 +153,6 @@ fn assert_no_backups(path: &Path) {
             assert_no_backups(&entry.path());
         }
     }
-}
-
-fn assert_injected(error: &ControllerError, stage: &str, command: &str) {
-    let error = error.to_string();
-    assert!(
-        error.contains(&format!("completed: {stage}\nfailed at {stage}:")),
-        "{error}"
-    );
-    assert!(error.contains(command), "{error}");
 }
 
 fn seed_preserved_normal_home_state(fixture: &Fixture) -> Vec<(PathBuf, Vec<u8>, u32)> {
@@ -297,31 +318,11 @@ async fn checksum_transfer_failure_is_reported_at_release_download_stage() {
             .await
             .unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("failed at release-download: release-download request failed"),
-        "{error}"
+    assert_eq!(
+        error,
+        UserFailure::Ordinary(OrdinaryFailure::UpdateReleaseRetry)
     );
     server.await.unwrap();
-}
-
-#[test]
-fn release_failure_stage_uses_typed_classification_not_display_text() {
-    let download = ReleaseDownloadError::Download(ControllerError::Operational(
-        "checksum mirror rejected the binary transfer".to_owned(),
-    ));
-    let integrity = ReleaseDownloadError::Integrity(ControllerError::Operational(
-        "release payload is not trusted".to_owned(),
-    ));
-
-    assert!(download.to_string().contains("checksum"));
-    assert!(!integrity.to_string().contains("checksum"));
-    assert_eq!(
-        release_failure_stage(&download),
-        UpdateStage::ReleaseDownload
-    );
-    assert_eq!(release_failure_stage(&integrity), UpdateStage::Checksum);
 }
 
 #[test]
@@ -378,13 +379,12 @@ async fn setup_retries_after_every_completed_stage_without_rollback() {
 }
 
 #[tokio::test]
-async fn outer_update_retries_every_release_and_candidate_apply_stage() {
+async fn outer_update_retries_every_pre_spawn_release_stage() {
     for stage in [
         "release-discovery",
         "release-download",
         "checksum",
         "candidate-preflight",
-        "candidate-apply",
     ] {
         let fixture = Fixture::new();
         let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
@@ -402,7 +402,17 @@ async fn outer_update_retries_every_release_and_candidate_apply_stage() {
             .await
             .unwrap_err();
 
-        assert_injected(&error, stage, "retry: codex-session-control update");
+        assert_eq!(
+            error,
+            UserFailure::Ordinary(
+                if matches!(stage, "release-discovery" | "release-download") {
+                    OrdinaryFailure::UpdateReleaseRetry
+                } else {
+                    OrdinaryFailure::UpdateChecksumRetry
+                }
+            ),
+            "{stage}"
+        );
         assert_no_backups(&fixture.paths.home);
         let report = outer_update_with_endpoints(
             LifecycleContext {
@@ -415,7 +425,10 @@ async fn outer_update_retries_every_release_and_candidate_apply_stage() {
         )
         .await
         .unwrap();
-        assert_eq!(report.stderr, "completed: candidate-apply\n");
+        assert_eq!(
+            report,
+            UpdateExecution::PropagateCandidateExit(CandidateExit::Zero)
+        );
         assert_eq!(
             installed(&fixture.paths).product_version,
             env!("CARGO_PKG_VERSION")
@@ -437,7 +450,7 @@ async fn outer_update_retries_every_release_and_candidate_apply_stage() {
                 .lines()
                 .filter(|line| *line == "update")
                 .count(),
-            if stage == "candidate-apply" { 2 } else { 1 }
+            1
         );
         server.abort();
     }
@@ -475,7 +488,10 @@ async fn outer_update_hands_off_after_independent_codex_version_change() {
             .await
             .unwrap();
 
-    assert_eq!(report.stderr, "completed: candidate-apply\n");
+    assert_eq!(
+        report,
+        UpdateExecution::PropagateCandidateExit(CandidateExit::Zero)
+    );
     assert_eq!(
         fs::read_to_string(candidate_log).unwrap(),
         "--version\nupdate\n"
@@ -518,7 +534,7 @@ async fn staged_update_retries_every_stage_for_running_and_stopped_services() {
             .await
             .unwrap_err();
 
-            assert_injected(&error, stage, "retry: codex-session-control update");
+            assert_eq!(error, expected_staged_injection(stage), "{stage}");
             let higher_version = higher_test_release_version();
             assert_eq!(
                 installed(&fixture.paths).product_version,
@@ -535,12 +551,11 @@ async fn staged_update_retries_every_stage_for_running_and_stopped_services() {
                     .await
                     .unwrap();
             assert!(
-                report
-                    .stdout
-                    .starts_with(&format!("Installed release: {higher_version}\n"))
-                    || report
-                        .stdout
-                        .starts_with(&format!("Already current: {higher_version}\n")),
+                report.stdout.starts_with(&format!(
+                    "Codex Session Control was updated to {higher_version}.\n"
+                )) || report.stdout.starts_with(&format!(
+                    "Codex Session Control {higher_version} is already up to date.\n"
+                )),
                 "{stage}: {}",
                 report.stdout
             );
@@ -587,10 +602,9 @@ async fn active_turn_gate_failure_retries_without_a_process_handoff() {
     .await
     .unwrap_err();
 
-    assert_injected(
-        &error,
-        "active-turn-gate",
-        "retry: codex-session-control update",
+    assert_eq!(
+        error,
+        UserFailure::Ordinary(OrdinaryFailure::UpdateActiveTasksRetry)
     );
     assert_eq!(fs::read(&fixture.paths.binary).unwrap(), before_binary);
     assert_eq!(fs::read(&fixture.paths.manifest).unwrap(), before_manifest);
@@ -610,7 +624,7 @@ async fn active_turn_gate_failure_retries_without_a_process_handoff() {
     let restarted_authority = starter.await.unwrap();
 
     assert!(report.stdout.starts_with(&format!(
-        "Installed release: {}\n",
+        "Codex Session Control was updated to {}.\n",
         higher_test_release_version()
     )));
     assert_eq!(installed(&fixture.paths).codex_executable, new_codex);

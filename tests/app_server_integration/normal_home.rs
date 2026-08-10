@@ -144,10 +144,10 @@ impl DisposableNormalHome {
         require_command_success("normal-home setup", &setup)?;
         let stages = String::from_utf8_lossy(&setup.stderr);
         let descriptor_stage = stages
-            .find("completed: descriptor\n")
+            .find("[verbose] setup: completed descriptor\n")
             .ok_or("setup did not execute the descriptor stage")?;
         let enable_stage = stages
-            .find("completed: service-enable\n")
+            .find("[verbose] setup: completed service-enable\n")
             .ok_or("setup did not execute the service-enable stage")?;
         assert!(descriptor_stage < enable_stage);
         assert!(self.desktop_descriptor()?.is_file());
@@ -176,7 +176,7 @@ impl DisposableNormalHome {
         drop(native);
 
         let before_disable = self.authority_identity().await?;
-        let disable = self.run_installed(["disable"]).await?;
+        let disable = self.run_installed(["--verbose", "disable"]).await?;
         require_command_success("normal-home disable", &disable)?;
         assert_shutdown_precedes_descriptor_removal("disable", &disable)?;
         assert!(!self.service_active().await?);
@@ -316,9 +316,22 @@ impl DisposableNormalHome {
 
         let (changed_controller, changed_codex_dir) = self.stage_changed_controller_and_native()?;
         let update = self
-            .run_staged_candidate(&changed_controller, ["update"], Some(&changed_codex_dir))
+            .run_staged_candidate(
+                &changed_controller,
+                ["--verbose", "update"],
+                Some(&changed_codex_dir),
+            )
             .await?;
         require_command_success("normal-home changed-executable update", &update)?;
+        let update_diagnostics = String::from_utf8_lossy(&update.stderr);
+        let restart = update_diagnostics
+            .find("[verbose] update/apply: completed service-restart\n")
+            .ok_or("staged update did not report its service restart")?;
+        let manifest = update_diagnostics
+            .find("[verbose] update/apply: completed manifest\n")
+            .ok_or("staged update did not report its manifest commit")?;
+        assert!(restart < manifest);
+        assert!(!update_diagnostics.contains("[verbose] update/outer:"));
         let replaced = self.authority_identity().await?;
         assert_ne!(replaced, authority);
         assert_eq!(self.live_ref()?.socket_path(), socket_path);
@@ -373,7 +386,7 @@ impl DisposableNormalHome {
         let same_byte_candidate = self.stage_same_byte_controller()?;
 
         let running_repair = self
-            .run_staged_candidate(&same_byte_candidate, ["update"], None)
+            .run_staged_candidate(&same_byte_candidate, ["--verbose", "update"], None)
             .await?;
         require_command_success("running projection reconciliation", &running_repair)?;
         assert!(projection.is_file());
@@ -387,12 +400,12 @@ impl DisposableNormalHome {
         live.assert_preserved_normal_state(&sentinels)?;
 
         drop(native);
-        let disable = self.run_installed(["disable"]).await?;
+        let disable = self.run_installed(["--verbose", "disable"]).await?;
         require_command_success("projection-case disable", &disable)?;
         assert!(!self.service_active().await?);
         fs::remove_file(&projection)?;
         let stopped_repair = self
-            .run_staged_candidate(&same_byte_candidate, ["update"], None)
+            .run_staged_candidate(&same_byte_candidate, ["--verbose", "update"], None)
             .await?;
         require_command_success("stopped projection reconciliation", &stopped_repair)?;
         assert!(projection.is_file());
@@ -432,7 +445,7 @@ impl DisposableNormalHome {
         let sentinels = live.seed_preserved_normal_state()?;
         drop(native);
 
-        let uninstall = self.run_installed(["uninstall"]).await?;
+        let uninstall = self.run_installed(["--verbose", "uninstall"]).await?;
         require_command_success("normal-home uninstall", &uninstall)?;
         assert_shutdown_precedes_descriptor_removal("uninstall", &uninstall)?;
         assert!(!self.service_active().await?);
@@ -533,7 +546,7 @@ impl DisposableNormalHome {
     ) -> Result<std::process::Output, Box<dyn Error>> {
         Ok(self
             .product_command(controller, None)?
-            .args(["setup", "--desktop-launcher"])
+            .args(["--verbose", "setup", "--desktop-launcher"])
             .arg(desktop_launcher)
             .output()
             .await?)
@@ -686,7 +699,7 @@ impl DisposableNormalHome {
     pub(super) async fn guarded_product_cleanup(&mut self) -> (Result<(), Box<dyn Error>>, bool) {
         let uninstall: Result<(), Box<dyn Error>> = async {
             if self.installed_binary()?.exists() {
-                let uninstall = self.run_installed(["uninstall"]).await?;
+                let uninstall = self.run_installed(["--verbose", "uninstall"]).await?;
                 require_command_success("normal-home cleanup uninstall", &uninstall)?;
                 assert_shutdown_precedes_descriptor_removal("uninstall", &uninstall)?;
             }

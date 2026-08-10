@@ -11,7 +11,7 @@ mod model;
 mod test_support;
 
 use cli::{Cli, Command};
-use cli_output::RenderedCli;
+use cli_output::{OrdinaryFailure, RenderedCli, UserFailure};
 use diagnostics::{DiagnosticCause, DiagnosticCommand, DiagnosticEvent, Diagnostics};
 use error::ControllerError;
 use std::io::{self, Write};
@@ -80,21 +80,44 @@ async fn run(cli: Cli) -> Result<ProcessOutcome, ControllerError> {
         }));
     }
     if matches!(&cli.command, Command::Update) {
+        let mut diagnostics = Diagnostics::new(verbose, DiagnosticCommand::Update);
         let staged = match std::env::var_os("CODEX_SESSION_CONTROL_STAGED_UPDATE") {
             None => false,
             Some(value) if value == "1" => true,
             Some(_) => {
-                return Err(ControllerError::Operational(
-                    "candidate-preflight rejected invalid staged update marker".to_owned(),
+                diagnostics.emit(DiagnosticEvent::FailedPreflight {
+                    cause: DiagnosticCause::Unexpected,
+                });
+                diagnostics.flush();
+                return Ok(ProcessOutcome::Render(
+                    UserFailure::Ordinary(OrdinaryFailure::UpdateUnexpectedRetry).render(),
                 ));
             }
         };
-        let paths = install::ResolvedUserPaths::from_effective_user()?;
+        let paths = match install::ResolvedUserPaths::from_effective_user() {
+            Ok(paths) => paths,
+            Err(_) => {
+                diagnostics.emit(DiagnosticEvent::FailedPreflight {
+                    cause: DiagnosticCause::Unexpected,
+                });
+                diagnostics.flush();
+                return Ok(ProcessOutcome::Render(
+                    UserFailure::Ordinary(OrdinaryFailure::UpdateUnexpectedRetry).render(),
+                ));
+            }
+        };
         let target = install::LifecycleTarget::production(paths);
-        let report = install::update(target, staged).await?;
-        eprint!("{}", report.stderr);
-        print!("{}", report.stdout);
-        return Ok(ProcessOutcome::Exit(0));
+        let result = install::update(target, staged, verbose, &mut diagnostics).await;
+        diagnostics.flush();
+        return Ok(match result {
+            Ok(install::UpdateExecution::Render(success)) => {
+                ProcessOutcome::Render(success.render())
+            }
+            Ok(install::UpdateExecution::PropagateCandidateExit(exit)) => {
+                ProcessOutcome::Exit(exit.code())
+            }
+            Err(failure) => ProcessOutcome::Render(failure.render()),
+        });
     }
     if matches!(&cli.command, Command::Status) {
         let paths = install::ResolvedUserPaths::from_effective_user()?;

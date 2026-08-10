@@ -373,9 +373,11 @@ pub(super) fn shutdown_receipts_require_the_operation_specific_stage() {
         stderr: stderr.as_bytes().to_vec(),
     };
     let disable = receipt(
-        "completed: service-disable\ncompleted: service-stop-verify\ncompleted: descriptor-remove\n",
+        "[verbose] disable: completed service-disable\n[verbose] disable: completed service-stop-verify\n[verbose] disable: completed descriptor-remove\n",
     );
-    let uninstall = receipt("completed: service-stop\ncompleted: descriptor-remove\n");
+    let uninstall = receipt(
+        "[verbose] uninstall: completed service-stop\n[verbose] uninstall: completed descriptor-remove\n",
+    );
 
     assert!(assert_shutdown_precedes_descriptor_removal("disable", &disable).is_ok());
     assert!(assert_shutdown_precedes_descriptor_removal("uninstall", &uninstall).is_ok());

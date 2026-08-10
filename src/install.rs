@@ -61,28 +61,8 @@ struct LifecycleContext {
     cwd: PathBuf,
 }
 
-#[derive(Debug)]
-pub(crate) struct LifecycleReceipt {
-    pub stdout: String,
-    pub stderr: String,
-}
-
-macro_rules! complete_lifecycle_stage {
-    ($progress:expr, $stage:expr, $target:expr, $recovery:expr) => {{
-        $progress.complete($stage);
-        #[cfg(test)]
-        if $target.test_hooks.fail_after_completed_stage == Some($stage.name()) {
-            return Err($progress.fail(
-                $stage,
-                "injected failure after completed stage",
-                $recovery,
-            ));
-        }
-    }};
-}
-
 mod update;
-pub(crate) use update::update;
+pub(crate) use update::{UpdateExecution, update};
 
 mod enable_disable;
 mod setup;
@@ -189,16 +169,6 @@ enum DesktopAttachmentStatus {
     Available,
     Unavailable,
     Unverified,
-}
-
-impl DesktopAttachmentStatus {
-    const fn receipt(self) -> &'static str {
-        match self {
-            Self::Available => "available",
-            Self::Unavailable => "unavailable",
-            Self::Unverified => "unverified",
-        }
-    }
 }
 
 #[derive(Clone, Debug)]

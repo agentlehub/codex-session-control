@@ -65,9 +65,13 @@ use super::{
     test_target,
     uninstall::{uninstall_with_context, uninstall_with_context_and_diagnostics},
     update::{
-        TerminalState, UpdateContext, UpdateStage, baseline_active_turn_gate, list_active_threads,
-        outer_update_with_endpoints, release_failure_stage, run_candidate_apply,
-        staged_update_with_context,
+        ActiveTurnGateFailure, CandidateApplyResult, CandidateExit, CandidateWaitHook,
+        RestartPromptTestFailure, TerminalState, UpdateContext, UpdateExecution,
+        active_turn_gate_failure, baseline_active_turn_gate, classify_candidate_wait,
+        list_active_threads, outer_update_with_endpoints, run_candidate_apply_with_wait_hook,
+        run_outer_candidate, staged_update_with_context,
+        staged_update_with_context_and_diagnostics, update_cli_reconciliation_failure,
+        update_descriptor_publication_failure,
     },
     wrapper::{exec_codex_wrapper_command, prepare_codex_wrapper},
 };
