@@ -1,26 +1,120 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 
-const COMMANDS: [&str; 8] = [
+const COMMANDS: [&str; 7] = [
     "setup",
     "update",
     "status",
     "enable",
     "disable",
     "uninstall",
-    "mcp-server",
     "codex",
 ];
 
+const APPROVED_ROOT_HELP: &str = concat!(
+    "Manage Codex Session Control\n",
+    "\n",
+    "Usage: codex-session-control [OPTIONS] <COMMAND>\n",
+    "\n",
+    "Commands:\n",
+    "  setup      Install Codex Session Control and start the shared app-server\n",
+    "  update     Install the latest release\n",
+    "  status     Check whether Codex Session Control is ready\n",
+    "  enable     Start the service and turn on automatic startup\n",
+    "  disable    Stop the service and turn off automatic startup\n",
+    "  uninstall  Remove the service while keeping your Codex data\n",
+    "  codex      Start Codex CLI through the shared app-server\n",
+    "\n",
+    "Options:\n",
+    "      --verbose  Show diagnostic details\n",
+    "  -h, --help     Print help\n",
+    "  -V, --version  Print version\n",
+);
+
+const APPROVED_SETUP_HELP: &str = concat!(
+    "Install Codex Session Control and start the shared app-server\n",
+    "\n",
+    "Usage: codex-session-control setup [OPTIONS]\n",
+    "\n",
+    "Options:\n",
+    "      --desktop-launcher <PATH>  Absolute path to the Codex Desktop executable when automatic discovery fails\n",
+    "      --verbose                  Show diagnostic details\n",
+    "  -h, --help                     Print help\n",
+);
+
+const APPROVED_UPDATE_HELP: &str = concat!(
+    "Install the latest release\n",
+    "\n",
+    "Usage: codex-session-control update [OPTIONS]\n",
+    "\n",
+    "Options:\n",
+    "      --verbose  Show diagnostic details\n",
+    "  -h, --help     Print help\n",
+);
+
+const APPROVED_STATUS_HELP: &str = concat!(
+    "Check whether Codex Session Control is ready\n",
+    "\n",
+    "Usage: codex-session-control status [OPTIONS]\n",
+    "\n",
+    "Options:\n",
+    "      --verbose  Show diagnostic details\n",
+    "  -h, --help     Print help\n",
+);
+
+const APPROVED_ENABLE_HELP: &str = concat!(
+    "Start the service and turn on automatic startup\n",
+    "\n",
+    "Usage: codex-session-control enable [OPTIONS]\n",
+    "\n",
+    "Options:\n",
+    "      --verbose  Show diagnostic details\n",
+    "  -h, --help     Print help\n",
+);
+
+const APPROVED_DISABLE_HELP: &str = concat!(
+    "Stop the service and turn off automatic startup\n",
+    "\n",
+    "Usage: codex-session-control disable [OPTIONS]\n",
+    "\n",
+    "Options:\n",
+    "      --verbose  Show diagnostic details\n",
+    "  -h, --help     Print help\n",
+);
+
+const APPROVED_UNINSTALL_HELP: &str = concat!(
+    "Remove the service while keeping your Codex data\n",
+    "\n",
+    "Usage: codex-session-control uninstall [OPTIONS]\n",
+    "\n",
+    "Options:\n",
+    "      --verbose  Show diagnostic details\n",
+    "  -h, --help     Print help\n",
+);
+
+const APPROVED_CODEX_HELP: &str = concat!(
+    "Start Codex CLI through the shared app-server\n",
+    "\n",
+    "Usage: codex-session-control codex [ARGS]...\n",
+    "\n",
+    "Arguments:\n",
+    "  [ARGS]...  Arguments passed directly to Codex CLI\n",
+    "\n",
+    "Options:\n",
+    "  -h, --help  Print help\n",
+);
+
 #[test]
-fn help_exposes_exactly_the_approved_commands() {
+fn root_help_matches_approved_contract_and_hides_mcp_server() {
     let output = Command::cargo_bin("codex-session-control")
         .unwrap()
         .arg("--help")
         .output()
         .unwrap();
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
     let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(stdout, APPROVED_ROOT_HELP);
     let listed: Vec<&str> = stdout
         .lines()
         .filter_map(|line| {
@@ -37,6 +131,28 @@ fn help_exposes_exactly_the_approved_commands() {
                 .lines()
                 .any(|line| line.trim().starts_with(forbidden))
         );
+    }
+}
+
+#[test]
+fn detailed_help_matches_the_approved_contract() {
+    for (args, expected) in [
+        (&["setup", "--help"][..], APPROVED_SETUP_HELP),
+        (&["update", "--help"][..], APPROVED_UPDATE_HELP),
+        (&["status", "--help"][..], APPROVED_STATUS_HELP),
+        (&["enable", "--help"][..], APPROVED_ENABLE_HELP),
+        (&["disable", "--help"][..], APPROVED_DISABLE_HELP),
+        (&["uninstall", "--help"][..], APPROVED_UNINSTALL_HELP),
+        (&["codex", "--help"][..], APPROVED_CODEX_HELP),
+    ] {
+        let output = Command::cargo_bin("codex-session-control")
+            .unwrap()
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+        assert!(output.stderr.is_empty());
     }
 }
 
@@ -96,9 +212,7 @@ fn setup_desktop_launcher_accepts_only_one_absolute_executable_path() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "--desktop-launcher <DESKTOP_LAUNCHER>",
-        ));
+        .stdout(predicate::str::contains("--desktop-launcher <PATH>"));
 
     for rejected in [
         "relative/codex-desktop",
@@ -140,9 +254,7 @@ fn desktop_start_lifecycle_is_parser_only_at_the_cli_boundary() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "--desktop-launcher <DESKTOP_LAUNCHER>",
-        ));
+        .stdout(predicate::str::contains("--desktop-launcher <PATH>"));
 }
 
 #[test]
@@ -231,10 +343,9 @@ fn uninstall_exposes_the_preservation_boundary_and_no_bypass_controls() {
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("Usage: codex-session-control uninstall")
-                .and(predicate::str::contains(
-                    "Remove Codex session control while preserving the selected normal Codex home, authentication, tasks, and rollouts",
-                )),
+            predicate::str::contains("Usage: codex-session-control uninstall").and(
+                predicate::str::contains("Remove the service while keeping your Codex data"),
+            ),
         );
 
     for forbidden in [

@@ -270,10 +270,11 @@ fn release_asset_rules() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/release.yml"),
     )
     .unwrap();
-    let exact_commands = "expected=\"$(printf '%s\\n' setup update status enable disable uninstall mcp-server codex)\"";
+    let exact_commands =
+        "expected=\"$(printf '%s\\n' setup update status enable disable uninstall codex)\"";
     assert_eq!(
         release.matches(exact_commands).count(),
         2,
-        "both native release binaries must expose exactly eight commands"
+        "both native release binaries must expose exactly seven visible commands"
     );
 }

@@ -51,7 +51,7 @@ jobs:
           binary=target/debug/codex-session-control
           commands="$("$binary" --help |
             sed -n '/^Commands:/,/^$/s/^  \([a-z-]*\).*$/\1/p')"
-          expected="$(printf '%s\n' setup update status enable disable uninstall mcp-server codex)"
+          expected="$(printf '%s\n' setup update status enable disable uninstall codex)"
           test "$commands" = "$expected"
 
   systemd-integration:
@@ -116,7 +116,7 @@ jobs:
             '^codex-session-control [0-9]+\.[0-9]+\.[0-9]+ \(aarch64-unknown-linux-gnu\)$'
           commands="$("$binary" --help |
             sed -n '/^Commands:/,/^$/s/^  \([a-z-]*\).*$/\1/p')"
-          expected="$(printf '%s\n' setup update status enable disable uninstall mcp-server codex)"
+          expected="$(printf '%s\n' setup update status enable disable uninstall codex)"
           test "$commands" = "$expected"
           file "$binary" | grep -E 'ELF 64-bit.*(ARM aarch64|aarch64)'
           readelf --file-header "$binary" | grep -E 'Machine:.*AArch64'

@@ -11,32 +11,77 @@ pub const BUILD_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (aarch64-un
 #[command(
     name = "codex-session-control",
     version = BUILD_VERSION,
-    about,
+    about = "Manage Codex Session Control",
     disable_help_subcommand = true
 )]
-pub struct Cli {
+pub(crate) struct Cli {
+    #[arg(long, global = true, help = "Show diagnostic details")]
+    pub(crate) verbose: bool,
     #[command(subcommand)]
-    pub command: Command,
+    pub(crate) command: Command,
+}
+
+impl Cli {
+    pub(crate) fn parse() -> Self {
+        match Self::try_parse_from(std::env::args_os()) {
+            Ok(cli) => cli,
+            Err(error) => error.exit(),
+        }
+    }
+
+    pub(crate) fn try_parse_from<I, T>(args: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        let mut args: Vec<OsString> = args.into_iter().map(Into::into).collect();
+        if let Some(codex_index) = args.iter().position(|arg| arg == "codex") {
+            if args
+                .get(codex_index + 1)
+                .is_some_and(|arg| arg == "--verbose")
+            {
+                args.insert(codex_index + 1, OsString::from("--"));
+            }
+        }
+
+        <Self as Parser>::try_parse_from(args)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
-pub enum Command {
+pub(crate) enum Command {
+    #[command(about = "Install Codex Session Control and start the shared app-server")]
     Setup {
-        #[arg(long, value_parser = parse_absolute_launcher_path)]
+        #[arg(
+            long,
+            value_name = "PATH",
+            help = "Absolute path to the Codex Desktop executable when automatic discovery fails",
+            value_parser = parse_absolute_launcher_path
+        )]
         desktop_launcher: Option<PathBuf>,
     },
+    #[command(about = "Install the latest release")]
     Update,
+    #[command(about = "Check whether Codex Session Control is ready")]
     Status,
+    #[command(about = "Start the service and turn on automatic startup")]
     Enable,
+    #[command(about = "Stop the service and turn off automatic startup")]
     Disable,
-    #[command(
-        about = "Remove Codex session control while preserving the selected normal Codex home, authentication, tasks, and rollouts"
-    )]
+    #[command(about = "Remove the service while keeping your Codex data")]
     Uninstall,
-    #[command(name = "mcp-server")]
+    #[command(name = "mcp-server", hide = true)]
     McpServer,
+    #[command(
+        about = "Start Codex CLI through the shared app-server",
+        override_help = "Start Codex CLI through the shared app-server\n\nUsage: codex-session-control codex [ARGS]...\n\nArguments:\n  [ARGS]...  Arguments passed directly to Codex CLI\n\nOptions:\n  -h, --help  Print help\n"
+    )]
     Codex {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(
+            help = "Arguments passed directly to Codex CLI",
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
         args: Vec<OsString>,
     },
 }
@@ -55,8 +100,6 @@ fn parse_absolute_launcher_path(value: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use std::{ffi::OsString, os::unix::ffi::OsStringExt};
-
-    use clap::Parser;
 
     use super::{Cli, Command};
 
@@ -89,5 +132,32 @@ mod tests {
         .unwrap();
 
         assert_eq!(cli.command, Command::Codex { args: user_args });
+    }
+
+    #[test]
+    fn verbose_placement_and_codex_passthrough_are_exact() {
+        let cli = Cli::try_parse_from(["csc", "--verbose", "codex", "--verbose"]).unwrap();
+        assert!(cli.verbose);
+        let Command::Codex { args } = cli.command else {
+            panic!("expected codex")
+        };
+        assert_eq!(args, vec![OsString::from("--verbose")]);
+
+        assert!(
+            Cli::try_parse_from(["csc", "setup", "--verbose"])
+                .unwrap()
+                .verbose
+        );
+    }
+
+    #[test]
+    fn mcp_server_remains_callable_while_hidden() {
+        assert!(matches!(
+            Cli::try_parse_from(["csc", "mcp-server"]),
+            Ok(Cli {
+                command: Command::McpServer,
+                ..
+            })
+        ));
     }
 }
