@@ -8,6 +8,306 @@ use crate::model::InstalledRelease;
 
 type MutationFileSnapshot = (PathBuf, Option<(Vec<u8>, u32)>);
 
+#[test]
+fn setup_guidance_precedence_is_exact() {
+    use crate::cli_output::{
+        DesktopAvailability as OutputDesktopAvailability, RunningClientFacts, SetupSuccess,
+        UserSuccess,
+    };
+
+    let cases = [
+        (
+            RunningClientFacts {
+                cli: true,
+                desktop: false,
+            },
+            OutputDesktopAvailability::Unavailable,
+            false,
+            concat!(
+                "Codex Session Control 1.2.3 is ready.\n\n",
+                "Codex CLI is already running without Codex Session Control.\n",
+                "Exit it, then start it with:\n",
+                "  codex-session-control codex\n",
+            ),
+        ),
+        (
+            RunningClientFacts {
+                cli: false,
+                desktop: true,
+            },
+            OutputDesktopAvailability::Available,
+            false,
+            concat!(
+                "Codex Session Control 1.2.3 is ready.\n\n",
+                "To use Codex Session Control with Codex CLI, start the CLI with:\n",
+                "  codex-session-control codex\n\n",
+                "Codex Desktop is already running without Codex Session Control.\n",
+                "Restart Codex Desktop to use Codex Session Control there.\n",
+            ),
+        ),
+        (
+            RunningClientFacts {
+                cli: true,
+                desktop: true,
+            },
+            OutputDesktopAvailability::Available,
+            true,
+            concat!(
+                "Codex Session Control 1.2.3 is ready.\n\n",
+                "Codex CLI is already running without Codex Session Control.\n",
+                "Exit it, then start it with:\n",
+                "  codex-session-control codex\n\n",
+                "Codex Desktop is already running without Codex Session Control.\n",
+                "Restart Codex Desktop to use Codex Session Control there.\n",
+            ),
+        ),
+        (
+            RunningClientFacts::default(),
+            OutputDesktopAvailability::Available,
+            true,
+            concat!(
+                "Codex Session Control 1.2.3 is ready.\n\n",
+                "To use Codex Session Control with Codex CLI, start the CLI with:\n",
+                "  codex-session-control codex\n\n",
+                "If Codex Desktop is already running, restart it to make Codex Session Control available there.\n",
+            ),
+        ),
+    ];
+
+    for (running, desktop, changed, expected) in cases {
+        let success = SetupSuccess::new(
+            semver::Version::parse("1.2.3").unwrap(),
+            running,
+            desktop,
+            changed,
+            Vec::new(),
+        )
+        .unwrap();
+        let rendered = UserSuccess::Setup(success).render();
+        assert_eq!(rendered.stdout, expected);
+        assert_eq!(
+            rendered
+                .stdout
+                .matches("Codex CLI is already running")
+                .count(),
+            usize::from(running.cli)
+        );
+        assert_eq!(
+            rendered
+                .stdout
+                .matches("Codex Desktop is already running without Codex Session Control")
+                .count(),
+            usize::from(running.desktop)
+        );
+    }
+
+    for desktop in [
+        OutputDesktopAvailability::Unavailable,
+        OutputDesktopAvailability::CouldNotVerify,
+    ] {
+        assert!(
+            SetupSuccess::new(
+                semver::Version::parse("1.2.3").unwrap(),
+                RunningClientFacts::default(),
+                desktop,
+                true,
+                Vec::new(),
+            )
+            .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn setup_producer_boundaries_select_complete_failures() {
+    use crate::cli_output::{OrdinaryFailure, UserFailure};
+    use crate::desktop::{DescriptorPublicationFailure, DescriptorPublicationResidue};
+
+    assert_eq!(
+        setup_cli_reconciliation_failure(&ControllerError::Operational("sentinel".to_owned())),
+        UserFailure::Ordinary(OrdinaryFailure::SetupCliIntegrationRetry)
+    );
+    assert_eq!(
+        setup_cli_reconciliation_failure(&ControllerError::InvalidData {
+            field: "sentinel",
+            reason: "sentinel",
+        }),
+        UserFailure::Ordinary(OrdinaryFailure::SetupCliIntegrationCheckStatus)
+    );
+
+    let clean = DescriptorPublicationFailure {
+        source: ControllerError::Operational("sentinel".to_owned()),
+        residue: None,
+    };
+    assert_eq!(
+        setup_descriptor_publication_failure(clean),
+        UserFailure::Ordinary(OrdinaryFailure::SetupDesktopIntegrationRetry)
+    );
+    for residue in [
+        DescriptorPublicationResidue::Stage(PathBuf::from("/managed/stage")),
+        DescriptorPublicationResidue::Final(PathBuf::from("/managed/final")),
+    ] {
+        assert!(matches!(
+            setup_descriptor_publication_failure(DescriptorPublicationFailure {
+                source: ControllerError::Operational("sentinel".to_owned()),
+                residue: Some(residue),
+            }),
+            UserFailure::RollbackIncomplete(_)
+        ));
+    }
+
+    let candidate = Fixture::new();
+    let mut context = candidate.context(true);
+    context.candidate.target = "wrong-target".to_owned();
+    assert_eq!(
+        setup_with_context(context).await.unwrap_err(),
+        UserFailure::Ordinary(OrdinaryFailure::SetupInstallationFilesRetry)
+    );
+
+    let cli = Fixture::new();
+    fs::remove_file(cli.fake_bin.join("codex")).unwrap();
+    assert_eq!(
+        setup_with_context(cli.context(true)).await.unwrap_err(),
+        UserFailure::Ordinary(OrdinaryFailure::SetupCliIntegrationRetry)
+    );
+
+    let service = Fixture::new();
+    fs::remove_file(service.fake_bin.join("systemctl")).unwrap();
+    assert_eq!(
+        setup_with_context(service.context(true)).await.unwrap_err(),
+        UserFailure::Ordinary(OrdinaryFailure::SetupServiceConfigurationRetry)
+    );
+
+    let service_start = Fixture::new();
+    fs::write(
+        &service_start.systemctl_fail,
+        "--user enable --now codex-session-control-test-Setup1.service",
+    )
+    .unwrap();
+    assert_eq!(
+        setup_with_context(service_start.context(true))
+            .await
+            .unwrap_err(),
+        UserFailure::Ordinary(OrdinaryFailure::SetupServiceStartRetry)
+    );
+
+    let service_state = Fixture::new();
+    fs::write(
+        &service_state.systemctl_fail,
+        "--user is-enabled codex-session-control-test-Setup1.service",
+    )
+    .unwrap();
+    assert_eq!(
+        setup_with_context(service_state.context(true))
+            .await
+            .unwrap_err(),
+        UserFailure::Ordinary(OrdinaryFailure::SetupServiceStateRetryUpdate)
+    );
+
+    let desktop = Fixture::new();
+    let mut context = desktop.context(true);
+    let desktop_launcher = desktop._root.path().join("desktop-launcher");
+    write_executable_fixture(
+        &desktop_launcher,
+        "#!/bin/sh\nif [ \"$1\" = \"--print-build-info\" ]; then printf '%s\\n' '{\"appIdentity\":{\"id\":\"codex-desktop\"},\"linuxCapabilities\":[\"external-app-server-attachment-descriptor-v1\"]}'; exit 0; fi\nexit 64\n",
+    );
+    context.desktop_launcher = Some(desktop_launcher);
+    context.target.paths.socket = PathBuf::from("/tmp//non-normalized-socket");
+    assert_eq!(
+        setup_with_context(context).await.unwrap_err(),
+        UserFailure::Ordinary(OrdinaryFailure::SetupDesktopIntegrationRetry)
+    );
+
+    let completed_stage = Fixture::new();
+    let mut context = completed_stage.context(true);
+    context.target = context.target.fail_after_completed_stage("binary");
+    assert_eq!(
+        setup_with_context(context).await.unwrap_err(),
+        UserFailure::Ordinary(OrdinaryFailure::SetupUnexpectedRetry)
+    );
+
+    let verified = Fixture::new();
+    for directory in [
+        verified.paths.marketplace.clone(),
+        verified.paths.marketplace.join("plugins"),
+        verified
+            .paths
+            .marketplace
+            .join("plugins/codex-session-control"),
+        verified
+            .paths
+            .marketplace
+            .join("plugins/codex-session-control/.codex-plugin"),
+    ] {
+        create_shared_dir(&directory, verified.paths.euid).unwrap();
+    }
+    let old_plugin = verified
+        .paths
+        .marketplace
+        .join("plugins/codex-session-control/.codex-plugin/plugin.json");
+    fs::write(&old_plugin, br#"{"version":"0.0.9"}"#).unwrap();
+    fs::set_permissions(&old_plugin, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(matches!(
+        setup_with_context(verified.context(true))
+            .await
+            .unwrap_err(),
+        UserFailure::VerifiedRelease(_)
+    ));
+}
+
+#[tokio::test]
+async fn setup_default_and_verbose_are_behaviorally_identical() {
+    use crate::diagnostics::{DiagnosticCommand, Diagnostics};
+
+    let default_fixture = Fixture::new();
+    let verbose_fixture = Fixture::new();
+    let _default_authority =
+        FakeAuthority::start(&default_fixture.paths, TESTED_CODEX_VERSION).await;
+    let _verbose_authority =
+        FakeAuthority::start(&verbose_fixture.paths, TESTED_CODEX_VERSION).await;
+    let mut default_context = default_fixture.context(true);
+    default_context.path_environment = std::env::join_paths([
+        &default_fixture.fake_bin,
+        &default_fixture.paths.home.join(".local/bin"),
+    ])
+    .unwrap();
+    let mut verbose_context = verbose_fixture.context(true);
+    verbose_context.path_environment = std::env::join_paths([
+        &verbose_fixture.fake_bin,
+        &verbose_fixture.paths.home.join(".local/bin"),
+    ])
+    .unwrap();
+    let mut default_diagnostics = Diagnostics::new(false, DiagnosticCommand::Setup);
+    let mut verbose_diagnostics = Diagnostics::record(DiagnosticCommand::Setup);
+
+    let default = setup_with_context_and_diagnostics(default_context, &mut default_diagnostics)
+        .await
+        .map(|success| success.render())
+        .unwrap();
+    let verbose = setup_with_context_and_diagnostics(verbose_context, &mut verbose_diagnostics)
+        .await
+        .map(|success| success.render())
+        .unwrap();
+
+    assert_eq!(default, verbose);
+    assert!(
+        verbose_diagnostics
+            .recorded_lines()
+            .iter()
+            .all(|line| line.starts_with("[verbose] setup:"))
+    );
+    assert_eq!(
+        default_fixture.systemctl_log(),
+        verbose_fixture.systemctl_log()
+    );
+    assert!(default_fixture.paths.manifest.exists());
+    assert!(verbose_fixture.paths.manifest.exists());
+    assert_eq!(
+        default_fixture.codex_log().lines().count(),
+        verbose_fixture.codex_log().lines().count()
+    );
+}
+
 fn snapshot_mutation_files(paths: impl IntoIterator<Item = PathBuf>) -> Vec<MutationFileSnapshot> {
     paths
         .into_iter()
@@ -28,34 +328,28 @@ async fn first_install_writes_manifest_last_and_exact_receipt() {
     let fixture = Fixture::new();
     let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
 
-    let report = setup_with_context(fixture.context(false)).await.unwrap();
+    let report = setup_with_context(fixture.context(false))
+        .await
+        .unwrap()
+        .render();
 
     assert_eq!(
         report.stdout,
         format!(
-            "Installed release: {version}\n\
-Codex app-server service: enabled, active\n\
-Codex home: {home}\n\
-CLI attachment: available through codex-session-control codex\n\
-Desktop attachment: unavailable\n\
-Desktop restart required: no\n\
-Plugin: codex-session-control {version} at {plugin}\n\
-Durable plugin state: current\n\
-Loaded task state: may_be_stale\n\
-New task required for guaranteed plugin convergence: yes\n\
-\n\
-Note: {local_bin} is not on PATH. Add it to PATH to use the short codex-session-control command.\n",
-            version = env!("CARGO_PKG_VERSION"),
-            plugin = fixture
-                .paths
-                .marketplace
-                .join("plugins/codex-session-control")
-                .display(),
-            home = fixture.paths.codex_home.display(),
-            local_bin = fixture.paths.home.join(".local/bin").display(),
+            "Codex Session Control {} is ready.\n\n",
+            env!("CARGO_PKG_VERSION")
+        ) + "To use Codex Session Control with Codex CLI, start the CLI with:\n"
+            + "  codex-session-control codex\n"
+    );
+    assert_eq!(
+        report.stderr,
+        format!(
+            "Codex Desktop integration is unavailable because a compatible Desktop launcher was not found.\n\n\
+Note: `{}` is not on your PATH.\n\
+Add it to your PATH to use the short `codex-session-control` command.\n",
+            fixture.paths.home.join(".local/bin").display()
         )
     );
-    assert!(report.stderr.contains("completed: manifest\n"));
     assert_installed_modes(&fixture.paths);
     let manifest: InstalledRelease =
         serde_json::from_slice(&fs::read(&fixture.paths.manifest).unwrap()).unwrap();
@@ -88,10 +382,13 @@ async fn first_install_waits_for_safe_socket_after_service_start_returns() {
         FakeAuthority::start(&paths, TESTED_CODEX_VERSION).await
     });
 
-    let report = setup_with_context(fixture.context(true)).await.unwrap();
+    let report = setup_with_context(fixture.context(true))
+        .await
+        .unwrap()
+        .render();
     let authority = starter.await.unwrap();
 
-    assert!(report.stderr.contains("completed: service-verify\n"));
+    assert!(report.stdout.starts_with("Codex Session Control "));
     assert!(fixture.paths.socket.exists());
     drop(authority);
 }
@@ -109,19 +406,13 @@ async fn setup_verification_reports_untrustworthy_systemctl_state_as_operational
 
         let error = setup_with_context(fixture.context(true)).await.unwrap_err();
 
-        assert_eq!(error.exit_code(), 1, "{operation}");
-        assert!(
-            error.to_string().contains(&format!(
-                "failed at service-verify: systemctl {operation} could not provide trustworthy service state\n"
-            )),
-            "{operation}: {error}"
-        );
-        assert!(
-            error
-                .to_string()
-                .contains("retry: codex-session-control update\n"),
-            "{operation}: {error}"
-        );
+        assert_eq!(error.render().exit_code, 1, "{operation}");
+        assert!(matches!(
+            error,
+            crate::cli_output::UserFailure::Ordinary(
+                crate::cli_output::OrdinaryFailure::SetupServiceStateRetryUpdate
+            )
+        ));
         assert!(!fixture.paths.manifest.exists(), "{operation}");
         let systemctl = fixture.systemctl_log();
         assert!(
@@ -142,7 +433,7 @@ async fn preflight_treats_absent_selected_home_as_empty_native_state() {
 
     setup_preflight(&mut context)
         .await
-        .unwrap_or_else(|failure| panic!("{}", failure.cause));
+        .unwrap_or_else(|failure| panic!("{failure:?}"));
 
     assert_eq!(
         fixture.codex_log(),
@@ -170,9 +461,12 @@ async fn setup_is_idempotent_blocks_invalid_identity_and_accepts_manifestless_ma
     setup_with_context(fixture.context(true)).await.unwrap();
     fixture.clear_logs();
 
-    let second = setup_with_context(fixture.context(true)).await.unwrap();
-    assert!(second.stdout.contains("Loaded task state: not_verified"));
-    assert!(!second.stdout.contains("Note:"));
+    let second = setup_with_context(fixture.context(true))
+        .await
+        .unwrap()
+        .render();
+    assert!(second.stdout.starts_with("Codex Session Control "));
+    assert!(!second.stderr.contains("Note:"));
     assert!(!fixture.codex_log().contains(" marketplace add "));
     assert!(
         !fixture
@@ -184,11 +478,12 @@ async fn setup_is_idempotent_blocks_invalid_identity_and_accepts_manifestless_ma
     fs::write(&fixture.paths.config, b"drift").unwrap();
     fs::set_permissions(&fixture.paths.config, fs::Permissions::from_mode(0o600)).unwrap();
     let error = setup_with_context(fixture.context(true)).await.unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("selected-home identity is unavailable")
-    );
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::SetupInstalledStateCheckStatus
+        )
+    ));
     assert_eq!(fs::read(&fixture.paths.config).unwrap(), b"drift");
     fs::write(&fixture.paths.config, valid_config).unwrap();
     assert!(
@@ -266,13 +561,12 @@ async fn setup_service_verify_accepts_mode_0700_owner_only_socket() {
     let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
     fs::set_permissions(&fixture.paths.socket, fs::Permissions::from_mode(0o700)).unwrap();
 
-    let report = setup_with_context(fixture.context(true)).await.unwrap();
+    let report = setup_with_context(fixture.context(true))
+        .await
+        .unwrap()
+        .render();
 
-    assert!(
-        report
-            .stdout
-            .contains("Codex app-server service: enabled, active")
-    );
+    assert!(report.stdout.starts_with("Codex Session Control "));
     assert!(fixture.paths.manifest.is_file());
 }
 
@@ -291,15 +585,13 @@ async fn manifestless_older_release_routes_to_its_exact_executable() {
 
     let error = setup_with_context(fixture.context(true)).await.unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("release 0.0.9 is partially installed without a manifest")
-    );
-    assert!(
-        error
-            .to_string()
-            .contains(&format!("retry: {} setup", fixture.paths.binary.display()))
+    assert_eq!(
+        error,
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::SetupInstalledStateRepair {
+                binary: fixture.paths.binary.clone(),
+            }
+        )
     );
     assert!(!fixture.paths.manifest.exists());
     assert!(fixture.systemctl_log().is_empty());
@@ -324,11 +616,14 @@ async fn manifestless_unsafe_binary_is_never_executed_for_release_discovery() {
 
     let error = setup_with_context(fixture.context(true)).await.unwrap_err();
 
-    assert!(error.to_string().contains("ambiguous"));
     assert!(
-        error
-            .to_string()
-            .contains(&fixture.paths.binary.display().to_string())
+        matches!(
+            error,
+            crate::cli_output::UserFailure::Ordinary(
+                crate::cli_output::OrdinaryFailure::SetupInstalledStateCheckStatus
+            )
+        ),
+        "{error:?}"
     );
     assert!(!marker.exists());
     assert!(!fixture.paths.manifest.exists());
@@ -366,8 +661,12 @@ async fn different_manifest_and_ambiguous_partial_fail_before_mutation() {
     .unwrap();
     fixture.clear_logs();
     let error = setup_with_context(fixture.context(true)).await.unwrap_err();
-    assert!(error.to_string().contains("failed at preflight:"));
-    assert!(error.to_string().contains(" update"));
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::SetupInstallationFilesRetryUpdate
+        )
+    ));
     assert!(fixture.codex_log().lines().count() <= 3);
     assert!(fixture.systemctl_log().is_empty());
 
@@ -375,12 +674,12 @@ async fn different_manifest_and_ambiguous_partial_fail_before_mutation() {
     fs::write(&fixture.paths.unit, b"ambiguous unit").unwrap();
     fixture.clear_logs();
     let error = setup_with_context(fixture.context(true)).await.unwrap_err();
-    assert!(error.to_string().contains("ambiguous"));
-    assert!(
-        error
-            .to_string()
-            .contains(&fixture.paths.unit.display().to_string())
-    );
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::SetupInstalledStateCheckStatus
+        )
+    ));
     assert!(fixture.systemctl_log().is_empty());
 }
 
@@ -441,8 +740,13 @@ async fn invalid_persisted_desktop_identity_rejects_setup_before_every_mutation(
         let error = setup_with_context(fixture.context(true)).await.unwrap_err();
 
         assert!(
-            error.to_string().contains("failed at preflight:"),
-            "{case}: {error}"
+            matches!(
+                error,
+                crate::cli_output::UserFailure::Ordinary(
+                    crate::cli_output::OrdinaryFailure::SetupInstalledStateCheckStatus
+                )
+            ),
+            "{case}: {error:?}"
         );
         assert_eq!(snapshot_mutation_files(mutation_paths), before, "{case}");
         assert!(fixture.systemctl_log().is_empty(), "{case}");
@@ -479,8 +783,12 @@ async fn running_version_mismatch_and_stage_failure_never_write_manifest() {
     let error = setup_with_context(mismatch.context(true))
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("failed at service-verify:"));
-    assert!(error.to_string().contains(" update"));
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::SetupServiceStateRetryUpdate
+        )
+    ));
     assert!(!mismatch.paths.manifest.exists());
     assert!(!mismatch.systemctl_log().contains("restart"));
 
@@ -488,20 +796,12 @@ async fn running_version_mismatch_and_stage_failure_never_write_manifest() {
     let _authority = FakeAuthority::start(&failed.paths, TESTED_CODEX_VERSION).await;
     fs::write(&failed.systemctl_fail, "--user daemon-reload").unwrap();
     let error = setup_with_context(failed.context(true)).await.unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "completed: preflight\n\
-completed: binary\n\
-completed: configuration\n\
-completed: projection\n\
-completed: plugin-marketplace\n\
-completed: plugin-install\n\
-completed: desktop-discovery\n\
-completed: descriptor\n\
-completed: service-unit\n\
-failed at daemon-reload: systemctl command failed\n\
-retry: codex-session-control setup\n"
-    );
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::SetupServiceConfigurationRetry
+        )
+    ));
     assert!(!failed.paths.manifest.exists());
 }
 
@@ -517,7 +817,12 @@ async fn initialize_home_mismatch_fails_service_verify_without_manifest() {
 
     let error = setup_with_context(fixture.context(true)).await.unwrap_err();
 
-    assert!(error.to_string().contains("failed at service-verify:"));
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::SetupServiceStateRetryUpdate
+        )
+    ));
     assert!(!fixture.paths.manifest.exists());
     assert!(!fixture.systemctl_log().contains("restart"));
 }
@@ -547,56 +852,37 @@ async fn tested_untested_and_unparseable_versions_only_change_advisory() {
         fs::write(&fixture.codex_version, &version_output).unwrap();
         let _authority = FakeAuthority::start(&fixture.paths, &authority_version).await;
 
-        let report = setup_with_context(fixture.context(true)).await.unwrap();
+        let report = setup_with_context(fixture.context(true))
+            .await
+            .unwrap()
+            .render();
 
         assert_eq!(
             report.stdout,
             format!(
-                "Installed release: {version}\n\
-Codex app-server service: enabled, active\n\
-Codex home: {home}\n\
-CLI attachment: available through codex-session-control codex\n\
-Desktop attachment: unavailable\n\
-Desktop restart required: no\n\
-Plugin: codex-session-control {version} at {plugin}\n\
-Durable plugin state: current\n\
-Loaded task state: may_be_stale\n\
-New task required for guaranteed plugin convergence: yes\n",
-                version = env!("CARGO_PKG_VERSION"),
-                plugin = fixture
-                    .paths
-                    .marketplace
-                    .join("plugins/codex-session-control")
-                    .display(),
-                home = fixture.paths.codex_home.display(),
-            )
+                "Codex Session Control {} is ready.\n\n",
+                env!("CARGO_PKG_VERSION")
+            ) + "To use Codex Session Control with Codex CLI, start the CLI with:\n"
+                + "  codex-session-control codex\n"
         );
-        let mut expected_stderr = "completed: preflight\n\
-completed: binary\n\
-completed: configuration\n\
-completed: projection\n\
-completed: plugin-marketplace\n\
-completed: plugin-install\n\
-completed: desktop-discovery\n\
-completed: descriptor\n\
-completed: service-unit\n\
-completed: daemon-reload\n\
-completed: service-enable\n\
-completed: service-verify\n\
-completed: manifest\n"
-            .to_owned();
-        if warning {
-            let displayed_version = version_output
-                .trim()
-                .strip_prefix("codex-cli ")
-                .unwrap_or(version_output.trim());
-            expected_stderr.push_str(&format!(
-                        "Compatibility warning: Codex app-server {displayed_version} has not been tested with codex-session-control {}; native results remain authoritative.\n",
-                        env!("CARGO_PKG_VERSION")
-                    ));
-        }
-        expected_stderr
-            .push_str("Desktop attachment unavailable: codex-desktop.desktop was not found\n");
+        let expected_stderr = if warning {
+            let displayed_version = semver::Version::parse(
+                version_output
+                    .trim()
+                    .strip_prefix("codex-cli ")
+                    .unwrap_or(version_output.trim()),
+            )
+            .unwrap_or_else(|_| semver::Version::parse("0.0.0+unknown").unwrap());
+            format!(
+                "Warning: Codex {displayed_version} has not been tested with Codex Session Control {}.\n\
+Some features may not work as expected.\n\n\
+Codex Desktop integration is unavailable because a compatible Desktop launcher was not found.\n",
+                env!("CARGO_PKG_VERSION")
+            )
+        } else {
+            "Codex Desktop integration is unavailable because a compatible Desktop launcher was not found.\n"
+                .to_owned()
+        };
         assert_eq!(report.stderr, expected_stderr, "{version_output}");
         let manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(&fixture.paths.manifest).unwrap()).unwrap();

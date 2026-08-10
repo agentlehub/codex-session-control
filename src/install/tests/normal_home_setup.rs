@@ -43,13 +43,20 @@ async fn setup_keeps_normal_home_shared_and_never_invokes_login() {
     }
     let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
 
-    let report = setup_with_context(fixture.context(true)).await.unwrap();
+    let mut diagnostics =
+        crate::diagnostics::Diagnostics::record(crate::diagnostics::DiagnosticCommand::Setup);
+    setup_with_context_and_diagnostics(fixture.context(true), &mut diagnostics)
+        .await
+        .unwrap();
 
     assert_eq!(
-        report
-            .stderr
-            .lines()
-            .filter_map(|line| line.strip_prefix("completed: "))
+        diagnostics
+            .recorded_lines()
+            .iter()
+            .filter_map(|line| {
+                line.strip_prefix("[verbose] setup: completed ")
+                    .map(str::trim_end)
+            })
             .collect::<Vec<_>>(),
         SETUP_STAGES
     );
@@ -255,9 +262,13 @@ async fn foreign_native_sources_block_repair_without_removal() {
         let error = setup_with_context(fixture.context(true)).await.unwrap_err();
 
         assert!(
-            error
-                .to_string()
-                .contains(&format!("invalid {field}: foreign native product source"))
+            matches!(
+                error,
+                crate::cli_output::UserFailure::Ordinary(
+                    crate::cli_output::OrdinaryFailure::SetupCliIntegrationCheckStatus
+                )
+            ),
+            "{field}: {error:?}"
         );
         let log = fixture.codex_log();
         assert!(!log.contains(" remove "), "{log}");

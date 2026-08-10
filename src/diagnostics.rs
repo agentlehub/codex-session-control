@@ -52,16 +52,102 @@ pub(crate) enum DiagnosticCause {
     Cleanup,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DiagnosticTarget {
+    #[cfg(target_arch = "x86_64")]
+    X86_64Linux,
+    #[cfg(target_arch = "aarch64")]
+    Aarch64Linux,
+}
+
+impl DiagnosticTarget {
+    pub(crate) fn current() -> Self {
+        #[cfg(target_arch = "x86_64")]
+        {
+            Self::X86_64Linux
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            Self::Aarch64Linux
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Self::X86_64Linux => "x86_64-unknown-linux-gnu",
+            #[cfg(target_arch = "aarch64")]
+            Self::Aarch64Linux => "aarch64-unknown-linux-gnu",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum DiagnosticEvent {
-    CandidateVerified { version: Version },
+    ControllerStarted {
+        version: Version,
+        target: DiagnosticTarget,
+    },
+    CandidateVerified {
+        version: Version,
+    },
     StartingStagedCandidate,
     StagedMarkerAccepted,
-    SelectedCodexHome { codex_home: PathBuf },
+    SelectedCodexHome {
+        codex_home: PathBuf,
+    },
     CompletedPreflight,
     CompletedBinary,
+    CompletedConfiguration,
+    CompletedProjection,
+    CompletedPluginMarketplace,
+    CompletedPluginInstall,
+    CompletedDesktopDiscovery,
+    CompletedDescriptor,
+    CompletedServiceUnit,
+    CompletedDaemonReload,
+    CompletedServiceEnable,
+    CompletedServiceVerify,
     CompletedManifest,
-    FailedServiceVerify { cause: DiagnosticCause },
+    FailedPreflight {
+        cause: DiagnosticCause,
+    },
+    FailedBinary {
+        cause: DiagnosticCause,
+    },
+    FailedConfiguration {
+        cause: DiagnosticCause,
+    },
+    FailedProjection {
+        cause: DiagnosticCause,
+    },
+    FailedPluginMarketplace {
+        cause: DiagnosticCause,
+    },
+    FailedPluginInstall {
+        cause: DiagnosticCause,
+    },
+    FailedDesktopDiscovery {
+        cause: DiagnosticCause,
+    },
+    FailedDescriptor {
+        cause: DiagnosticCause,
+    },
+    FailedServiceUnit {
+        cause: DiagnosticCause,
+    },
+    FailedDaemonReload {
+        cause: DiagnosticCause,
+    },
+    FailedServiceEnable {
+        cause: DiagnosticCause,
+    },
+    FailedServiceVerify {
+        cause: DiagnosticCause,
+    },
+    FailedManifest {
+        cause: DiagnosticCause,
+    },
 }
 
 impl Diagnostics {
@@ -78,7 +164,7 @@ impl Diagnostics {
     }
 
     #[cfg(test)]
-    fn record(command: DiagnosticCommand) -> Self {
+    pub(crate) fn record(command: DiagnosticCommand) -> Self {
         Self {
             command,
             phase: None,
@@ -147,6 +233,9 @@ impl Diagnostics {
             _ => "",
         };
         let detail = match event {
+            DiagnosticEvent::ControllerStarted { version, target } => {
+                format!("controller {version} ({})", target.label())
+            }
             DiagnosticEvent::CandidateVerified { version } => {
                 format!("candidate {version} verified")
             }
@@ -157,16 +246,64 @@ impl Diagnostics {
             }
             DiagnosticEvent::CompletedPreflight => "completed preflight".to_owned(),
             DiagnosticEvent::CompletedBinary => "completed binary".to_owned(),
+            DiagnosticEvent::CompletedConfiguration => "completed configuration".to_owned(),
+            DiagnosticEvent::CompletedProjection => "completed projection".to_owned(),
+            DiagnosticEvent::CompletedPluginMarketplace => {
+                "completed plugin-marketplace".to_owned()
+            }
+            DiagnosticEvent::CompletedPluginInstall => "completed plugin-install".to_owned(),
+            DiagnosticEvent::CompletedDesktopDiscovery => "completed desktop-discovery".to_owned(),
+            DiagnosticEvent::CompletedDescriptor => "completed descriptor".to_owned(),
+            DiagnosticEvent::CompletedServiceUnit => "completed service-unit".to_owned(),
+            DiagnosticEvent::CompletedDaemonReload => "completed daemon-reload".to_owned(),
+            DiagnosticEvent::CompletedServiceEnable => "completed service-enable".to_owned(),
+            DiagnosticEvent::CompletedServiceVerify => "completed service-verify".to_owned(),
             DiagnosticEvent::CompletedManifest => "completed manifest".to_owned(),
+            DiagnosticEvent::FailedPreflight { cause } => {
+                format!("failed preflight ({})", cause.label())
+            }
+            DiagnosticEvent::FailedBinary { cause } => {
+                format!("failed binary ({})", cause.label())
+            }
+            DiagnosticEvent::FailedConfiguration { cause } => {
+                format!("failed configuration ({})", cause.label())
+            }
+            DiagnosticEvent::FailedProjection { cause } => {
+                format!("failed projection ({})", cause.label())
+            }
+            DiagnosticEvent::FailedPluginMarketplace { cause } => {
+                format!("failed plugin-marketplace ({})", cause.label())
+            }
+            DiagnosticEvent::FailedPluginInstall { cause } => {
+                format!("failed plugin-install ({})", cause.label())
+            }
+            DiagnosticEvent::FailedDesktopDiscovery { cause } => {
+                format!("failed desktop-discovery ({})", cause.label())
+            }
+            DiagnosticEvent::FailedDescriptor { cause } => {
+                format!("failed descriptor ({})", cause.label())
+            }
+            DiagnosticEvent::FailedServiceUnit { cause } => {
+                format!("failed service-unit ({})", cause.label())
+            }
+            DiagnosticEvent::FailedDaemonReload { cause } => {
+                format!("failed daemon-reload ({})", cause.label())
+            }
+            DiagnosticEvent::FailedServiceEnable { cause } => {
+                format!("failed service-enable ({})", cause.label())
+            }
             DiagnosticEvent::FailedServiceVerify { cause } => {
                 format!("failed service-verify ({})", cause.label())
+            }
+            DiagnosticEvent::FailedManifest { cause } => {
+                format!("failed manifest ({})", cause.label())
             }
         };
         format!("[verbose] {command}{phase}: {detail}\n")
     }
 
     #[cfg(test)]
-    fn recorded_lines(&self) -> &[String] {
+    pub(crate) fn recorded_lines(&self) -> &[String] {
         match &self.sink {
             DiagnosticSink::Record(lines) => lines,
             _ => &[],
@@ -182,18 +319,18 @@ impl Diagnostics {
 impl DiagnosticCause {
     fn label(self) -> &'static str {
         match self {
-            Self::Unexpected => "unexpected",
-            Self::Validation => "validation",
-            Self::ReleaseDownload => "release-download",
-            Self::Checksum => "checksum",
-            Self::ServiceConfiguration => "service-configuration",
-            Self::ServiceStart => "service-start",
-            Self::ServiceStop => "service-stop",
-            Self::ServiceState => "service-state",
-            Self::CliIntegration => "cli-integration",
-            Self::DesktopIntegration => "desktop-integration",
-            Self::ActiveTasks => "active-tasks",
-            Self::Cleanup => "cleanup",
+            Self::Unexpected => "unexpected failure",
+            Self::Validation => "validation failed",
+            Self::ReleaseDownload => "release could not be retrieved",
+            Self::Checksum => "downloaded release could not be verified",
+            Self::ServiceConfiguration => "service could not be configured",
+            Self::ServiceStart => "service could not be started",
+            Self::ServiceStop => "service could not be stopped",
+            Self::ServiceState => "service state could not be verified",
+            Self::CliIntegration => "Codex CLI integration could not be updated",
+            Self::DesktopIntegration => "Codex Desktop integration could not be updated",
+            Self::ActiveTasks => "active tasks could not be checked safely",
+            Self::Cleanup => "cleanup could not be completed safely",
         }
     }
 }
@@ -256,6 +393,10 @@ mod tests {
             "telemetry-secret",
         ];
         let mut events = vec![
+            DiagnosticEvent::ControllerStarted {
+                version: Version::parse("1.2.3").unwrap(),
+                target: DiagnosticTarget::current(),
+            },
             DiagnosticEvent::CandidateVerified {
                 version: Version::parse("1.2.3").unwrap(),
             },
@@ -266,7 +407,53 @@ mod tests {
             },
             DiagnosticEvent::CompletedPreflight,
             DiagnosticEvent::CompletedBinary,
+            DiagnosticEvent::CompletedConfiguration,
+            DiagnosticEvent::CompletedProjection,
+            DiagnosticEvent::CompletedPluginMarketplace,
+            DiagnosticEvent::CompletedPluginInstall,
+            DiagnosticEvent::CompletedDesktopDiscovery,
+            DiagnosticEvent::CompletedDescriptor,
+            DiagnosticEvent::CompletedServiceUnit,
+            DiagnosticEvent::CompletedDaemonReload,
+            DiagnosticEvent::CompletedServiceEnable,
+            DiagnosticEvent::CompletedServiceVerify,
             DiagnosticEvent::CompletedManifest,
+            DiagnosticEvent::FailedPreflight {
+                cause: DiagnosticCause::Validation,
+            },
+            DiagnosticEvent::FailedBinary {
+                cause: DiagnosticCause::Validation,
+            },
+            DiagnosticEvent::FailedConfiguration {
+                cause: DiagnosticCause::Validation,
+            },
+            DiagnosticEvent::FailedProjection {
+                cause: DiagnosticCause::CliIntegration,
+            },
+            DiagnosticEvent::FailedPluginMarketplace {
+                cause: DiagnosticCause::CliIntegration,
+            },
+            DiagnosticEvent::FailedPluginInstall {
+                cause: DiagnosticCause::CliIntegration,
+            },
+            DiagnosticEvent::FailedDesktopDiscovery {
+                cause: DiagnosticCause::DesktopIntegration,
+            },
+            DiagnosticEvent::FailedDescriptor {
+                cause: DiagnosticCause::DesktopIntegration,
+            },
+            DiagnosticEvent::FailedServiceUnit {
+                cause: DiagnosticCause::ServiceConfiguration,
+            },
+            DiagnosticEvent::FailedDaemonReload {
+                cause: DiagnosticCause::ServiceConfiguration,
+            },
+            DiagnosticEvent::FailedServiceEnable {
+                cause: DiagnosticCause::ServiceStart,
+            },
+            DiagnosticEvent::FailedManifest {
+                cause: DiagnosticCause::Validation,
+            },
         ];
         events.extend(
             [

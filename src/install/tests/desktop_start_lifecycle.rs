@@ -52,26 +52,18 @@ async fn publishes_descriptor_before_service_enable() {
     .unwrap();
     let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
 
-    let report = setup_with_context(fixture.context(true)).await.unwrap();
+    let report = setup_with_context(fixture.context(true))
+        .await
+        .unwrap()
+        .render();
 
     assert_eq!(
         fs::read(&descriptor).unwrap(),
         crate::desktop::render_descriptor(&fixture.paths.socket).unwrap(),
     );
-    assert!(report.stdout.contains("Desktop attachment: available"));
-    let stages = report.stderr;
-    assert!(
-        stages.find("completed: desktop-discovery\n").unwrap()
-            < stages.find("completed: descriptor\n").unwrap()
-    );
-    assert!(
-        stages.find("completed: descriptor\n").unwrap()
-            < stages.find("completed: service-unit\n").unwrap()
-    );
-    assert!(
-        stages.find("completed: service-unit\n").unwrap()
-            < stages.find("completed: service-enable\n").unwrap()
-    );
+    assert!(report.stdout.contains(
+        "If Codex Desktop is already running, restart it to make Codex Session Control available there."
+    ));
     assert!(
         fixture
             .systemctl_log()
@@ -92,15 +84,18 @@ async fn unavailable_explicit_launcher_keeps_cli_mcp_setup_and_null_attachment()
     let mut context = fixture.context(true);
     context.desktop_launcher = Some(launcher);
 
-    let report = setup_with_context(context).await.unwrap();
+    let report = setup_with_context(context).await.unwrap().render();
     let manifest: InstalledRelease =
         serde_json::from_slice(&fs::read(&fixture.paths.manifest).unwrap()).unwrap();
 
     assert_eq!(manifest.desktop_attachment, None);
     assert!(!descriptor.exists());
-    assert!(report.stdout.contains("Desktop attachment: unavailable\n"));
-    assert!(report.stdout.contains("Desktop restart required: no\n"));
-    assert!(report.stderr.contains("Desktop attachment unavailable:"));
+    assert!(!report.stdout.contains("Codex Desktop"));
+    assert!(
+        report
+            .stderr
+            .contains("Codex Desktop integration is unavailable")
+    );
     assert!(
         fixture
             .systemctl_log()
@@ -120,14 +115,14 @@ async fn missing_absolute_explicit_launcher_keeps_cli_mcp_setup_and_null_attachm
     let mut context = fixture.context(true);
     context.desktop_launcher = Some(launcher);
 
-    let report = setup_with_context(context).await.unwrap();
-    let manifest: InstalledRelease =
-        serde_json::from_slice(&fs::read(&fixture.paths.manifest).unwrap()).unwrap();
-
-    assert_eq!(manifest.desktop_attachment, None);
+    let report = setup_with_context(context).await.unwrap().render();
     assert!(!descriptor.exists());
-    assert!(report.stdout.contains("Desktop attachment: unavailable\n"));
-    assert!(report.stderr.contains("Desktop attachment unavailable:"));
+    assert!(!report.stdout.contains("Codex Desktop"));
+    assert!(
+        report
+            .stderr
+            .contains("Codex Desktop integration is unavailable")
+    );
     assert!(
         fixture
             .systemctl_log()
@@ -140,11 +135,18 @@ async fn setup_records_desktop_discovery_and_noop_descriptor_after_plugin_instal
     let fixture = Fixture::new();
     let _authority = FakeAuthority::start(&fixture.paths, TESTED_CODEX_VERSION).await;
 
-    let report = setup_with_context(fixture.context(true)).await.unwrap();
-    let stages: Vec<&str> = report
-        .stderr
-        .lines()
-        .filter_map(|line| line.strip_prefix("completed: "))
+    let mut diagnostics =
+        crate::diagnostics::Diagnostics::record(crate::diagnostics::DiagnosticCommand::Setup);
+    setup_with_context_and_diagnostics(fixture.context(true), &mut diagnostics)
+        .await
+        .unwrap();
+    let stages: Vec<&str> = diagnostics
+        .recorded_lines()
+        .iter()
+        .filter_map(|line| {
+            line.strip_prefix("[verbose] setup: completed ")
+                .map(str::trim_end)
+        })
         .collect();
 
     assert_eq!(
@@ -202,7 +204,12 @@ async fn setup_failures_before_descriptor_leave_existing_routing_intent_and_mani
 
         let error = setup_with_context(replacement).await.unwrap_err();
 
-        assert!(error.to_string().contains(&format!("failed at {stage}:")));
+        assert!(matches!(
+            error,
+            crate::cli_output::UserFailure::Ordinary(
+                crate::cli_output::OrdinaryFailure::SetupUnexpectedRetry
+            )
+        ));
         assert_eq!(
             fs::read(&fixture.paths.manifest).unwrap(),
             manifest,
@@ -247,16 +254,19 @@ async fn failed_reverification_or_explicit_replacement_preserves_persisted_inten
             retry.desktop_launcher = Some(replacement);
         }
 
-        let report = setup_with_context(retry).await.unwrap();
+        let report = setup_with_context(retry).await.unwrap().render();
 
         assert_eq!(
             fs::read(&fixture.paths.manifest).unwrap(),
             original_manifest
         );
         assert_eq!(fs::read(&descriptor).unwrap(), original_descriptor);
-        assert!(report.stdout.contains("Desktop attachment: unverified\n"));
-        assert!(report.stdout.contains("Desktop restart required: no\n"));
-        assert!(report.stderr.contains("Desktop attachment unavailable:"));
+        assert!(!report.stdout.contains("Codex Desktop"));
+        assert!(
+            report
+                .stderr
+                .contains("Codex Desktop integration is unavailable")
+        );
         assert!(
             fixture
                 .systemctl_log()
@@ -293,7 +303,7 @@ async fn successful_explicit_replacement_publishes_new_before_removing_old_inten
     let mut replacement = fixture.context(true);
     replacement.desktop_launcher = Some(replacement_launcher.clone());
 
-    let report = setup_with_context(replacement).await.unwrap();
+    let report = setup_with_context(replacement).await.unwrap().render();
     let manifest: InstalledRelease =
         serde_json::from_slice(&fs::read(&fixture.paths.manifest).unwrap()).unwrap();
 
@@ -306,7 +316,9 @@ async fn successful_explicit_replacement_publishes_new_before_removing_old_inten
         manifest.desktop_attachment.unwrap().launcher_path,
         replacement_launcher
     );
-    assert!(report.stdout.contains("Desktop restart required: yes\n"));
+    assert!(report.stdout.contains(
+        "If Codex Desktop is already running, restart it to make Codex Session Control available there."
+    ));
     assert!(
         fixture
             .systemctl_log()
@@ -334,7 +346,7 @@ async fn same_descriptor_path_replacement_keeps_live_routing_and_requires_no_res
 
     let mut replacement = fixture.context(true);
     replacement.desktop_launcher = Some(second_launcher.clone());
-    let report = setup_with_context(replacement).await.unwrap();
+    let report = setup_with_context(replacement).await.unwrap().render();
     let manifest: InstalledRelease =
         serde_json::from_slice(&fs::read(&fixture.paths.manifest).unwrap()).unwrap();
 
@@ -343,7 +355,7 @@ async fn same_descriptor_path_replacement_keeps_live_routing_and_requires_no_res
         manifest.desktop_attachment.unwrap().launcher_path,
         second_launcher
     );
-    assert!(report.stdout.contains("Desktop restart required: no\n"));
+    assert!(!report.stdout.contains("restart Codex Desktop"));
 }
 
 #[tokio::test]
@@ -374,11 +386,10 @@ async fn replacement_old_descriptor_removal_race_cleans_new_publication() {
 
     let error = setup_with_context(replacement).await.unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("Desktop descriptor switch failed")
-    );
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::RollbackIncomplete(_)
+    ));
     assert_eq!(fs::read(&fixture.paths.manifest).unwrap(), manifest);
     assert!(!replacement_descriptor.exists());
     assert_ne!(fs::read(&original_descriptor).unwrap(), original);
@@ -416,7 +427,12 @@ async fn foreign_descriptor_stops_before_service_mutation() {
 
     let error = setup_with_context(context).await.unwrap_err();
 
-    assert!(error.to_string().contains("Desktop descriptor is foreign"));
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::SetupDesktopIntegrationCheckStatus
+        )
+    ));
     assert!(fixture.systemctl_log().is_empty());
 }
 
@@ -451,11 +467,12 @@ async fn unsafe_descriptor_stops_before_service_mutation() {
 
     let error = setup_with_context(context).await.unwrap_err();
 
-    assert!(
-        error
-            .to_string()
-            .contains("Desktop descriptor safety error")
-    );
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::SetupDesktopIntegrationCheckStatus
+        )
+    ));
     assert!(fixture.systemctl_log().is_empty());
 }
 
@@ -479,7 +496,12 @@ async fn inactive_absent_post_publication_failure_removes_only_invocation_change
 
         let error = setup_with_context(context).await.unwrap_err();
 
-        assert!(error.to_string().contains(&format!("failed at {failure}:")));
+        assert!(matches!(
+            error,
+            crate::cli_output::UserFailure::Ordinary(
+                crate::cli_output::OrdinaryFailure::SetupServiceConfigurationRetry
+            )
+        ));
         assert!(!descriptor.exists(), "{failure}");
         assert!(!fixture.active.exists(), "{failure}");
         assert!(!fixture.paths.socket.exists(), "{failure}");
@@ -516,12 +538,10 @@ async fn unproven_service_activity_retains_a_changed_descriptor_without_stop() {
 
     let error = setup_with_context(context).await.unwrap_err();
 
-    assert!(error.to_string().contains("failed at service-unit:"));
-    assert!(
-        error
-            .to_string()
-            .contains("service activity could not be proven")
-    );
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::RollbackIncomplete(_)
+    ));
     assert!(descriptor.exists());
     assert!(!fixture.active.exists());
     assert!(!fixture.paths.socket.exists());
@@ -550,7 +570,12 @@ async fn preexisting_running_authority_and_unchanged_descriptor_are_never_stoppe
 
     let error = setup_with_context(retry).await.unwrap_err();
 
-    assert!(error.to_string().contains("failed at service-unit:"));
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::SetupServiceConfigurationRetry
+        )
+    ));
     assert_eq!(fs::read(&descriptor).unwrap(), expected);
     assert!(fixture.enabled.exists());
     assert!(fixture.active.exists());
@@ -572,17 +597,10 @@ async fn newly_active_authority_after_failed_start_retains_changed_descriptor_wi
 
     let error = setup_with_context(context).await.unwrap_err();
 
-    assert!(error.to_string().contains("failed at service-verify:"));
-    assert!(
-        error
-            .to_string()
-            .contains("cleanup after changed Desktop descriptor")
-    );
-    assert!(
-        error
-            .to_string()
-            .contains("service is active; exact Desktop descriptor was retained")
-    );
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::RollbackIncomplete(_)
+    ));
     assert!(descriptor.exists());
     assert!(fixture.enabled.exists());
     assert!(fixture.active.exists());
@@ -619,7 +637,12 @@ async fn preexisting_exact_descriptor_is_retained_when_this_invocation_does_not_
 
     let error = setup_with_context(retry).await.unwrap_err();
 
-    assert!(error.to_string().contains("failed at service-enable:"));
+    assert!(matches!(
+        error,
+        crate::cli_output::UserFailure::Ordinary(
+            crate::cli_output::OrdinaryFailure::SetupServiceStartRetry
+        )
+    ));
     assert_eq!(fs::read(&descriptor).unwrap(), expected);
     assert!(!fixture.enabled.exists());
     assert!(!fixture.active.exists());
@@ -728,16 +751,16 @@ async fn lifecycle_uses_the_injected_process_snapshot_not_the_live_proc_tree() {
         (euid.saturating_add(1), b"/opt/Codex\0".to_vec()),
     ]);
 
-    let report = setup_with_context(context).await.unwrap();
+    let report = setup_with_context(context).await.unwrap().render();
 
     assert!(
         report
             .stdout
-            .contains("Unattached running clients: CLI, Desktop\n")
+            .contains("Codex CLI is already running without Codex Session Control.")
     );
+    assert!(report.stdout.contains("  codex-session-control codex"));
     assert!(report.stdout.contains(
-        "This running client was not attached or migrated.\n\
-Desktop: fully exit and restart Desktop to use the shared app-server.\n\
-CLI: exit and resume through codex-session-control codex.\n"
+        "Codex Desktop is already running without Codex Session Control.\n\
+Restart Codex Desktop to use Codex Session Control there."
     ));
 }

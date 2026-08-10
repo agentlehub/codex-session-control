@@ -52,7 +52,10 @@ use super::{
         detect_running_unattached_clients_from_snapshot, inspect_caller_unit,
         wait_for_control_socket,
     },
-    setup::{SetupContext, setup_preflight, setup_with_context},
+    setup::{
+        SetupContext, setup_cli_reconciliation_failure, setup_descriptor_publication_failure,
+        setup_preflight, setup_with_context, setup_with_context_and_diagnostics,
+    },
     status::{StatusContext, status_with_context},
     test_target,
     uninstall::uninstall_with_context,

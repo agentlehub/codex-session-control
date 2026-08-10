@@ -356,12 +356,23 @@ async fn setup_retries_after_every_completed_stage_without_rollback() {
 
         let error = setup_with_context(context).await.unwrap_err();
 
-        assert_injected(&error, stage, "retry: codex-session-control setup");
+        assert!(
+            matches!(
+                error,
+                crate::cli_output::UserFailure::Ordinary(
+                    crate::cli_output::OrdinaryFailure::SetupUnexpectedRetry
+                )
+            ),
+            "{stage}: {error:?}"
+        );
         assert_no_backups(&fixture.paths.home);
         assert_preserved_normal_home_state(&preserved);
-        let report = setup_with_context(fixture.context(true)).await.unwrap();
+        let report = setup_with_context(fixture.context(true))
+            .await
+            .unwrap()
+            .render();
         assert!(report.stdout.starts_with(&format!(
-            "Installed release: {}\n",
+            "Codex Session Control {} is ready.\n",
             env!("CARGO_PKG_VERSION")
         )));
         assert_preserved_normal_home_state(&preserved);
