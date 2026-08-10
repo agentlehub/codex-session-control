@@ -547,6 +547,7 @@ fn public_catalog_is_exact() {
 
     let mut command = Command::new(cargo_bin("codex-session-control"));
     command
+        .arg("--verbose")
         .arg("mcp-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
