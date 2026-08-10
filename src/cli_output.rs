@@ -960,231 +960,206 @@ fn render_notice(notice: &UserNotice) -> String {
 }
 
 fn render_ordinary_failure(failure: &OrdinaryFailure) -> String {
-    let setup = "Codex Session Control could not be installed.";
-    let update = "Codex Session Control could not be updated.";
-    let enable = "Codex Session Control could not be started.";
-    let disable = "Codex Session Control could not be stopped.";
-    let uninstall = "Codex Session Control could not be uninstalled.";
-    let status = "Check what needs attention:\n  codex-session-control status\n";
-    let logs = "Check the service logs:\n  journalctl --user -u codex-session-control.service\n";
-    let (headline, problem, recovery) = match failure {
-        OrdinaryFailure::SetupUnsafeTerminalRetry => (
-            setup,
-            "The operation could not safely continue from this terminal.",
-            retry_recovery("setup"),
-        ),
-        OrdinaryFailure::SetupUnexpectedRetry => (
-            setup,
-            "The operation failed unexpectedly.",
-            retry_recovery("setup"),
-        ),
-        OrdinaryFailure::SetupInstalledStateCheckStatus => (
-            setup,
+    const SETUP: &str = "Codex Session Control could not be installed.";
+    const UPDATE: &str = "Codex Session Control could not be updated.";
+    const ENABLE: &str = "Codex Session Control could not be started.";
+    const DISABLE: &str = "Codex Session Control could not be stopped.";
+    const UNINSTALL: &str = "Codex Session Control could not be uninstalled.";
+    const SETUP_RETRY: &str = "Try again:\n  codex-session-control setup\n";
+    const UPDATE_RETRY: &str = "Try again:\n  codex-session-control update\n";
+    const ENABLE_RETRY: &str = "Try again:\n  codex-session-control enable\n";
+    const DISABLE_RETRY: &str = "Try again:\n  codex-session-control disable\n";
+    const UNINSTALL_RETRY: &str = "Try again:\n  codex-session-control uninstall\n";
+    const STATUS: &str = "Check what needs attention:\n  codex-session-control status\n";
+    const LOGS: &str =
+        "Check the service logs:\n  journalctl --user -u codex-session-control.service\n";
+    if let OrdinaryFailure::SetupInstalledStateRepair { binary } = failure {
+        return failure_block(
+            SETUP,
             "The installed Codex Session Control state could not be verified.",
-            status.to_owned(),
-        ),
-        OrdinaryFailure::SetupInstallationFilesRetryUpdate => (
-            setup,
-            "The installation files could not be updated.",
-            retry_recovery("update"),
-        ),
-        OrdinaryFailure::SetupInstalledStateRepair { binary } => (
-            setup,
-            "The installed Codex Session Control state could not be verified.",
-            format!(
+            &format!(
                 "Repair Codex Session Control:\n  {} setup\n",
                 binary.display()
             ),
+        );
+    }
+    let (headline, problem, recovery) = match failure {
+        OrdinaryFailure::SetupUnsafeTerminalRetry => (
+            SETUP,
+            "The operation could not safely continue from this terminal.",
+            SETUP_RETRY,
+        ),
+        OrdinaryFailure::SetupUnexpectedRetry => {
+            (SETUP, "The operation failed unexpectedly.", SETUP_RETRY)
+        }
+        OrdinaryFailure::SetupInstalledStateCheckStatus => (
+            SETUP,
+            "The installed Codex Session Control state could not be verified.",
+            STATUS,
+        ),
+        OrdinaryFailure::SetupInstallationFilesRetryUpdate => (
+            SETUP,
+            "The installation files could not be updated.",
+            UPDATE_RETRY,
         ),
         OrdinaryFailure::SetupCliIntegrationRetry => (
-            setup,
+            SETUP,
             "Codex CLI integration could not be updated.",
-            retry_recovery("setup"),
+            SETUP_RETRY,
         ),
-        OrdinaryFailure::SetupCliIntegrationCheckStatus => (
-            setup,
-            "Codex CLI integration could not be updated.",
-            status.to_owned(),
-        ),
+        OrdinaryFailure::SetupCliIntegrationCheckStatus => {
+            (SETUP, "Codex CLI integration could not be updated.", STATUS)
+        }
         OrdinaryFailure::SetupInstallationFilesRetry => (
-            setup,
+            SETUP,
             "The installation files could not be updated.",
-            retry_recovery("setup"),
+            SETUP_RETRY,
         ),
-        OrdinaryFailure::SetupServiceConfigurationRetry => (
-            setup,
-            "The service could not be configured.",
-            retry_recovery("setup"),
-        ),
+        OrdinaryFailure::SetupServiceConfigurationRetry => {
+            (SETUP, "The service could not be configured.", SETUP_RETRY)
+        }
         OrdinaryFailure::SetupDesktopIntegrationRetry => (
-            setup,
+            SETUP,
             "Codex Desktop integration could not be updated.",
-            retry_recovery("setup"),
+            SETUP_RETRY,
         ),
         OrdinaryFailure::SetupDesktopIntegrationCheckStatus => (
-            setup,
+            SETUP,
             "Codex Desktop integration could not be updated.",
-            status.to_owned(),
+            STATUS,
         ),
-        OrdinaryFailure::SetupServiceStartRetry => (
-            setup,
-            "The service could not be started.",
-            retry_recovery("setup"),
-        ),
+        OrdinaryFailure::SetupServiceStartRetry => {
+            (SETUP, "The service could not be started.", SETUP_RETRY)
+        }
         OrdinaryFailure::SetupServiceStateRetryUpdate => (
-            setup,
+            SETUP,
             "The service state could not be verified.",
-            retry_recovery("update"),
+            UPDATE_RETRY,
         ),
-        OrdinaryFailure::UpdateUnexpectedRetry => (
-            update,
-            "The operation failed unexpectedly.",
-            retry_recovery("update"),
-        ),
+        OrdinaryFailure::UpdateUnexpectedRetry => {
+            (UPDATE, "The operation failed unexpectedly.", UPDATE_RETRY)
+        }
         OrdinaryFailure::UpdateInstalledStateCheckStatus
         | OrdinaryFailure::UpdateInstalledStatePostMutationCheckStatus => (
-            update,
+            UPDATE,
             "The installed Codex Session Control state could not be verified.",
-            status.to_owned(),
+            STATUS,
         ),
         OrdinaryFailure::UpdateReleaseRetry => (
-            update,
+            UPDATE,
             "The latest release could not be retrieved.",
-            retry_recovery("update"),
+            UPDATE_RETRY,
         ),
         OrdinaryFailure::UpdateChecksumRetry => (
-            update,
+            UPDATE,
             "The downloaded release could not be verified.",
-            retry_recovery("update"),
+            UPDATE_RETRY,
         ),
         OrdinaryFailure::UpdateCliIntegrationRetry => (
-            update,
+            UPDATE,
             "Codex CLI integration could not be updated.",
-            retry_recovery("update"),
+            UPDATE_RETRY,
         ),
         OrdinaryFailure::UpdateCliIntegrationCheckStatus => (
-            update,
+            UPDATE,
             "Codex CLI integration could not be updated.",
-            status.to_owned(),
+            STATUS,
         ),
-        OrdinaryFailure::UpdateServiceConfigurationRetry => (
-            update,
-            "The service could not be configured.",
-            retry_recovery("update"),
-        ),
-        OrdinaryFailure::UpdateServiceStateCheckStatus => (
-            update,
-            "The service state could not be verified.",
-            status.to_owned(),
-        ),
+        OrdinaryFailure::UpdateServiceConfigurationRetry => {
+            (UPDATE, "The service could not be configured.", UPDATE_RETRY)
+        }
+        OrdinaryFailure::UpdateServiceStateCheckStatus => {
+            (UPDATE, "The service state could not be verified.", STATUS)
+        }
         OrdinaryFailure::UpdateActiveTasksRetry => (
-            update,
+            UPDATE,
             "Active tasks could not be checked safely.",
-            retry_recovery("update"),
+            UPDATE_RETRY,
         ),
         OrdinaryFailure::UpdateInstallationFilesRetry => (
-            update,
+            UPDATE,
             "The installation files could not be updated.",
-            retry_recovery("update"),
+            UPDATE_RETRY,
         ),
         OrdinaryFailure::UpdateDesktopIntegrationRetry => (
-            update,
+            UPDATE,
             "Codex Desktop integration could not be updated.",
-            retry_recovery("update"),
+            UPDATE_RETRY,
         ),
         OrdinaryFailure::UpdateDesktopIntegrationCheckStatus => (
-            update,
+            UPDATE,
             "Codex Desktop integration could not be updated.",
-            status.to_owned(),
+            STATUS,
         ),
-        OrdinaryFailure::UpdateServiceConfigurationLogs => (
-            update,
-            "The service could not be configured.",
-            logs.to_owned(),
-        ),
-        OrdinaryFailure::UpdateServiceStartLogs => {
-            (update, "The service could not be started.", logs.to_owned())
+        OrdinaryFailure::UpdateServiceConfigurationLogs => {
+            (UPDATE, "The service could not be configured.", LOGS)
         }
-        OrdinaryFailure::UpdateServiceStateLogs => (
-            update,
-            "The service state could not be verified.",
-            logs.to_owned(),
-        ),
-        OrdinaryFailure::EnableUnexpectedRetry => (
-            enable,
-            "The operation failed unexpectedly.",
-            retry_recovery("enable"),
-        ),
+        OrdinaryFailure::UpdateServiceStartLogs => {
+            (UPDATE, "The service could not be started.", LOGS)
+        }
+        OrdinaryFailure::UpdateServiceStateLogs => {
+            (UPDATE, "The service state could not be verified.", LOGS)
+        }
+        OrdinaryFailure::EnableUnexpectedRetry => {
+            (ENABLE, "The operation failed unexpectedly.", ENABLE_RETRY)
+        }
         OrdinaryFailure::EnableInstalledStateRepairSetup => (
-            enable,
+            ENABLE,
             "The installed Codex Session Control state could not be verified.",
-            "Repair Codex Session Control:\n  codex-session-control setup\n".to_owned(),
+            "Repair Codex Session Control:\n  codex-session-control setup\n",
         ),
         OrdinaryFailure::EnableServiceConfigurationRepairSetup => (
-            enable,
+            ENABLE,
             "The service could not be configured.",
-            "Repair Codex Session Control:\n  codex-session-control setup\n".to_owned(),
+            "Repair Codex Session Control:\n  codex-session-control setup\n",
         ),
         OrdinaryFailure::EnableDesktopIntegrationCheckStatus => (
-            enable,
+            ENABLE,
             "Codex Desktop integration could not be updated.",
-            status.to_owned(),
+            STATUS,
         ),
         OrdinaryFailure::EnableDesktopIntegrationRetry => (
-            enable,
+            ENABLE,
             "Codex Desktop integration could not be updated.",
-            retry_recovery("enable"),
+            ENABLE_RETRY,
         ),
-        OrdinaryFailure::EnableServiceStartRetry => (
-            enable,
-            "The service could not be started.",
-            retry_recovery("enable"),
-        ),
+        OrdinaryFailure::EnableServiceStartRetry => {
+            (ENABLE, "The service could not be started.", ENABLE_RETRY)
+        }
         OrdinaryFailure::EnableServiceStateRetry => (
-            enable,
+            ENABLE,
             "The service state could not be verified.",
-            retry_recovery("enable"),
+            ENABLE_RETRY,
         ),
-        OrdinaryFailure::EnableUnexpectedCheckStatus => (
-            enable,
-            "The operation failed unexpectedly.",
-            status.to_owned(),
-        ),
-        OrdinaryFailure::DisableUnexpectedRetry => (
-            disable,
-            "The operation failed unexpectedly.",
-            retry_recovery("disable"),
-        ),
-        OrdinaryFailure::DisableServiceStopRetry => (
-            disable,
-            "The service could not be stopped.",
-            retry_recovery("disable"),
-        ),
-        OrdinaryFailure::DisableUnexpectedCheckStatus => (
-            disable,
-            "The operation failed unexpectedly.",
-            status.to_owned(),
-        ),
+        OrdinaryFailure::EnableUnexpectedCheckStatus => {
+            (ENABLE, "The operation failed unexpectedly.", STATUS)
+        }
+        OrdinaryFailure::DisableUnexpectedRetry => {
+            (DISABLE, "The operation failed unexpectedly.", DISABLE_RETRY)
+        }
+        OrdinaryFailure::DisableServiceStopRetry => {
+            (DISABLE, "The service could not be stopped.", DISABLE_RETRY)
+        }
+        OrdinaryFailure::DisableUnexpectedCheckStatus => {
+            (DISABLE, "The operation failed unexpectedly.", STATUS)
+        }
         OrdinaryFailure::UninstallUnexpectedRetry => (
-            uninstall,
+            UNINSTALL,
             "The operation failed unexpectedly.",
-            retry_recovery("uninstall"),
+            UNINSTALL_RETRY,
         ),
         OrdinaryFailure::UninstallServiceStopRetry => (
-            uninstall,
+            UNINSTALL,
             "The service could not be stopped.",
-            retry_recovery("uninstall"),
+            UNINSTALL_RETRY,
         ),
+        OrdinaryFailure::SetupInstalledStateRepair { .. } => unreachable!(),
     };
-    failure_block(headline, problem, &recovery)
+    failure_block(headline, problem, recovery)
 }
 
 fn failure_block(headline: &str, problem: &str, recovery: &str) -> String {
     format!("{headline}\n\n{problem}\n\n{recovery}")
-}
-
-fn retry_recovery(command: &str) -> String {
-    format!("Try again:\n  codex-session-control {command}\n")
 }
 
 fn rollback_block(mut primary: String, paths: &ManagedPaths) -> String {
@@ -2409,79 +2384,72 @@ mod tests {
             ),
         ]);
 
+        use StatusProblem::*;
         let status_problems = [
             (
-                StatusProblem::InvocationContextCouldNotBeVerified,
+                InvocationContextCouldNotBeVerified,
                 "The invocation context could not be verified.",
                 false,
             ),
             (
-                StatusProblem::InstalledStateCouldNotBeVerified,
+                InstalledStateCouldNotBeVerified,
                 "The installed Codex Session Control state could not be verified.",
                 false,
             ),
             (
-                StatusProblem::NativeRegistrationFault,
+                NativeRegistrationFault,
                 "Codex CLI native registration is incorrect.",
                 false,
             ),
             (
-                StatusProblem::NativeRegistrationCouldNotBeVerified,
+                NativeRegistrationCouldNotBeVerified,
                 "Codex CLI native registration could not be verified.",
                 false,
             ),
             (
-                StatusProblem::ProjectionFault,
+                ProjectionFault,
                 "Codex CLI integration files are incorrect.",
                 false,
             ),
             (
-                StatusProblem::ProjectionCouldNotBeVerified,
+                ProjectionCouldNotBeVerified,
                 "Codex CLI integration files could not be verified.",
                 false,
             ),
             (
-                StatusProblem::ServiceEnablementCouldNotBeVerified,
+                ServiceEnablementCouldNotBeVerified,
                 "Automatic service startup could not be verified.",
                 false,
             ),
             (
-                StatusProblem::ServiceConfiguredButStopped,
+                ServiceConfiguredButStopped,
                 "The service is configured to run but is stopped.",
                 true,
             ),
             (
-                StatusProblem::ServiceActivityCouldNotBeVerified,
+                ServiceActivityCouldNotBeVerified,
                 "The service state could not be verified.",
                 false,
             ),
             (
-                StatusProblem::SocketMissing,
+                SocketMissing,
                 "The service connection is unavailable.",
                 true,
             ),
+            (SocketUnsafe, "The service connection is unsafe.", false),
+            (AppServerUnavailable, "The app-server is unavailable.", true),
             (
-                StatusProblem::SocketUnsafe,
-                "The service connection is unsafe.",
-                false,
-            ),
-            (
-                StatusProblem::AppServerUnavailable,
-                "The app-server is unavailable.",
-                true,
-            ),
-            (
-                StatusProblem::AppServerCouldNotBeVerified,
+                AppServerCouldNotBeVerified,
                 "The app-server could not be verified.",
                 false,
             ),
             (
-                StatusProblem::DesktopDescriptorFault,
+                DesktopDescriptorFault,
                 "Codex Desktop integration is incorrectly configured.",
                 false,
             ),
             (
-                StatusProblem::DesktopCouldNotBeVerified,
+                DesktopCouldNotBeVerified,
                 "Codex Desktop integration could not be verified.",
                 false,
             ),
@@ -2566,9 +2534,7 @@ mod tests {
     #[test]
     fn every_materially_distinct_success_and_notice_block_is_exact() {
         for (success, expected) in success_render_cases() {
-            let expected_exit_code = expected.exit_code;
             assert_eq!(success.render(), expected);
-            assert_eq!(expected.exit_code, expected_exit_code);
             assert!(expected.stdout.ends_with('\n'));
         }
 
@@ -2605,33 +2571,17 @@ mod tests {
 
     #[test]
     fn status_renderer_and_exit_matrix_are_exact() {
-        for (state, exit_code) in [
-            (StatusState::Healthy, 0),
-            (StatusState::Disabled, 0),
-            (StatusState::NotInstalled, 1),
-            (StatusState::Unhealthy, 1),
+        use StatusState::*;
+        let cases = success_render_cases();
+        for (state, exit) in [
+            (Healthy, 0),
+            (Disabled, 0),
+            (NotInstalled, 1),
+            (Unhealthy, 1),
         ] {
-            let status = StatusResult::new(
-                state,
-                (state != StatusState::NotInstalled).then(version),
-                match state {
-                    StatusState::Healthy => Some(ServiceSummary::RunningAutomatic),
-                    StatusState::Disabled => Some(ServiceSummary::StoppedAutomaticOff),
-                    StatusState::Unhealthy => Some(ServiceSummary::CouldNotVerify),
-                    StatusState::NotInstalled => None,
-                },
-                if state == StatusState::Healthy {
-                    IntegrationState::Ready
-                } else {
-                    IntegrationState::Unavailable
-                },
-                IntegrationState::Unavailable,
-                (state == StatusState::Unhealthy)
-                    .then_some(StatusProblem::InstalledStateCouldNotBeVerified)
-                    .into_iter()
-                    .collect(),
-            );
-            assert_eq!(UserSuccess::Status(status).render().exit_code, exit_code);
+            assert!(cases.iter().any(|(success, rendered)| matches!(success,
+                UserSuccess::Status(status) if status.state == state && rendered.exit_code == exit
+            )));
         }
     }
 }

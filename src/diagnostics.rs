@@ -122,78 +122,30 @@ pub(crate) enum DiagnosticEvent {
     CompletedConfigurationRemove,
     CompletedManifestRemove,
     CompletedBinaryRemove,
-    FailedPreflight {
-        cause: DiagnosticCause,
-    },
-    FailedBinary {
-        cause: DiagnosticCause,
-    },
-    FailedConfiguration {
-        cause: DiagnosticCause,
-    },
-    FailedProjection {
-        cause: DiagnosticCause,
-    },
-    FailedPluginMarketplace {
-        cause: DiagnosticCause,
-    },
-    FailedPluginInstall {
-        cause: DiagnosticCause,
-    },
-    FailedDesktopDiscovery {
-        cause: DiagnosticCause,
-    },
-    FailedDescriptor {
-        cause: DiagnosticCause,
-    },
-    FailedServiceUnit {
-        cause: DiagnosticCause,
-    },
-    FailedDaemonReload {
-        cause: DiagnosticCause,
-    },
-    FailedServiceEnable {
-        cause: DiagnosticCause,
-    },
-    FailedServiceDisable {
-        cause: DiagnosticCause,
-    },
-    FailedServiceVerify {
-        cause: DiagnosticCause,
-    },
-    FailedDescriptorRemove {
-        cause: DiagnosticCause,
-    },
-    FailedManifest {
-        cause: DiagnosticCause,
-    },
-    FailedServiceUnitRemove {
-        cause: DiagnosticCause,
-    },
-    FailedServiceStop {
-        cause: DiagnosticCause,
-    },
-    FailedServiceStopVerify {
-        cause: DiagnosticCause,
-    },
-    FailedPluginRemove {
-        cause: DiagnosticCause,
-    },
-    FailedMarketplaceRemove {
-        cause: DiagnosticCause,
-    },
-    FailedProjectionRemove {
-        cause: DiagnosticCause,
-    },
-    FailedConfigurationRemove {
-        cause: DiagnosticCause,
-    },
-    FailedManifestRemove {
-        cause: DiagnosticCause,
-    },
-    FailedBinaryRemove {
-        cause: DiagnosticCause,
-    },
+    FailedPreflight(DiagnosticCause),
+    FailedBinary(DiagnosticCause),
+    FailedConfiguration(DiagnosticCause),
+    FailedProjection(DiagnosticCause),
+    FailedPluginMarketplace(DiagnosticCause),
+    FailedPluginInstall(DiagnosticCause),
+    FailedDesktopDiscovery(DiagnosticCause),
+    FailedDescriptor(DiagnosticCause),
+    FailedServiceUnit(DiagnosticCause),
+    FailedDaemonReload(DiagnosticCause),
+    FailedServiceEnable(DiagnosticCause),
+    FailedServiceDisable(DiagnosticCause),
+    FailedServiceVerify(DiagnosticCause),
+    FailedDescriptorRemove(DiagnosticCause),
+    FailedManifest(DiagnosticCause),
+    FailedServiceUnitRemove(DiagnosticCause),
+    FailedServiceStop(DiagnosticCause),
+    FailedServiceStopVerify(DiagnosticCause),
+    FailedPluginRemove(DiagnosticCause),
+    FailedMarketplaceRemove(DiagnosticCause),
+    FailedProjectionRemove(DiagnosticCause),
+    FailedConfigurationRemove(DiagnosticCause),
+    FailedManifestRemove(DiagnosticCause),
+    FailedBinaryRemove(DiagnosticCause),
 }
 
 impl Diagnostics {
@@ -328,76 +280,76 @@ impl Diagnostics {
             }
             DiagnosticEvent::CompletedManifestRemove => "completed manifest-remove".to_owned(),
             DiagnosticEvent::CompletedBinaryRemove => "completed binary-remove".to_owned(),
-            DiagnosticEvent::FailedPreflight { cause } => {
+            DiagnosticEvent::FailedPreflight(cause) => {
                 format!("failed preflight ({})", cause.label())
             }
-            DiagnosticEvent::FailedBinary { cause } => {
+            DiagnosticEvent::FailedBinary(cause) => {
                 format!("failed binary ({})", cause.label())
             }
-            DiagnosticEvent::FailedConfiguration { cause } => {
+            DiagnosticEvent::FailedConfiguration(cause) => {
                 format!("failed configuration ({})", cause.label())
             }
-            DiagnosticEvent::FailedProjection { cause } => {
+            DiagnosticEvent::FailedProjection(cause) => {
                 format!("failed projection ({})", cause.label())
             }
-            DiagnosticEvent::FailedPluginMarketplace { cause } => {
+            DiagnosticEvent::FailedPluginMarketplace(cause) => {
                 format!("failed plugin-marketplace ({})", cause.label())
             }
-            DiagnosticEvent::FailedPluginInstall { cause } => {
+            DiagnosticEvent::FailedPluginInstall(cause) => {
                 format!("failed plugin-install ({})", cause.label())
             }
-            DiagnosticEvent::FailedDesktopDiscovery { cause } => {
+            DiagnosticEvent::FailedDesktopDiscovery(cause) => {
                 format!("failed desktop-discovery ({})", cause.label())
             }
-            DiagnosticEvent::FailedDescriptor { cause } => {
+            DiagnosticEvent::FailedDescriptor(cause) => {
                 format!("failed descriptor ({})", cause.label())
             }
-            DiagnosticEvent::FailedServiceUnit { cause } => {
+            DiagnosticEvent::FailedServiceUnit(cause) => {
                 format!("failed service-unit ({})", cause.label())
             }
-            DiagnosticEvent::FailedDaemonReload { cause } => {
+            DiagnosticEvent::FailedDaemonReload(cause) => {
                 format!("failed daemon-reload ({})", cause.label())
             }
-            DiagnosticEvent::FailedServiceEnable { cause } => {
+            DiagnosticEvent::FailedServiceEnable(cause) => {
                 format!("failed service-enable ({})", cause.label())
             }
-            DiagnosticEvent::FailedServiceDisable { cause } => {
+            DiagnosticEvent::FailedServiceDisable(cause) => {
                 format!("failed service-disable ({})", cause.label())
             }
-            DiagnosticEvent::FailedServiceVerify { cause } => {
+            DiagnosticEvent::FailedServiceVerify(cause) => {
                 format!("failed service-verify ({})", cause.label())
             }
-            DiagnosticEvent::FailedDescriptorRemove { cause } => {
+            DiagnosticEvent::FailedDescriptorRemove(cause) => {
                 format!("failed descriptor-remove ({})", cause.label())
             }
-            DiagnosticEvent::FailedManifest { cause } => {
+            DiagnosticEvent::FailedManifest(cause) => {
                 format!("failed manifest ({})", cause.label())
             }
-            DiagnosticEvent::FailedServiceUnitRemove { cause } => {
+            DiagnosticEvent::FailedServiceUnitRemove(cause) => {
                 format!("failed service-unit-remove ({})", cause.label())
             }
-            DiagnosticEvent::FailedServiceStop { cause } => {
+            DiagnosticEvent::FailedServiceStop(cause) => {
                 format!("failed service-stop ({})", cause.label())
             }
-            DiagnosticEvent::FailedServiceStopVerify { cause } => {
+            DiagnosticEvent::FailedServiceStopVerify(cause) => {
                 format!("failed service-stop-verify ({})", cause.label())
             }
-            DiagnosticEvent::FailedPluginRemove { cause } => {
+            DiagnosticEvent::FailedPluginRemove(cause) => {
                 format!("failed plugin-remove ({})", cause.label())
             }
-            DiagnosticEvent::FailedMarketplaceRemove { cause } => {
+            DiagnosticEvent::FailedMarketplaceRemove(cause) => {
                 format!("failed marketplace-remove ({})", cause.label())
             }
-            DiagnosticEvent::FailedProjectionRemove { cause } => {
+            DiagnosticEvent::FailedProjectionRemove(cause) => {
                 format!("failed projection-remove ({})", cause.label())
             }
-            DiagnosticEvent::FailedConfigurationRemove { cause } => {
+            DiagnosticEvent::FailedConfigurationRemove(cause) => {
                 format!("failed configuration-remove ({})", cause.label())
             }
-            DiagnosticEvent::FailedManifestRemove { cause } => {
+            DiagnosticEvent::FailedManifestRemove(cause) => {
                 format!("failed manifest-remove ({})", cause.label())
             }
-            DiagnosticEvent::FailedBinaryRemove { cause } => {
+            DiagnosticEvent::FailedBinaryRemove(cause) => {
                 format!("failed binary-remove ({})", cause.label())
             }
         };
@@ -609,75 +561,29 @@ mod tests {
             DiagnosticEvent::CompletedConfigurationRemove,
             DiagnosticEvent::CompletedManifestRemove,
             DiagnosticEvent::CompletedBinaryRemove,
-            DiagnosticEvent::FailedPreflight {
-                cause: DiagnosticCause::Validation,
-            },
-            DiagnosticEvent::FailedBinary {
-                cause: DiagnosticCause::Validation,
-            },
-            DiagnosticEvent::FailedConfiguration {
-                cause: DiagnosticCause::Validation,
-            },
-            DiagnosticEvent::FailedProjection {
-                cause: DiagnosticCause::CliIntegration,
-            },
-            DiagnosticEvent::FailedPluginMarketplace {
-                cause: DiagnosticCause::CliIntegration,
-            },
-            DiagnosticEvent::FailedPluginInstall {
-                cause: DiagnosticCause::CliIntegration,
-            },
-            DiagnosticEvent::FailedDesktopDiscovery {
-                cause: DiagnosticCause::DesktopIntegration,
-            },
-            DiagnosticEvent::FailedDescriptor {
-                cause: DiagnosticCause::DesktopIntegration,
-            },
-            DiagnosticEvent::FailedServiceUnit {
-                cause: DiagnosticCause::ServiceConfiguration,
-            },
-            DiagnosticEvent::FailedDaemonReload {
-                cause: DiagnosticCause::ServiceConfiguration,
-            },
-            DiagnosticEvent::FailedServiceEnable {
-                cause: DiagnosticCause::ServiceStart,
-            },
-            DiagnosticEvent::FailedServiceDisable {
-                cause: DiagnosticCause::ServiceStop,
-            },
-            DiagnosticEvent::FailedDescriptorRemove {
-                cause: DiagnosticCause::Cleanup,
-            },
-            DiagnosticEvent::FailedManifest {
-                cause: DiagnosticCause::Validation,
-            },
-            DiagnosticEvent::FailedServiceUnitRemove {
-                cause: DiagnosticCause::Cleanup,
-            },
-            DiagnosticEvent::FailedServiceStop {
-                cause: DiagnosticCause::ServiceStop,
-            },
-            DiagnosticEvent::FailedServiceStopVerify {
-                cause: DiagnosticCause::ServiceState,
-            },
-            DiagnosticEvent::FailedPluginRemove {
-                cause: DiagnosticCause::CliIntegration,
-            },
-            DiagnosticEvent::FailedMarketplaceRemove {
-                cause: DiagnosticCause::CliIntegration,
-            },
-            DiagnosticEvent::FailedProjectionRemove {
-                cause: DiagnosticCause::Cleanup,
-            },
-            DiagnosticEvent::FailedConfigurationRemove {
-                cause: DiagnosticCause::Cleanup,
-            },
-            DiagnosticEvent::FailedManifestRemove {
-                cause: DiagnosticCause::Cleanup,
-            },
-            DiagnosticEvent::FailedBinaryRemove {
-                cause: DiagnosticCause::Cleanup,
-            },
+            DiagnosticEvent::FailedPreflight(DiagnosticCause::Validation),
+            DiagnosticEvent::FailedBinary(DiagnosticCause::Validation),
+            DiagnosticEvent::FailedConfiguration(DiagnosticCause::Validation),
+            DiagnosticEvent::FailedProjection(DiagnosticCause::CliIntegration),
+            DiagnosticEvent::FailedPluginMarketplace(DiagnosticCause::CliIntegration),
+            DiagnosticEvent::FailedPluginInstall(DiagnosticCause::CliIntegration),
+            DiagnosticEvent::FailedDesktopDiscovery(DiagnosticCause::DesktopIntegration),
+            DiagnosticEvent::FailedDescriptor(DiagnosticCause::DesktopIntegration),
+            DiagnosticEvent::FailedServiceUnit(DiagnosticCause::ServiceConfiguration),
+            DiagnosticEvent::FailedDaemonReload(DiagnosticCause::ServiceConfiguration),
+            DiagnosticEvent::FailedServiceEnable(DiagnosticCause::ServiceStart),
+            DiagnosticEvent::FailedServiceDisable(DiagnosticCause::ServiceStop),
+            DiagnosticEvent::FailedDescriptorRemove(DiagnosticCause::Cleanup),
+            DiagnosticEvent::FailedManifest(DiagnosticCause::Validation),
+            DiagnosticEvent::FailedServiceUnitRemove(DiagnosticCause::Cleanup),
+            DiagnosticEvent::FailedServiceStop(DiagnosticCause::ServiceStop),
+            DiagnosticEvent::FailedServiceStopVerify(DiagnosticCause::ServiceState),
+            DiagnosticEvent::FailedPluginRemove(DiagnosticCause::CliIntegration),
+            DiagnosticEvent::FailedMarketplaceRemove(DiagnosticCause::CliIntegration),
+            DiagnosticEvent::FailedProjectionRemove(DiagnosticCause::Cleanup),
+            DiagnosticEvent::FailedConfigurationRemove(DiagnosticCause::Cleanup),
+            DiagnosticEvent::FailedManifestRemove(DiagnosticCause::Cleanup),
+            DiagnosticEvent::FailedBinaryRemove(DiagnosticCause::Cleanup),
         ];
         events.extend(
             [
@@ -695,7 +601,7 @@ mod tests {
                 DiagnosticCause::Cleanup,
             ]
             .into_iter()
-            .map(|cause| DiagnosticEvent::FailedServiceVerify { cause }),
+            .map(DiagnosticEvent::FailedServiceVerify),
         );
 
         let mut diagnostics = Diagnostics::record(DiagnosticCommand::Setup);

@@ -85,9 +85,9 @@ async fn run(cli: Cli) -> Result<ProcessOutcome, ControllerError> {
             None => false,
             Some(value) if value == "1" => true,
             Some(_) => {
-                diagnostics.emit(DiagnosticEvent::FailedPreflight {
-                    cause: DiagnosticCause::Unexpected,
-                });
+                diagnostics.emit(DiagnosticEvent::FailedPreflight(
+                    DiagnosticCause::Unexpected,
+                ));
                 diagnostics.flush();
                 return Ok(ProcessOutcome::Render(
                     UserFailure::Ordinary(OrdinaryFailure::UpdateUnexpectedRetry).render(),
@@ -97,9 +97,9 @@ async fn run(cli: Cli) -> Result<ProcessOutcome, ControllerError> {
         let paths = match install::ResolvedUserPaths::from_effective_user() {
             Ok(paths) => paths,
             Err(_) => {
-                diagnostics.emit(DiagnosticEvent::FailedPreflight {
-                    cause: DiagnosticCause::Unexpected,
-                });
+                diagnostics.emit(DiagnosticEvent::FailedPreflight(
+                    DiagnosticCause::Unexpected,
+                ));
                 diagnostics.flush();
                 return Ok(ProcessOutcome::Render(
                     UserFailure::Ordinary(OrdinaryFailure::UpdateUnexpectedRetry).render(),
@@ -143,9 +143,9 @@ async fn run(cli: Cli) -> Result<ProcessOutcome, ControllerError> {
                 }
             }
             Err(_) => {
-                diagnostics.emit(DiagnosticEvent::FailedPreflight {
-                    cause: DiagnosticCause::Validation,
-                });
+                diagnostics.emit(DiagnosticEvent::FailedPreflight(
+                    DiagnosticCause::Validation,
+                ));
                 Err(cli_output::UserFailure::Ordinary(match &cli.command {
                     Command::Enable => cli_output::OrdinaryFailure::EnableUnexpectedRetry,
                     Command::Disable => cli_output::OrdinaryFailure::DisableUnexpectedRetry,
@@ -167,9 +167,9 @@ async fn run(cli: Cli) -> Result<ProcessOutcome, ControllerError> {
                 install::uninstall(target, &mut diagnostics).await
             }
             Err(_) => {
-                diagnostics.emit(DiagnosticEvent::FailedPreflight {
-                    cause: DiagnosticCause::Validation,
-                });
+                diagnostics.emit(DiagnosticEvent::FailedPreflight(
+                    DiagnosticCause::Validation,
+                ));
                 Err(cli_output::UserFailure::Ordinary(
                     cli_output::OrdinaryFailure::UninstallUnexpectedRetry,
                 ))

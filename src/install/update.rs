@@ -14,9 +14,8 @@ use crate::{
         StopThenRetry, UpdateState, UpdateSuccess, UserFailure, UserNotice, UserSuccess,
     },
     desktop::{
-        DescriptorPublicationFailure, DescriptorPublicationResidue, DescriptorState,
-        DesktopAvailability, inspect_descriptor, probe_persisted_desktop_capability,
-        publish_descriptor, render_descriptor,
+        DescriptorPublicationFailure, DescriptorState, DesktopAvailability, inspect_descriptor,
+        probe_persisted_desktop_capability, publish_descriptor, render_descriptor,
     },
     diagnostics::{DiagnosticEvent, Diagnostics},
     error::ControllerError,
@@ -143,7 +142,7 @@ pub(super) enum CandidateWaitHook {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum UpdateStage {
+enum UpdateStage {
     ReleaseDiscovery,
     ReleaseDownload,
     Checksum,
@@ -166,6 +165,7 @@ pub(super) enum UpdateStage {
 }
 
 impl UpdateStage {
+    #[cfg(test)]
     const fn name(self) -> &'static str {
         match self {
             Self::ReleaseDiscovery => "release-discovery",
@@ -222,19 +222,19 @@ impl UpdateStage {
             | Self::CandidatePreflight
             | Self::ServiceSnapshot
             | Self::RestartInspection
-            | Self::ActiveTurnGate => DiagnosticEvent::FailedPreflight { cause },
-            Self::Binary => DiagnosticEvent::FailedBinary { cause },
-            Self::Configuration => DiagnosticEvent::FailedConfiguration { cause },
-            Self::Projection => DiagnosticEvent::FailedProjection { cause },
-            Self::PluginMarketplace => DiagnosticEvent::FailedPluginMarketplace { cause },
-            Self::PluginInstall => DiagnosticEvent::FailedPluginInstall { cause },
-            Self::DesktopDiscovery => DiagnosticEvent::FailedDesktopDiscovery { cause },
-            Self::Descriptor => DiagnosticEvent::FailedDescriptor { cause },
-            Self::ServiceUnit => DiagnosticEvent::FailedServiceUnit { cause },
-            Self::DaemonReload => DiagnosticEvent::FailedDaemonReload { cause },
-            Self::ServiceApply => DiagnosticEvent::FailedServiceEnable { cause },
-            Self::ServiceVerify => DiagnosticEvent::FailedServiceVerify { cause },
-            Self::Manifest => DiagnosticEvent::FailedManifest { cause },
+            | Self::ActiveTurnGate => DiagnosticEvent::FailedPreflight(cause),
+            Self::Binary => DiagnosticEvent::FailedBinary(cause),
+            Self::Configuration => DiagnosticEvent::FailedConfiguration(cause),
+            Self::Projection => DiagnosticEvent::FailedProjection(cause),
+            Self::PluginMarketplace => DiagnosticEvent::FailedPluginMarketplace(cause),
+            Self::PluginInstall => DiagnosticEvent::FailedPluginInstall(cause),
+            Self::DesktopDiscovery => DiagnosticEvent::FailedDesktopDiscovery(cause),
+            Self::Descriptor => DiagnosticEvent::FailedDescriptor(cause),
+            Self::ServiceUnit => DiagnosticEvent::FailedServiceUnit(cause),
+            Self::DaemonReload => DiagnosticEvent::FailedDaemonReload(cause),
+            Self::ServiceApply => DiagnosticEvent::FailedServiceEnable(cause),
+            Self::ServiceVerify => DiagnosticEvent::FailedServiceVerify(cause),
+            Self::Manifest => DiagnosticEvent::FailedManifest(cause),
         }
     }
 }
@@ -295,13 +295,10 @@ pub(super) fn update_descriptor_publication_failure(
     let _ = &failure.source;
     match failure.residue {
         None => UserFailure::Ordinary(OrdinaryFailure::UpdateDesktopIntegrationRetry),
-        Some(DescriptorPublicationResidue::Stage(path))
-        | Some(DescriptorPublicationResidue::Final(path)) => {
-            UserFailure::RollbackIncomplete(RollbackIncomplete::new(
-                RollbackPrimary::UpdateDesktopRetry,
-                ManagedPaths::new(path, Vec::new()),
-            ))
-        }
+        Some(residue) => UserFailure::RollbackIncomplete(RollbackIncomplete::new(
+            RollbackPrimary::UpdateDesktopRetry,
+            ManagedPaths::new(residue.into_path(), Vec::new()),
+        )),
     }
 }
 

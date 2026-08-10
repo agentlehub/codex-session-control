@@ -28,6 +28,14 @@ pub(crate) enum DescriptorPublicationResidue {
     Final(PathBuf),
 }
 
+impl DescriptorPublicationResidue {
+    pub(crate) fn into_path(self) -> PathBuf {
+        match self {
+            Self::Stage(path) | Self::Final(path) => path,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct DescriptorPublicationFailure {
     pub(crate) source: ControllerError,

@@ -17,10 +17,10 @@ use crate::{
         RollbackIncomplete, RollbackPrimary, SetupSuccess, UserFailure, UserNotice, UserSuccess,
     },
     desktop::{
-        DescriptorPublicationFailure, DescriptorPublicationResidue, DescriptorState,
-        DesktopAvailability, DesktopTarget, inspect_descriptor, preflight_descriptor_switch,
-        probe_desktop_capability, probe_persisted_desktop_capability, publish_descriptor,
-        remove_expected_descriptor, render_descriptor,
+        DescriptorPublicationFailure, DescriptorState, DesktopAvailability, DesktopTarget,
+        inspect_descriptor, preflight_descriptor_switch, probe_desktop_capability,
+        probe_persisted_desktop_capability, publish_descriptor, remove_expected_descriptor,
+        render_descriptor,
     },
     diagnostics::{DiagnosticCause, DiagnosticEvent, DiagnosticTarget, Diagnostics},
     error::ControllerError,
@@ -119,19 +119,19 @@ impl SetupStage {
 
     fn failed_event(self, cause: DiagnosticCause) -> DiagnosticEvent {
         match self {
-            Self::Preflight => DiagnosticEvent::FailedPreflight { cause },
-            Self::Binary => DiagnosticEvent::FailedBinary { cause },
-            Self::Configuration => DiagnosticEvent::FailedConfiguration { cause },
-            Self::Projection => DiagnosticEvent::FailedProjection { cause },
-            Self::PluginMarketplace => DiagnosticEvent::FailedPluginMarketplace { cause },
-            Self::PluginInstall => DiagnosticEvent::FailedPluginInstall { cause },
-            Self::DesktopDiscovery => DiagnosticEvent::FailedDesktopDiscovery { cause },
-            Self::Descriptor => DiagnosticEvent::FailedDescriptor { cause },
-            Self::ServiceUnit => DiagnosticEvent::FailedServiceUnit { cause },
-            Self::DaemonReload => DiagnosticEvent::FailedDaemonReload { cause },
-            Self::ServiceEnable => DiagnosticEvent::FailedServiceEnable { cause },
-            Self::ServiceVerify => DiagnosticEvent::FailedServiceVerify { cause },
-            Self::Manifest => DiagnosticEvent::FailedManifest { cause },
+            Self::Preflight => DiagnosticEvent::FailedPreflight(cause),
+            Self::Binary => DiagnosticEvent::FailedBinary(cause),
+            Self::Configuration => DiagnosticEvent::FailedConfiguration(cause),
+            Self::Projection => DiagnosticEvent::FailedProjection(cause),
+            Self::PluginMarketplace => DiagnosticEvent::FailedPluginMarketplace(cause),
+            Self::PluginInstall => DiagnosticEvent::FailedPluginInstall(cause),
+            Self::DesktopDiscovery => DiagnosticEvent::FailedDesktopDiscovery(cause),
+            Self::Descriptor => DiagnosticEvent::FailedDescriptor(cause),
+            Self::ServiceUnit => DiagnosticEvent::FailedServiceUnit(cause),
+            Self::DaemonReload => DiagnosticEvent::FailedDaemonReload(cause),
+            Self::ServiceEnable => DiagnosticEvent::FailedServiceEnable(cause),
+            Self::ServiceVerify => DiagnosticEvent::FailedServiceVerify(cause),
+            Self::Manifest => DiagnosticEvent::FailedManifest(cause),
         }
     }
 }
@@ -164,14 +164,6 @@ fn complete_setup_stage(
     Ok(())
 }
 
-fn descriptor_residue_path(residue: DescriptorPublicationResidue) -> PathBuf {
-    match residue {
-        DescriptorPublicationResidue::Stage(path) | DescriptorPublicationResidue::Final(path) => {
-            path
-        }
-    }
-}
-
 fn setup_desktop_rollback(paths: Vec<PathBuf>) -> UserFailure {
     let mut paths = paths.into_iter();
     let first = paths
@@ -194,7 +186,7 @@ pub(super) fn setup_descriptor_publication_failure(
     failure: DescriptorPublicationFailure,
 ) -> UserFailure {
     match failure.residue {
-        Some(residue) => setup_desktop_rollback(vec![descriptor_residue_path(residue)]),
+        Some(residue) => setup_desktop_rollback(vec![residue.into_path()]),
         None => UserFailure::Ordinary(OrdinaryFailure::SetupDesktopIntegrationRetry),
     }
 }
@@ -823,7 +815,7 @@ fn fail_after_descriptor_publication(
                 .expect("changed descriptor cleanup failure has exact final residue");
             UserFailure::RollbackIncomplete(RollbackIncomplete::new(
                 primary,
-                ManagedPaths::new(descriptor_residue_path(residue), Vec::new()),
+                ManagedPaths::new(residue.into_path(), Vec::new()),
             ))
         }
         Ok(_) => UserFailure::Ordinary(match primary {

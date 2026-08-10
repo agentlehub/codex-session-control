@@ -8,9 +8,9 @@ use crate::{
         RollbackPrimary, StopThenRetry, UserFailure, UserNotice, UserSuccess,
     },
     desktop::{
-        DescriptorPublicationFailure, DescriptorPublicationResidue, DescriptorState,
-        DesktopAvailability, DesktopTarget, inspect_descriptor, preflight_descriptor_switch,
-        probe_persisted_desktop_capability, publish_descriptor, render_descriptor,
+        DescriptorPublicationFailure, DescriptorState, DesktopAvailability, DesktopTarget,
+        inspect_descriptor, preflight_descriptor_switch, probe_persisted_desktop_capability,
+        publish_descriptor, render_descriptor,
     },
     diagnostics::{DiagnosticCause, DiagnosticEvent, DiagnosticTarget, Diagnostics},
     error::ControllerError,
@@ -59,13 +59,13 @@ impl LifecycleStage {
 
     fn failed_event(self, cause: DiagnosticCause) -> DiagnosticEvent {
         match self {
-            Self::Configuration => DiagnosticEvent::FailedConfiguration { cause },
-            Self::ServiceUnit => DiagnosticEvent::FailedServiceUnit { cause },
-            Self::Descriptor => DiagnosticEvent::FailedDescriptor { cause },
-            Self::DescriptorRemove => DiagnosticEvent::FailedDescriptorRemove { cause },
-            Self::ServiceEnable => DiagnosticEvent::FailedServiceEnable { cause },
-            Self::ServiceDisable => DiagnosticEvent::FailedServiceDisable { cause },
-            Self::ServiceVerify => DiagnosticEvent::FailedServiceVerify { cause },
+            Self::Configuration => DiagnosticEvent::FailedConfiguration(cause),
+            Self::ServiceUnit => DiagnosticEvent::FailedServiceUnit(cause),
+            Self::Descriptor => DiagnosticEvent::FailedDescriptor(cause),
+            Self::DescriptorRemove => DiagnosticEvent::FailedDescriptorRemove(cause),
+            Self::ServiceEnable => DiagnosticEvent::FailedServiceEnable(cause),
+            Self::ServiceDisable => DiagnosticEvent::FailedServiceDisable(cause),
+            Self::ServiceVerify => DiagnosticEvent::FailedServiceVerify(cause),
         }
     }
 }
@@ -80,14 +80,6 @@ fn lifecycle_failed(
     failure
 }
 
-fn descriptor_residue_path(residue: DescriptorPublicationResidue) -> std::path::PathBuf {
-    match residue {
-        DescriptorPublicationResidue::Stage(path) | DescriptorPublicationResidue::Final(path) => {
-            path
-        }
-    }
-}
-
 pub(super) fn enable_context_failure() -> UserFailure {
     UserFailure::Ordinary(OrdinaryFailure::EnableUnexpectedRetry)
 }
@@ -100,7 +92,7 @@ pub(super) fn enable_publication_failure(failure: DescriptorPublicationFailure) 
     match failure.residue {
         Some(residue) => UserFailure::RollbackIncomplete(RollbackIncomplete::new(
             RollbackPrimary::EnableDesktopRetry,
-            ManagedPaths::new(descriptor_residue_path(residue), Vec::new()),
+            ManagedPaths::new(residue.into_path(), Vec::new()),
         )),
         None => UserFailure::Ordinary(OrdinaryFailure::EnableDesktopIntegrationRetry),
     }
@@ -130,7 +122,7 @@ pub(super) fn enable_service_failure(
                 .expect("changed descriptor cleanup failure has exact residue");
             UserFailure::RollbackIncomplete(RollbackIncomplete::new(
                 RollbackPrimary::EnableServiceStateCheckStatus,
-                ManagedPaths::new(descriptor_residue_path(residue), Vec::new()),
+                ManagedPaths::new(residue.into_path(), Vec::new()),
             ))
         }
     }

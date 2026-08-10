@@ -80,16 +80,16 @@ impl UninstallStage {
 
     fn failed_event(self, cause: DiagnosticCause) -> DiagnosticEvent {
         match self {
-            Self::ServiceStop => DiagnosticEvent::FailedServiceStop { cause },
-            Self::ServiceStopVerify => DiagnosticEvent::FailedServiceStopVerify { cause },
-            Self::DescriptorRemove => DiagnosticEvent::FailedDescriptorRemove { cause },
-            Self::ServiceUnitRemove => DiagnosticEvent::FailedServiceUnitRemove { cause },
-            Self::PluginRemove => DiagnosticEvent::FailedPluginRemove { cause },
-            Self::MarketplaceRemove => DiagnosticEvent::FailedMarketplaceRemove { cause },
-            Self::ProjectionRemove => DiagnosticEvent::FailedProjectionRemove { cause },
-            Self::ConfigurationRemove => DiagnosticEvent::FailedConfigurationRemove { cause },
-            Self::ManifestRemove => DiagnosticEvent::FailedManifestRemove { cause },
-            Self::BinaryRemove => DiagnosticEvent::FailedBinaryRemove { cause },
+            Self::ServiceStop => DiagnosticEvent::FailedServiceStop(cause),
+            Self::ServiceStopVerify => DiagnosticEvent::FailedServiceStopVerify(cause),
+            Self::DescriptorRemove => DiagnosticEvent::FailedDescriptorRemove(cause),
+            Self::ServiceUnitRemove => DiagnosticEvent::FailedServiceUnitRemove(cause),
+            Self::PluginRemove => DiagnosticEvent::FailedPluginRemove(cause),
+            Self::MarketplaceRemove => DiagnosticEvent::FailedMarketplaceRemove(cause),
+            Self::ProjectionRemove => DiagnosticEvent::FailedProjectionRemove(cause),
+            Self::ConfigurationRemove => DiagnosticEvent::FailedConfigurationRemove(cause),
+            Self::ManifestRemove => DiagnosticEvent::FailedManifestRemove(cause),
+            Self::BinaryRemove => DiagnosticEvent::FailedBinaryRemove(cause),
         }
     }
 }
