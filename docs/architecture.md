@@ -65,10 +65,8 @@ Each MCP client using Codex Session Control starts `codex-session-control mcp-se
 
 MCP operations have time limits, and responses are matched to request IDs. Actions that change a session are sent at most once. If the connection is lost after an action may have been sent, the tool reports `outcome_unknown` instead of retrying automatically.
 
-### Descendant interruption
+### Interrupting subagents
 
-`thread_interrupt` handles the requested thread first. Without `includeDescendants`, it reports active spawned descendants but leaves them running. With it, the tool fully paginates active spawned descendants at every depth, then refreshes and interrupts them concurrently on independent connections. Results preserve discovery order, protect the caller, and isolate each descendant's failure.
-
-A requested-thread error stops before discovery; a discovery error preserves that thread's result and prevents descendant mutations. Scope is the finite discovery pass, so later activations and spawns are excluded. Interrupting does not change goal state.
+`thread_interrupt` stops only the selected session by default and lists any active subagents left running. Set `includeDescendants` to `true` to stop its active subagents too, including nested ones. Interrupting does not pause or clear goals.
 
 See [Security](security.md) for MCP access and trust boundaries.

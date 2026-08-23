@@ -250,7 +250,7 @@ pub(super) struct ThreadInterruptInput {
     pub(super) thread_id: String,
     #[serde(default)]
     #[schemars(
-        description = "When true, also interrupt active spawned descendants discovered at every depth. Omit or use false for exact-thread scope."
+        description = "Also interrupt active subagents, including nested ones. Defaults to false."
     )]
     pub(super) include_descendants: bool,
 }
@@ -387,7 +387,7 @@ pub(super) fn catalog() -> Vec<Tool> {
         ),
         catalog_tool_with_schema::<ThreadInterruptInput>(
             "thread_interrupt",
-            "Interrupt exactly the target thread's active turn. Set includeDescendants to also interrupt active spawned descendants; exact-thread scope may return a structured warning for active descendants left running. An active goal may start another turn.",
+            "Interrupt another thread's active turn, optionally including active subagents. Active goals may start another turn.",
             interrupt_output_schema(),
         ),
     ]

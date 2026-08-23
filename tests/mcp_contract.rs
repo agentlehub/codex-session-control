@@ -806,9 +806,9 @@ fn description_contracts() -> BTreeMap<&'static str, Value> {
         (
             "thread_interrupt",
             json!({
-                "tool": "Interrupt exactly the target thread's active turn. Set includeDescendants to also interrupt active spawned descendants; exact-thread scope may return a structured warning for active descendants left running. An active goal may start another turn.",
+                "tool": "Interrupt another thread's active turn, optionally including active subagents. Active goals may start another turn.",
                 "input": {
-                    "includeDescendants": "When true, also interrupt active spawned descendants discovered at every depth. Omit or use false for exact-thread scope."
+                    "includeDescendants": "Also interrupt active subagents, including nested ones. Defaults to false."
                 },
                 "output": {}
             }),
