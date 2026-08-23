@@ -645,6 +645,10 @@ fn public_catalog_is_exact() {
             contract.input_required,
         );
         if name == "thread_interrupt" {
+            assert!(
+                !permits_null(&tool["inputSchema"]["properties"]["threadId"]),
+                "thread_interrupt.threadId must reject explicit null"
+            );
             assert_interrupt_output_schema(&tool["outputSchema"]);
         } else {
             assert_object_schema(
@@ -802,8 +806,10 @@ fn description_contracts() -> BTreeMap<&'static str, Value> {
         (
             "thread_interrupt",
             json!({
-                "tool": "Interrupt another thread's active turn. An active goal may start another turn.",
-                "input": {},
+                "tool": "Interrupt another thread's active turn, optionally including active subagents. Active goals may start another turn.",
+                "input": {
+                    "includeDescendants": "Also interrupt active subagents, including nested ones. Defaults to false."
+                },
                 "output": {}
             }),
         ),
@@ -953,7 +959,7 @@ fn schema_contracts() -> BTreeMap<&'static str, SchemaContract> {
         (
             "thread_interrupt",
             SchemaContract {
-                input_properties: &["threadId"],
+                input_properties: &["includeDescendants", "threadId"],
                 input_required: &["threadId"],
                 output_properties: &[],
                 output_required: &[],
@@ -966,18 +972,7 @@ fn schema_contracts() -> BTreeMap<&'static str, SchemaContract> {
 }
 
 fn assert_object_schema(schema: &Value, properties: &[&str], required: &[&str]) {
-    assert_eq!(schema["type"], "object", "{schema}");
-    assert_eq!(schema["additionalProperties"], false, "{schema}");
-    assert_eq!(
-        keys(&schema["properties"]),
-        properties.iter().copied().collect(),
-        "{schema}"
-    );
-    assert_eq!(
-        string_set(&schema["required"]),
-        required.iter().copied().collect(),
-        "{schema}"
-    );
+    assert_closed_object_schema(schema, properties, required);
     let required: BTreeSet<_> = required.iter().copied().collect();
     for property in properties {
         if !required.contains(property) {
@@ -1126,29 +1121,194 @@ fn permits_null(schema: &Value) -> bool {
 }
 
 fn assert_interrupt_output_schema(schema: &Value) {
-    let variants = schema["oneOf"].as_array().unwrap();
-    assert_eq!(variants.len(), 2);
-    let by_interrupted: BTreeMap<bool, &Value> = variants
+    assert_local_references_resolve(schema);
+    assert_output_objects_closed(schema);
+    assert_interrupt_result_variants(schema, true);
+}
+
+fn assert_interrupt_result_variants(schema: &Value, descendants: bool) {
+    assert_eq!(variants(schema).len(), 2, "{schema}");
+    for interrupted in [false, true] {
+        let variant = semantic_variant(schema, "interrupted", Some(interrupted));
+        let mut properties = vec!["interrupted"];
+        let mut required = vec!["interrupted"];
+        if interrupted {
+            properties.push("turnId");
+            required.push("turnId");
+        }
+        if descendants {
+            properties.push("descendants");
+        }
+        assert_object_schema(variant, &properties, &required);
+        if interrupted {
+            assert_eq!(variant["properties"]["turnId"]["type"], "string");
+        }
+        if descendants {
+            assert_descendants_schema(&variant["properties"]["descendants"]);
+        }
+    }
+}
+
+fn assert_descendants_schema(schema: &Value) {
+    assert_eq!(variants(schema).len(), 3, "{schema}");
+    let warning = semantic_variant(schema, "warning", None);
+    assert_object_schema(warning, &["warning"], &["warning"]);
+    let warning = &warning["properties"]["warning"];
+    assert_object_schema(
+        warning,
+        &["activeCount", "activeThreadIds", "code"],
+        &["activeCount", "activeThreadIds", "code"],
+    );
+    assert_eq!(
+        warning["properties"]["code"]["const"],
+        "active_descendants_not_interrupted"
+    );
+    assert_eq!(warning["properties"]["activeCount"]["type"], "integer");
+    assert_eq!(warning["properties"]["activeCount"]["minimum"], 0);
+    assert_eq!(warning["properties"]["activeThreadIds"]["type"], "array");
+    assert_eq!(
+        warning["properties"]["activeThreadIds"]["items"]["type"],
+        "string"
+    );
+
+    let results = semantic_variant(schema, "results", None);
+    assert_object_schema(results, &["results"], &["results"]);
+    let results = &results["properties"]["results"];
+    assert_eq!(results["type"], "array");
+    assert_eq!(
+        results
+            .get("minItems")
+            .map(|value| value.as_u64().expect("minItems must be an integer"))
+            .unwrap_or_default(),
+        0,
+        "descendant results must allow an empty array: {results}"
+    );
+    assert_eq!(variants(&results["items"]).len(), 2, "{results}");
+    let result = semantic_variant(&results["items"], "result", None);
+    assert_object_schema(result, &["result", "threadId"], &["result", "threadId"]);
+    assert_eq!(result["properties"]["threadId"]["type"], "string");
+    assert_exact_interrupt_result_schema(&result["properties"]["result"]);
+    let target_error = semantic_variant(&results["items"], "error", None);
+    assert_object_schema(target_error, &["error", "threadId"], &["error", "threadId"]);
+    assert_eq!(target_error["properties"]["threadId"]["type"], "string");
+    assert_tool_error_schema(&target_error["properties"]["error"], None);
+
+    let discovery_error = semantic_variant(schema, "error", None);
+    assert_object_schema(discovery_error, &["error"], &["error"]);
+    assert_tool_error_schema(
+        &discovery_error["properties"]["error"],
+        Some("descendant_discovery_failed"),
+    );
+}
+
+fn assert_exact_interrupt_result_schema(schema: &Value) {
+    assert_interrupt_result_variants(schema, false);
+}
+
+fn assert_tool_error_schema(schema: &Value, code: Option<&str>) {
+    let mut properties = vec![
+        "category",
+        "dispatch",
+        "message",
+        "native",
+        "observation",
+        "reconciliationError",
+        "stage",
+        "threadId",
+        "tool",
+        "turnId",
+    ];
+    let mut required = vec!["category", "message", "stage", "tool"];
+    if code.is_some() {
+        properties.push("code");
+        required.push("code");
+    }
+    assert_closed_object_schema(schema, &properties, &required);
+    if let Some(code) = code {
+        assert_eq!(schema["properties"]["code"]["const"], code);
+    }
+}
+
+fn assert_closed_object_schema(schema: &Value, properties: &[&str], required: &[&str]) {
+    assert_eq!(schema["type"], "object", "{schema}");
+    assert_eq!(schema["additionalProperties"], false, "{schema}");
+    assert_eq!(
+        keys(&schema["properties"]),
+        properties.iter().copied().collect(),
+        "{schema}"
+    );
+    assert_eq!(
+        string_set(&schema["required"]),
+        required.iter().copied().collect(),
+        "{schema}"
+    );
+}
+
+fn semantic_variant<'a>(
+    schema: &'a Value,
+    property: &str,
+    boolean_const: Option<bool>,
+) -> &'a Value {
+    let matches = variants(schema)
         .iter()
-        .map(|variant| {
-            (
-                variant["properties"]["interrupted"]["const"]
-                    .as_bool()
-                    .unwrap(),
-                variant,
-            )
+        .filter(|variant| {
+            variant["properties"].get(property).is_some()
+                && boolean_const.is_none_or(|value| {
+                    variant["properties"][property]["const"].as_bool() == Some(value)
+                })
         })
-        .collect();
-    assert_object_schema(
-        by_interrupted.get(&true).unwrap(),
-        &["interrupted", "turnId"],
-        &["interrupted", "turnId"],
+        .collect::<Vec<_>>();
+    assert_eq!(matches.len(), 1, "expected one semantic variant: {schema}");
+    matches[0]
+}
+
+fn variants(schema: &Value) -> &[Value] {
+    let one_of = schema.get("oneOf").and_then(Value::as_array);
+    let any_of = schema.get("anyOf").and_then(Value::as_array);
+    assert!(
+        matches!((one_of, any_of), (Some(_), None) | (None, Some(_))),
+        "expected exactly one schema union: {schema}"
     );
-    assert_object_schema(
-        by_interrupted.get(&false).unwrap(),
-        &["interrupted"],
-        &["interrupted"],
+    let variants = one_of.or(any_of).unwrap();
+    assert!(
+        !variants.is_empty(),
+        "schema union must not be empty: {schema}"
     );
+    variants
+}
+
+fn assert_local_references_resolve(root: &Value) {
+    fn visit(value: &Value, root: &Value) {
+        if let Some(reference) = value.get("$ref") {
+            let reference = reference.as_str().expect("$ref must be a string");
+            assert!(
+                reference.starts_with("#/"),
+                "schema reference must be local: {reference}"
+            );
+            assert!(
+                root.pointer(&reference[1..]).is_some(),
+                "unresolved local schema reference: {reference}"
+            );
+        }
+        match value {
+            Value::Object(object) => object.values().for_each(|value| visit(value, root)),
+            Value::Array(values) => values.iter().for_each(|value| visit(value, root)),
+            _ => {}
+        }
+    }
+
+    visit(root, root);
+}
+
+fn assert_output_objects_closed(schema: &Value) {
+    if schema["type"] == "object" {
+        assert_eq!(schema["additionalProperties"], false, "{schema}");
+    }
+    match schema {
+        Value::Object(object) => object.values().for_each(assert_output_objects_closed),
+        Value::Array(values) => values.iter().for_each(assert_output_objects_closed),
+        _ => {}
+    }
 }
 
 fn keys(value: &Value) -> BTreeSet<&str> {

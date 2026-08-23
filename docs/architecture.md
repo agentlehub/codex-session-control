@@ -65,4 +65,8 @@ Each MCP client using Codex Session Control starts `codex-session-control mcp-se
 
 MCP operations have time limits, and responses are matched to request IDs. Actions that change a session are sent at most once. If the connection is lost after an action may have been sent, the tool reports `outcome_unknown` instead of retrying automatically.
 
+### Interrupting subagents
+
+`thread_interrupt` stops only the selected session by default and lists any active subagents left running. Set `includeDescendants` to `true` to stop its active subagents too, including nested ones. Interrupting does not pause or clear goals.
+
 See [Security](security.md) for MCP access and trust boundaries.

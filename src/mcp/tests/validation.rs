@@ -93,26 +93,34 @@ fn validation_defaults_deferred_goal_continuation_to_true() {
 #[test]
 fn validation_rejects_self_for_wait_message_goals_and_interrupt() {
     let cases = [
-        ("threads_wait", json!({"threadIds": ["caller"]})),
+        ("threads_wait", json!({"threadIds": ["caller"]}), None),
         (
             "thread_message_send",
             json!({"threadId": "caller", "prompt": "hello"}),
+            None,
         ),
-        ("thread_goal_get", json!({"threadId": "caller"})),
+        ("thread_goal_get", json!({"threadId": "caller"}), None),
         (
             "thread_goal_set",
             json!({"threadId": "caller", "objective": "goal"}),
+            None,
         ),
-        ("thread_goal_pause", json!({"threadId": "caller"})),
-        ("thread_goal_resume", json!({"threadId": "caller"})),
-        ("thread_goal_clear", json!({"threadId": "caller"})),
-        ("thread_interrupt", json!({"threadId": "caller"})),
+        ("thread_goal_pause", json!({"threadId": "caller"}), None),
+        ("thread_goal_resume", json!({"threadId": "caller"}), None),
+        ("thread_goal_clear", json!({"threadId": "caller"}), None),
+        ("thread_interrupt", json!({"threadId": "caller"}), None),
+        (
+            "thread_interrupt",
+            json!({"threadId": "caller", "includeDescendants": true}),
+            Some("self_target"),
+        ),
     ];
-    for (tool, args) in cases {
-        assert_category(
-            validate_input(tool, arguments(args), &meta("caller")).unwrap_err(),
-            ToolErrorCategory::PolicyRejected,
-        );
+    for (tool, args, expected_stage) in cases {
+        let error = validate_input(tool, arguments(args), &meta("caller")).unwrap_err();
+        if let Some(expected_stage) = expected_stage {
+            assert_eq!(error.stage, expected_stage);
+        }
+        assert_category(error, ToolErrorCategory::PolicyRejected);
     }
 }
 
@@ -183,6 +191,11 @@ fn validation_enforces_id_cursor_cwd_limit_and_open_effort_shapes() {
             "thread_create",
             json!({"prompt": "hello", "cwd": "/tmp", "reasoningEffort": ""}),
             Value::Null,
+        ),
+        (
+            "thread_interrupt",
+            json!({"threadId": "target", "includeDescendants": "true"}),
+            meta("caller"),
         ),
     ] {
         assert_category(
@@ -318,6 +331,10 @@ fn validation_rejects_explicit_null_for_every_optional_public_field() {
             json!({"threadId": "target", "prompt": "p", "reasoningEffort": null}),
         ),
         ("thread_title_set", json!({"threadId": null, "title": "t"})),
+        (
+            "thread_interrupt",
+            json!({"threadId": "target", "includeDescendants": null}),
+        ),
     ] {
         assert_category(
             validate_input(tool, arguments(args), &meta("caller")).unwrap_err(),

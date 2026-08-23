@@ -248,13 +248,70 @@ pub(super) struct ThreadGoalClearResult {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct ThreadInterruptInput {
     pub(super) thread_id: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Also interrupt active subagents, including nested ones. Defaults to false."
+    )]
+    pub(super) include_descendants: bool,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(untagged, rename_all_fields = "camelCase")]
-pub(super) enum ThreadInterruptResult {
+pub(super) enum ExactThreadInterruptResult {
     Interrupted { interrupted: bool, turn_id: String },
     NotInterrupted { interrupted: bool },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ThreadInterruptResult {
+    #[serde(flatten)]
+    pub(super) exact: ExactThreadInterruptResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) descendants: Option<ThreadInterruptDescendants>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged, rename_all_fields = "camelCase")]
+pub(super) enum ThreadInterruptDescendants {
+    Warning {
+        warning: ActiveDescendantsWarning,
+    },
+    Results {
+        results: Vec<DescendantInterruptEntry>,
+    },
+    Error {
+        error: DescendantDiscoveryError,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ActiveDescendantsWarning {
+    pub(super) code: &'static str,
+    pub(super) active_count: usize,
+    pub(super) active_thread_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged, rename_all_fields = "camelCase")]
+pub(super) enum DescendantInterruptEntry {
+    Result {
+        thread_id: String,
+        result: ExactThreadInterruptResult,
+    },
+    Error {
+        thread_id: String,
+        error: ToolErrorData,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DescendantDiscoveryError {
+    pub(super) code: &'static str,
+    #[serde(flatten)]
+    pub(super) error: ToolErrorData,
 }
 
 #[derive(Debug)]
@@ -274,7 +331,10 @@ pub(super) enum ValidatedInput {
     ThreadGoalPause(ThreadGoalPauseInput),
     ThreadGoalResume(ThreadGoalResumeInput),
     ThreadGoalClear(ThreadGoalClearInput),
-    ThreadInterrupt(ThreadInterruptInput),
+    ThreadInterrupt {
+        input: ThreadInterruptInput,
+        caller_thread_id: String,
+    },
 }
 
 pub(super) fn catalog() -> Vec<Tool> {
@@ -327,7 +387,7 @@ pub(super) fn catalog() -> Vec<Tool> {
         ),
         catalog_tool_with_schema::<ThreadInterruptInput>(
             "thread_interrupt",
-            "Interrupt another thread's active turn. An active goal may start another turn.",
+            "Interrupt another thread's active turn, optionally including active subagents. Active goals may start another turn.",
             interrupt_output_schema(),
         ),
     ]
@@ -487,29 +547,150 @@ pub(super) fn remove_null_schema(schema: &mut Value) {
     }
 }
 
-pub(super) fn interrupt_output_schema() -> Arc<Map<String, Value>> {
-    let schema = serde_json::json!({
+fn interrupt_output_schema() -> Arc<Map<String, Value>> {
+    let mut error_schema = raw_schema::<ToolErrorData>();
+    let mut definitions = error_schema
+        .remove("$defs")
+        .expect("ToolErrorData schema must contain $defs for local references");
+    let mut error_schema = Value::Object(error_schema);
+    close_output_objects(&mut error_schema);
+    close_output_objects(&mut definitions);
+
+    let exact_variants = exact_interrupt_result_variants();
+    let exact_result = serde_json::json!({"oneOf": exact_variants.clone()});
+    let warning = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "code": {"const": "active_descendants_not_interrupted", "type": "string"},
+            "activeCount": {"type": "integer", "minimum": 0},
+            "activeThreadIds": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": ["code", "activeCount", "activeThreadIds"],
+        "additionalProperties": false
+    });
+    let descendant_entry = serde_json::json!({
         "oneOf": [
             {
                 "type": "object",
                 "properties": {
-                    "interrupted": {"const": true, "type": "boolean"},
-                    "turnId": {"type": "string"}
+                    "threadId": {"type": "string"},
+                    "result": exact_result.clone()
                 },
-                "required": ["interrupted", "turnId"],
+                "required": ["threadId", "result"],
                 "additionalProperties": false
             },
             {
                 "type": "object",
                 "properties": {
-                    "interrupted": {"const": false, "type": "boolean"}
+                    "threadId": {"type": "string"},
+                    "error": error_schema.clone()
                 },
-                "required": ["interrupted"],
+                "required": ["threadId", "error"],
                 "additionalProperties": false
             }
         ]
     });
-    Arc::new(schema.as_object().unwrap().clone())
+    let discovery_error = error_schema_with_code(&error_schema, "descendant_discovery_failed");
+    let descendants = serde_json::json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {"warning": warning},
+                "required": ["warning"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "results": {"type": "array", "items": descendant_entry}
+                },
+                "required": ["results"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {"error": discovery_error},
+                "required": ["error"],
+                "additionalProperties": false
+            }
+        ]
+    });
+    let root_variants = exact_variants
+        .iter()
+        .cloned()
+        .map(|mut variant| {
+            variant
+                .get_mut("properties")
+                .and_then(Value::as_object_mut)
+                .expect("exact interrupt result variants have properties")
+                .insert("descendants".to_owned(), descendants.clone());
+            variant
+        })
+        .collect::<Vec<_>>();
+    let mut schema = serde_json::json!({"oneOf": root_variants, "$defs": definitions});
+    Arc::new(schema.as_object_mut().unwrap().clone())
+}
+
+fn exact_interrupt_result_variants() -> Vec<Value> {
+    vec![
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "interrupted": {"const": true, "type": "boolean"},
+                "turnId": {"type": "string"}
+            },
+            "required": ["interrupted", "turnId"],
+            "additionalProperties": false
+        }),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "interrupted": {"const": false, "type": "boolean"}
+            },
+            "required": ["interrupted"],
+            "additionalProperties": false
+        }),
+    ]
+}
+
+fn close_output_objects(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            if object.get("type") == Some(&Value::String("object".to_owned())) {
+                object.insert("additionalProperties".to_owned(), Value::Bool(false));
+            }
+            for value in object.values_mut() {
+                close_output_objects(value);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                close_output_objects(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn error_schema_with_code(error_schema: &Value, code: &'static str) -> Value {
+    let mut schema = error_schema.clone();
+    let object = schema
+        .as_object_mut()
+        .expect("ToolErrorData schema is an object");
+    object
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .expect("ToolErrorData schema has properties")
+        .insert(
+            "code".to_owned(),
+            serde_json::json!({"const": code, "type": "string"}),
+        );
+    object
+        .get_mut("required")
+        .and_then(Value::as_array_mut)
+        .expect("ToolErrorData schema has required properties")
+        .push(Value::String("code".to_owned()));
+    schema
 }
 
 pub(super) fn annotations(read_only: bool, destructive: bool) -> ToolAnnotations {
@@ -616,8 +797,13 @@ pub(super) fn validate_input(
             }
             "thread_interrupt" => {
                 let input: ThreadInterruptInput = parse_input(tool, arguments)?;
-                validate_explicit_other("thread_interrupt", meta, &input.thread_id)?;
-                Ok(ValidatedInput::ThreadInterrupt(input))
+                require_id("threadId", &input.thread_id)?;
+                let caller_thread_id = caller_thread_id(meta)?;
+                require_other_thread("thread_interrupt", &caller_thread_id, &input.thread_id)?;
+                Ok(ValidatedInput::ThreadInterrupt {
+                    input,
+                    caller_thread_id,
+                })
             }
             _ => Err(invalid_request(tool, "tool")),
         }
