@@ -270,6 +270,19 @@ impl AppServerConnection {
         thread_list_from_native(&response)
     }
 
+    pub(crate) async fn spawned_descendants_page(
+        &mut self,
+        ancestor_thread_id: &str,
+        cursor: Option<&str>,
+    ) -> Result<(Vec<Thread>, Option<String>), ToolErrorData> {
+        let mut params = serde_json::Map::new();
+        params.insert("ancestorThreadId".to_owned(), json!(ancestor_thread_id));
+        params.insert("sourceKinds".to_owned(), json!(["subAgentThreadSpawn"]));
+        insert_optional(&mut params, "cursor", cursor)?;
+        let response: Value = self.request("thread/list", params).await?;
+        thread_list_from_native(&response)
+    }
+
     pub async fn threads_list_for_update(
         &mut self,
         cursor: Option<&str>,

@@ -25,6 +25,7 @@ use super::*;
 mod support;
 use support::*;
 
+mod descendant_interrupt;
 mod goal_matrix;
 mod mutation_mapping;
 mod outcome_unknown;

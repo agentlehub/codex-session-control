@@ -555,19 +555,13 @@ async fn interrupt_targets_only_the_fresh_exact_active_turn() {
     let client = AppServerClient::from_config(&harness.config);
     let mut connection = client.connect_initialized().await.unwrap();
 
-    let result = interrupt_thread(
-        &client,
-        &mut connection,
-        ThreadInterruptInput {
-            thread_id: "target".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+    let result = interrupt_exact_thread(&client, &mut connection, "target")
+        .await
+        .unwrap();
 
     assert!(matches!(
         result,
-        ThreadInterruptResult::Interrupted {
+        ExactThreadInterruptResult::Interrupted {
             interrupted: true,
             ref turn_id
         } if turn_id == "active-turn"
@@ -588,7 +582,7 @@ async fn interrupt_targets_only_the_fresh_exact_active_turn() {
 #[test]
 fn interrupt_result_serializes_with_the_public_camel_case_field_name() {
     assert_eq!(
-        serde_json::to_value(ThreadInterruptResult::Interrupted {
+        serde_json::to_value(ExactThreadInterruptResult::Interrupted {
             interrupted: true,
             turn_id: "active-turn".to_owned(),
         })
@@ -596,7 +590,8 @@ fn interrupt_result_serializes_with_the_public_camel_case_field_name() {
         json!({"interrupted": true, "turnId": "active-turn"})
     );
     assert_eq!(
-        serde_json::to_value(ThreadInterruptResult::NotInterrupted { interrupted: false }).unwrap(),
+        serde_json::to_value(ExactThreadInterruptResult::NotInterrupted { interrupted: false })
+            .unwrap(),
         json!({"interrupted": false})
     );
 }
@@ -614,19 +609,13 @@ async fn terminal_interrupt_returns_false_without_mutation_or_replacement_chase(
     let client = AppServerClient::from_config(&harness.config);
     let mut connection = client.connect_initialized().await.unwrap();
 
-    let result = interrupt_thread(
-        &client,
-        &mut connection,
-        ThreadInterruptInput {
-            thread_id: "target".to_owned(),
-        },
-    )
-    .await
-    .unwrap();
+    let result = interrupt_exact_thread(&client, &mut connection, "target")
+        .await
+        .unwrap();
 
     assert!(matches!(
         result,
-        ThreadInterruptResult::NotInterrupted { interrupted: false }
+        ExactThreadInterruptResult::NotInterrupted { interrupted: false }
     ));
     assert_eq!(harness.connection_count(), 1);
     assert_eq!(harness.log().len(), 2);
@@ -649,15 +638,9 @@ async fn interrupt_rejects_in_progress_turn_without_id_instead_of_reporting_fals
     let client = AppServerClient::from_config(&harness.config);
     let mut connection = client.connect_initialized().await.unwrap();
 
-    let error = interrupt_thread(
-        &client,
-        &mut connection,
-        ThreadInterruptInput {
-            thread_id: "target".to_owned(),
-        },
-    )
-    .await
-    .unwrap_err();
+    let error = interrupt_exact_thread(&client, &mut connection, "target")
+        .await
+        .unwrap_err();
 
     assert_eq!(error.category, ToolErrorCategory::NativeError);
     assert_eq!(error.stage, "thread/turns/list");

@@ -178,8 +178,11 @@ async fn execute_tool(
                 .await
                 .map_err(|error| response_error(tool, error, warning.as_deref()))?,
         ),
-        ValidatedInput::ThreadInterrupt(input) => serde_json::to_value(
-            interrupt_thread(&client, &mut connection, input)
+        ValidatedInput::ThreadInterrupt {
+            input,
+            caller_thread_id,
+        } => serde_json::to_value(
+            interrupt_thread(&client, &mut connection, input, caller_thread_id)
                 .await
                 .map_err(|error| response_error(tool, error, warning.as_deref()))?,
         ),

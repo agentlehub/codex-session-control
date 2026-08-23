@@ -117,6 +117,66 @@ fn validation_rejects_self_for_wait_message_goals_and_interrupt() {
 }
 
 #[test]
+fn validation_interrupt_accepts_descendant_scope_booleans() {
+    for include_descendants in [false, true] {
+        let result = validate_input(
+            "thread_interrupt",
+            arguments(json!({
+                "threadId": "target",
+                "includeDescendants": include_descendants,
+            })),
+            &meta("caller"),
+        );
+        assert!(
+            result.is_ok(),
+            "explicit boolean must be accepted: {result:?}"
+        );
+    }
+
+    let error = validate_input(
+        "thread_interrupt",
+        arguments(json!({"threadId": "target", "includeDescendants": "true"})),
+        &meta("caller"),
+    )
+    .unwrap_err();
+    assert_eq!(error.tool, "thread_interrupt");
+    assert_eq!(error.stage, "input");
+    assert_category(error, ToolErrorCategory::InvalidRequest);
+}
+
+#[test]
+fn validation_rejects_direct_self_interrupt_with_descendant_opt_in() {
+    let error = validate_input(
+        "thread_interrupt",
+        arguments(json!({"threadId": "caller", "includeDescendants": true})),
+        &meta("caller"),
+    )
+    .unwrap_err();
+    assert_eq!(error.tool, "thread_interrupt");
+    assert_eq!(error.stage, "self_target");
+    assert_category(error, ToolErrorCategory::PolicyRejected);
+}
+
+#[test]
+fn validation_interrupt_defaults_descendant_scope_and_carries_caller() {
+    let validated = validate_input(
+        "thread_interrupt",
+        arguments(json!({"threadId": "target"})),
+        &meta("caller"),
+    )
+    .unwrap();
+    let ValidatedInput::ThreadInterrupt {
+        input,
+        caller_thread_id,
+    } = validated
+    else {
+        panic!("wrong validated input")
+    };
+    assert!(!input.include_descendants);
+    assert_eq!(caller_thread_id, "caller");
+}
+
+#[test]
 fn validation_accepts_one_through_eight_unique_wait_ids_and_bounded_timeouts() {
     for count in 1..=8 {
         let ids: Vec<String> = (0..count).map(|index| format!("target-{index}")).collect();
@@ -318,6 +378,10 @@ fn validation_rejects_explicit_null_for_every_optional_public_field() {
             json!({"threadId": "target", "prompt": "p", "reasoningEffort": null}),
         ),
         ("thread_title_set", json!({"threadId": null, "title": "t"})),
+        (
+            "thread_interrupt",
+            json!({"threadId": "target", "includeDescendants": null}),
+        ),
     ] {
         assert_category(
             validate_input(tool, arguments(args), &meta("caller")).unwrap_err(),

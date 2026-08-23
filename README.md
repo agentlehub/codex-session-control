@@ -83,7 +83,7 @@ Available commands:
 | `thread_goal_pause` | Pause a session's goal. |
 | `thread_goal_resume` | Resume a session's goal. |
 | `thread_goal_clear` | Clear a session's goal. |
-| `thread_interrupt` | Interrupt a session's active response. |
+| thread_interrupt | Interrupt a session's active response, optionally including active spawned descendants; exact-thread scope may return a structured warning for descendants left running. |
 
 Do not work on the same session through Codex Session Control and regular Codex at the same time. Concurrent changes are not coordinated and can conflict.
 

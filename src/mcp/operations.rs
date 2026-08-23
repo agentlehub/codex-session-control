@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+
+use futures_util::future::join_all;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
@@ -439,13 +442,107 @@ pub(super) async fn interrupt_thread(
     client: &AppServerClient,
     connection: &mut AppServerConnection,
     input: ThreadInterruptInput,
+    caller_thread_id: String,
 ) -> Result<ThreadInterruptResult, ToolErrorData> {
-    let snapshot = connection.compact_snapshot(&input.thread_id).await?;
+    let exact = interrupt_exact_thread(client, connection, &input.thread_id).await?;
+    let root_thread_id = input.thread_id;
+    let mut active_descendant_ids = Vec::new();
+    let mut seen_active_descendant_ids = HashSet::new();
+    let mut cursor = None;
+
+    loop {
+        let (threads, next_cursor) = match connection
+            .spawned_descendants_page(&root_thread_id, cursor.as_deref())
+            .await
+        {
+            Ok(page) => page,
+            Err(error) => {
+                return Ok(ThreadInterruptResult {
+                    exact,
+                    descendants: Some(ThreadInterruptDescendants::Error {
+                        error: DescendantDiscoveryError {
+                            code: "descendant_discovery_failed",
+                            error: attribute_interrupt_error(error, &root_thread_id),
+                        },
+                    }),
+                });
+            }
+        };
+
+        for thread in threads {
+            if matches!(&thread.status, ThreadStatus::Active { .. })
+                && seen_active_descendant_ids.insert(thread.id.clone())
+            {
+                active_descendant_ids.push(thread.id);
+            }
+        }
+
+        let Some(next_cursor) = next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+
+    let descendants = if input.include_descendants {
+        let attempts = active_descendant_ids.into_iter().map(|thread_id| {
+            let caller_thread_id = caller_thread_id.as_str();
+            async move {
+                if let Err(error) =
+                    require_other_thread("thread_interrupt", caller_thread_id, &thread_id)
+                {
+                    return DescendantInterruptEntry::Error { thread_id, error };
+                }
+
+                let outcome = match client.connect_initialized().await {
+                    Ok(mut target_connection) => {
+                        interrupt_exact_thread(client, &mut target_connection, &thread_id).await
+                    }
+                    Err(error) => Err(error),
+                };
+                match outcome {
+                    Ok(result) => DescendantInterruptEntry::Result { thread_id, result },
+                    Err(error) => DescendantInterruptEntry::Error {
+                        error: attribute_interrupt_error(error, &thread_id),
+                        thread_id,
+                    },
+                }
+            }
+        });
+        Some(ThreadInterruptDescendants::Results {
+            results: join_all(attempts).await,
+        })
+    } else if active_descendant_ids.is_empty() {
+        None
+    } else {
+        Some(ThreadInterruptDescendants::Warning {
+            warning: ActiveDescendantsWarning {
+                code: "active_descendants_not_interrupted",
+                active_count: active_descendant_ids.len(),
+                active_thread_ids: active_descendant_ids,
+            },
+        })
+    };
+
+    Ok(ThreadInterruptResult { exact, descendants })
+}
+
+fn attribute_interrupt_error(mut error: ToolErrorData, thread_id: &str) -> ToolErrorData {
+    error.tool = "thread_interrupt".to_owned();
+    error.thread_id = Some(thread_id.to_owned());
+    error
+}
+
+pub(super) async fn interrupt_exact_thread(
+    client: &AppServerClient,
+    connection: &mut AppServerConnection,
+    thread_id: &str,
+) -> Result<ExactThreadInterruptResult, ToolErrorData> {
+    let snapshot = connection.compact_snapshot(thread_id).await?;
     let Some(turn_id) = snapshot.active_turn_id else {
-        return Ok(ThreadInterruptResult::NotInterrupted { interrupted: false });
+        return Ok(ExactThreadInterruptResult::NotInterrupted { interrupted: false });
     };
     let context = MutationContext::for_turn(
-        input.thread_id,
+        thread_id.to_owned(),
         turn_id,
         ReconciliationPolicy::LatestTurnRead,
     );
@@ -458,7 +555,7 @@ pub(super) async fn interrupt_thread(
         &context,
     )
     .await?;
-    Ok(ThreadInterruptResult::Interrupted {
+    Ok(ExactThreadInterruptResult::Interrupted {
         interrupted: true,
         turn_id: context.into_turn_id(),
     })
