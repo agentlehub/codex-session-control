@@ -1,5 +1,9 @@
 use super::*;
 
+use std::{any::Any, panic::AssertUnwindSafe};
+
+use futures_util::FutureExt;
+
 pub(super) fn arguments(value: Value) -> Map<String, Value> {
     value.as_object().unwrap().clone()
 }
@@ -74,40 +78,13 @@ impl FakeStep {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(super) enum FakeInitialize {
-    Success,
-    Disconnect,
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct FakeConnectionScript {
-    pub(super) initialize: FakeInitialize,
-    pub(super) steps: Vec<FakeStep>,
-}
-
-impl FakeConnectionScript {
-    pub(super) fn initialized(steps: Vec<FakeStep>) -> Self {
-        Self {
-            initialize: FakeInitialize::Success,
-            steps,
-        }
-    }
-
-    pub(super) fn disconnect_on_initialize() -> Self {
-        Self {
-            initialize: FakeInitialize::Disconnect,
-            steps: Vec::new(),
-        }
-    }
-}
-
 pub(super) struct FakeAppServer {
     pub(super) _root: TempDir,
     pub(super) config: ProductConfig,
     pub(super) log: Arc<Mutex<Vec<Value>>>,
     pub(super) connections: Arc<AtomicUsize>,
     request_received: Arc<tokio::sync::Notify>,
+    failures: Arc<Mutex<Vec<String>>>,
     pub(super) task: tokio::task::JoinHandle<()>,
 }
 
@@ -117,16 +94,21 @@ impl FakeAppServer {
     }
 
     pub(super) async fn start_connections(scripts: Vec<Vec<FakeStep>>) -> Self {
-        Self::start_scripted_connections(
-            scripts
-                .into_iter()
-                .map(FakeConnectionScript::initialized)
-                .collect(),
-        )
-        .await
+        Self::start_with_scripts(scripts, false).await
     }
 
-    pub(super) async fn start_scripted_connections(scripts: Vec<FakeConnectionScript>) -> Self {
+    pub(super) async fn start_with_initialization_disconnect(root_steps: Vec<FakeStep>) -> Self {
+        Self::start_with_scripts(vec![root_steps], true).await
+    }
+
+    async fn start_with_scripts(scripts: Vec<Vec<FakeStep>>, disconnect_after_root: bool) -> Self {
+        assert!(
+            matches!(
+                tokio::runtime::Handle::current().runtime_flavor(),
+                tokio::runtime::RuntimeFlavor::CurrentThread
+            ),
+            "FakeAppServer requires a current-thread Tokio runtime so background failures are recorded before client tasks resume"
+        );
         let root = crate::test_support::private_tempdir();
         let socket_parent = root.path().join("socket");
         let codex_home = root.path().join(".codex");
@@ -146,50 +128,90 @@ impl FakeAppServer {
         let log = Arc::new(Mutex::new(Vec::new()));
         let connections = Arc::new(AtomicUsize::new(0));
         let request_received = Arc::new(tokio::sync::Notify::new());
+        let failures = Arc::new(Mutex::new(Vec::new()));
         let task_log = Arc::clone(&log);
         let task_connections = Arc::clone(&connections);
         let task_request_received = Arc::clone(&request_received);
+        let task_failures = Arc::clone(&failures);
         let task = tokio::spawn(async move {
-            let mut handlers = tokio::task::JoinSet::new();
-            for script in scripts {
-                let (stream, _) = listener.accept().await.unwrap();
-                task_connections.fetch_add(1, Ordering::SeqCst);
-                let mut websocket = accept_async(stream).await.unwrap();
-                let initialize = next_text(&mut websocket).await;
-                assert_eq!(initialize["method"], "initialize");
-                match script.initialize {
-                    FakeInitialize::Success => {
-                        let initialize_id = initialize["id"].clone();
-                        websocket
-                            .send(Message::text(
-                                json!({
-                                    "id": initialize_id,
-                                    "result": {
-                                        "codexHome": codex_home,
-                                        "userAgent": TESTED_CODEX_CLI_VERSION
-                                    }
-                                })
-                                .to_string(),
-                            ))
-                            .await
-                            .unwrap();
-                        let initialized = next_text(&mut websocket).await;
-                        assert_eq!(initialized, json!({"method": "initialized"}));
-                    }
-                    FakeInitialize::Disconnect => {
+            let server_failures = Arc::clone(&task_failures);
+            let result = AssertUnwindSafe(async move {
+                let mut handlers = tokio::task::JoinSet::new();
+                let mut scripts = scripts;
+                let normal_connection_count = scripts.len();
+                for connection_index in
+                    0..(normal_connection_count + usize::from(disconnect_after_root))
+                {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    task_connections.fetch_add(1, Ordering::SeqCst);
+                    let mut websocket = accept_async(stream).await.unwrap();
+                    let initialize = next_text(&mut websocket).await;
+                    assert_eq!(initialize["method"], "initialize");
+                    if disconnect_after_root && connection_index == normal_connection_count {
                         let _ = websocket.close(None).await;
                         continue;
                     }
+
+                    let initialize_id = initialize["id"].clone();
+                    websocket
+                        .send(Message::text(
+                            json!({
+                                "id": initialize_id,
+                                "result": {
+                                    "codexHome": codex_home,
+                                    "userAgent": TESTED_CODEX_CLI_VERSION
+                                }
+                            })
+                            .to_string(),
+                        ))
+                        .await
+                        .unwrap();
+                    let initialized = next_text(&mut websocket).await;
+                    assert_eq!(initialized, json!({"method": "initialized"}));
+                    let first_request = next_text(&mut websocket).await;
+                    let matching_indices = scripts
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, steps)| {
+                            let first_step =
+                                steps.first().expect("connection script must not be empty");
+                            (first_step.method == first_request["method"]
+                                && first_step.params == first_request["params"])
+                                .then_some(index)
+                        })
+                        .collect::<Vec<_>>();
+                    let script_index = match matching_indices.as_slice() {
+                        [index] => *index,
+                        [] => panic!("no connection script matches {first_request}"),
+                        _ => panic!("multiple connection scripts match {first_request}"),
+                    };
+                    let steps = scripts.swap_remove(script_index);
+                    let handler_failures = Arc::clone(&server_failures);
+                    let handler_log = Arc::clone(&task_log);
+                    let handler_request_received = Arc::clone(&task_request_received);
+                    let _ = handlers.spawn(async move {
+                        if let Err(payload) = AssertUnwindSafe(handle_connection(
+                            websocket,
+                            first_request,
+                            steps,
+                            handler_log,
+                            handler_request_received,
+                        ))
+                        .catch_unwind()
+                        .await
+                        {
+                            record_failure(&handler_failures, "connection handler", payload);
+                        }
+                    });
                 }
-                let _ = handlers.spawn(handle_connection(
-                    websocket,
-                    script.steps,
-                    Arc::clone(&task_log),
-                    Arc::clone(&task_request_received),
-                ));
-            }
-            while let Some(result) = handlers.join_next().await {
-                result.unwrap();
+                while let Some(result) = handlers.join_next().await {
+                    result.unwrap();
+                }
+            })
+            .catch_unwind()
+            .await;
+            if let Err(payload) = result {
+                record_failure(&task_failures, "server", payload);
             }
         });
         Self {
@@ -198,6 +220,7 @@ impl FakeAppServer {
             log,
             connections,
             request_received,
+            failures,
             task,
         }
     }
@@ -219,11 +242,49 @@ impl FakeAppServer {
             request_received.await;
         }
     }
+
+    pub(super) async fn wait_for_requests_matching(&self, expected: &[(&str, Value)]) {
+        loop {
+            let request_received = self.request_received.notified();
+            let matched = {
+                let log = self.log.lock().unwrap();
+                expected.iter().all(|(method, params)| {
+                    log.iter()
+                        .any(|request| request["method"] == *method && request["params"] == *params)
+                })
+            };
+            if matched {
+                return;
+            }
+            request_received.await;
+        }
+    }
 }
 
 impl Drop for FakeAppServer {
     fn drop(&mut self) {
+        let failures = self.failures.lock().unwrap().clone();
         self.task.abort();
+        if !std::thread::panicking() && !failures.is_empty() {
+            panic!("FakeAppServer background failure:\n{}", failures.join("\n"));
+        }
+    }
+}
+
+fn record_failure(failures: &Arc<Mutex<Vec<String>>>, source: &str, payload: Box<dyn Any + Send>) {
+    failures
+        .lock()
+        .unwrap()
+        .push(format!("{source}: {}", panic_payload_text(payload)));
+}
+
+fn panic_payload_text(payload: Box<dyn Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_owned()
     }
 }
 
@@ -239,11 +300,13 @@ async fn next_text(
 
 async fn handle_connection(
     mut websocket: tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
+    first_request: Value,
     steps: Vec<FakeStep>,
     log: Arc<Mutex<Vec<Value>>>,
     request_received: Arc<tokio::sync::Notify>,
 ) {
     let mut disconnected = false;
+    let mut first_request = Some(first_request);
     for step in steps {
         let FakeStep {
             method,
@@ -252,7 +315,10 @@ async fn handle_connection(
             notify_after,
             delay,
         } = step;
-        let request = next_text(&mut websocket).await;
+        let request = match first_request.take() {
+            Some(request) => request,
+            None => next_text(&mut websocket).await,
+        };
         assert_eq!(request["method"], method, "{request}");
         assert_eq!(request["params"], params, "{request}");
         log.lock().unwrap().push(json!({
@@ -349,74 +415,6 @@ pub(super) fn native_turn(id: &str, status: &str) -> Value {
         "durationMs": null,
         "error": null,
     })
-}
-
-#[test]
-fn controlled_response_preserves_the_wrapped_response() {
-    let release = Arc::new(tokio::sync::Notify::new());
-    let sent = Arc::new(tokio::sync::Notify::new());
-    let step = FakeStep::result("thread/read", json!({}), json!({"thread": {}}))
-        .controlled(Some(Arc::clone(&release)), Some(Arc::clone(&sent)));
-
-    let FakeResponse::Controlled {
-        response,
-        release: actual_release,
-        sent: actual_sent,
-    } = step.response
-    else {
-        panic!("expected controlled response")
-    };
-    assert!(matches!(*response, FakeResponse::Result(_)));
-    assert!(Arc::ptr_eq(actual_release.as_ref().unwrap(), &release));
-    assert!(Arc::ptr_eq(actual_sent.as_ref().unwrap(), &sent));
-}
-
-#[test]
-fn connection_scripts_describe_initialization_outcomes() {
-    let initialized = FakeConnectionScript::initialized(Vec::new());
-    assert!(matches!(initialized.initialize, FakeInitialize::Success));
-    assert!(initialized.steps.is_empty());
-
-    let disconnected = FakeConnectionScript::disconnect_on_initialize();
-    assert!(matches!(
-        disconnected.initialize,
-        FakeInitialize::Disconnect
-    ));
-    assert!(disconnected.steps.is_empty());
-}
-
-#[tokio::test]
-async fn scripted_connections_initialize_multiple_clients_concurrently() {
-    let harness = FakeAppServer::start_scripted_connections(vec![
-        FakeConnectionScript::initialized(Vec::new()),
-        FakeConnectionScript::initialized(Vec::new()),
-    ])
-    .await;
-    let first_client = AppServerClient::from_config(&harness.config);
-    let second_client = AppServerClient::from_config(&harness.config);
-
-    let (first, second) = tokio::join!(
-        first_client.connect_initialized(),
-        second_client.connect_initialized(),
-    );
-
-    assert!(first.is_ok());
-    assert!(second.is_ok());
-    assert_eq!(harness.connection_count(), 2);
-}
-
-#[tokio::test]
-async fn scripted_connection_can_disconnect_during_initialization() {
-    let harness = FakeAppServer::start_scripted_connections(vec![
-        FakeConnectionScript::disconnect_on_initialize(),
-        FakeConnectionScript::initialized(Vec::new()),
-    ])
-    .await;
-    let client = AppServerClient::from_config(&harness.config);
-
-    assert!(client.connect_initialized().await.is_err());
-    assert!(client.connect_initialized().await.is_ok());
-    assert_eq!(harness.connection_count(), 2);
 }
 
 pub(super) fn native_goal(thread_id: &str, status: &str) -> Value {

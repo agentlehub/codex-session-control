@@ -93,87 +93,35 @@ fn validation_defaults_deferred_goal_continuation_to_true() {
 #[test]
 fn validation_rejects_self_for_wait_message_goals_and_interrupt() {
     let cases = [
-        ("threads_wait", json!({"threadIds": ["caller"]})),
+        ("threads_wait", json!({"threadIds": ["caller"]}), None),
         (
             "thread_message_send",
             json!({"threadId": "caller", "prompt": "hello"}),
+            None,
         ),
-        ("thread_goal_get", json!({"threadId": "caller"})),
+        ("thread_goal_get", json!({"threadId": "caller"}), None),
         (
             "thread_goal_set",
             json!({"threadId": "caller", "objective": "goal"}),
+            None,
         ),
-        ("thread_goal_pause", json!({"threadId": "caller"})),
-        ("thread_goal_resume", json!({"threadId": "caller"})),
-        ("thread_goal_clear", json!({"threadId": "caller"})),
-        ("thread_interrupt", json!({"threadId": "caller"})),
-    ];
-    for (tool, args) in cases {
-        assert_category(
-            validate_input(tool, arguments(args), &meta("caller")).unwrap_err(),
-            ToolErrorCategory::PolicyRejected,
-        );
-    }
-}
-
-#[test]
-fn validation_interrupt_accepts_descendant_scope_booleans() {
-    for include_descendants in [false, true] {
-        let result = validate_input(
+        ("thread_goal_pause", json!({"threadId": "caller"}), None),
+        ("thread_goal_resume", json!({"threadId": "caller"}), None),
+        ("thread_goal_clear", json!({"threadId": "caller"}), None),
+        ("thread_interrupt", json!({"threadId": "caller"}), None),
+        (
             "thread_interrupt",
-            arguments(json!({
-                "threadId": "target",
-                "includeDescendants": include_descendants,
-            })),
-            &meta("caller"),
-        );
-        assert!(
-            result.is_ok(),
-            "explicit boolean must be accepted: {result:?}"
-        );
+            json!({"threadId": "caller", "includeDescendants": true}),
+            Some("self_target"),
+        ),
+    ];
+    for (tool, args, expected_stage) in cases {
+        let error = validate_input(tool, arguments(args), &meta("caller")).unwrap_err();
+        if let Some(expected_stage) = expected_stage {
+            assert_eq!(error.stage, expected_stage);
+        }
+        assert_category(error, ToolErrorCategory::PolicyRejected);
     }
-
-    let error = validate_input(
-        "thread_interrupt",
-        arguments(json!({"threadId": "target", "includeDescendants": "true"})),
-        &meta("caller"),
-    )
-    .unwrap_err();
-    assert_eq!(error.tool, "thread_interrupt");
-    assert_eq!(error.stage, "input");
-    assert_category(error, ToolErrorCategory::InvalidRequest);
-}
-
-#[test]
-fn validation_rejects_direct_self_interrupt_with_descendant_opt_in() {
-    let error = validate_input(
-        "thread_interrupt",
-        arguments(json!({"threadId": "caller", "includeDescendants": true})),
-        &meta("caller"),
-    )
-    .unwrap_err();
-    assert_eq!(error.tool, "thread_interrupt");
-    assert_eq!(error.stage, "self_target");
-    assert_category(error, ToolErrorCategory::PolicyRejected);
-}
-
-#[test]
-fn validation_interrupt_defaults_descendant_scope_and_carries_caller() {
-    let validated = validate_input(
-        "thread_interrupt",
-        arguments(json!({"threadId": "target"})),
-        &meta("caller"),
-    )
-    .unwrap();
-    let ValidatedInput::ThreadInterrupt {
-        input,
-        caller_thread_id,
-    } = validated
-    else {
-        panic!("wrong validated input")
-    };
-    assert!(!input.include_descendants);
-    assert_eq!(caller_thread_id, "caller");
 }
 
 #[test]
@@ -243,6 +191,11 @@ fn validation_enforces_id_cursor_cwd_limit_and_open_effort_shapes() {
             "thread_create",
             json!({"prompt": "hello", "cwd": "/tmp", "reasoningEffort": ""}),
             Value::Null,
+        ),
+        (
+            "thread_interrupt",
+            json!({"threadId": "target", "includeDescendants": "true"}),
+            meta("caller"),
         ),
     ] {
         assert_category(

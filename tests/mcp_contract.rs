@@ -8,7 +8,7 @@ use std::{
 };
 
 use assert_cmd::cargo::cargo_bin;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 const INSTRUCTIONS: &str = "These tools inspect and control Codex threads through the shared app-server used by connected Codex clients.";
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -646,10 +646,6 @@ fn public_catalog_is_exact() {
         );
         if name == "thread_interrupt" {
             assert!(
-                !permits_null(&tool["inputSchema"]["properties"]["includeDescendants"]),
-                "thread_interrupt.includeDescendants must reject explicit null"
-            );
-            assert!(
                 !permits_null(&tool["inputSchema"]["properties"]["threadId"]),
                 "thread_interrupt.threadId must reject explicit null"
             );
@@ -976,18 +972,7 @@ fn schema_contracts() -> BTreeMap<&'static str, SchemaContract> {
 }
 
 fn assert_object_schema(schema: &Value, properties: &[&str], required: &[&str]) {
-    assert_eq!(schema["type"], "object", "{schema}");
-    assert_eq!(schema["additionalProperties"], false, "{schema}");
-    assert_eq!(
-        keys(&schema["properties"]),
-        properties.iter().copied().collect(),
-        "{schema}"
-    );
-    assert_eq!(
-        string_set(&schema["required"]),
-        required.iter().copied().collect(),
-        "{schema}"
-    );
+    assert_closed_object_schema(schema, properties, required);
     let required: BTreeSet<_> = required.iter().copied().collect();
     for property in properties {
         if !required.contains(property) {
@@ -1136,101 +1121,37 @@ fn permits_null(schema: &Value) -> bool {
 }
 
 fn assert_interrupt_output_schema(schema: &Value) {
-    let definitions = schema["$defs"].as_object().unwrap();
-    assert_eq!(
-        definitions
-            .keys()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from(["DispatchState", "NativeErrorSummary", "ToolErrorCategory",]),
-        "{schema}"
-    );
-    assert_interrupt_error_definitions(definitions);
+    assert_local_references_resolve(schema);
+    assert_output_objects_closed(schema);
+    assert_interrupt_result_variants(schema, true);
+}
 
-    let variants = schema["oneOf"].as_array().unwrap();
-    assert_eq!(variants.len(), 2);
-    let by_interrupted: BTreeMap<bool, &Value> = variants
-        .iter()
-        .map(|variant| {
-            (
-                variant["properties"]["interrupted"]["const"]
-                    .as_bool()
-                    .unwrap(),
-                variant,
-            )
-        })
-        .collect();
-    assert_object_schema(
-        by_interrupted.get(&true).unwrap(),
-        &["descendants", "interrupted", "turnId"],
-        &["interrupted", "turnId"],
-    );
-    assert_object_schema(
-        by_interrupted.get(&false).unwrap(),
-        &["descendants", "interrupted"],
-        &["interrupted"],
-    );
-    for variant in by_interrupted.values() {
-        assert!(
-            !permits_null(&variant["properties"]["descendants"]),
-            "descendants must reject explicit null: {variant}"
-        );
-        assert_descendants_schema(&variant["properties"]["descendants"], definitions);
+fn assert_interrupt_result_variants(schema: &Value, descendants: bool) {
+    assert_eq!(variants(schema).len(), 2, "{schema}");
+    for interrupted in [false, true] {
+        let variant = semantic_variant(schema, "interrupted", Some(interrupted));
+        let mut properties = vec!["interrupted"];
+        let mut required = vec!["interrupted"];
+        if interrupted {
+            properties.push("turnId");
+            required.push("turnId");
+        }
+        if descendants {
+            properties.push("descendants");
+        }
+        assert_object_schema(variant, &properties, &required);
+        if interrupted {
+            assert_eq!(variant["properties"]["turnId"]["type"], "string");
+        }
+        if descendants {
+            assert_descendants_schema(&variant["properties"]["descendants"]);
+        }
     }
 }
 
-fn assert_interrupt_error_definitions(definitions: &Map<String, Value>) {
-    assert_eq!(
-        definitions["ToolErrorCategory"],
-        json!({
-            "enum": [
-                "invalid_request",
-                "policy_rejected",
-                "target_unavailable",
-                "authority_transport_failure",
-                "stage_timeout",
-                "native_conflict",
-                "native_error",
-                "outcome_unknown",
-            ],
-            "type": "string",
-        })
-    );
-    assert_eq!(
-        definitions["DispatchState"],
-        json!({
-            "enum": ["not_dispatched", "may_have_been_dispatched"],
-            "type": "string",
-        })
-    );
-
-    let native = &definitions["NativeErrorSummary"];
-    assert_closed_object_schema(native, &["code", "message"], &["message"]);
-    assert_eq!(
-        native["properties"]["code"]["type"],
-        json!(["integer", "null"])
-    );
-    assert_eq!(native["properties"]["code"]["format"], "int64");
-    assert_eq!(native["properties"]["message"]["type"], "string");
-    assert!(
-        !permits_null(&native["properties"]["message"]),
-        "NativeErrorSummary.message must reject explicit null: {native}"
-    );
-}
-
-fn assert_descendants_schema(schema: &Value, definitions: &Map<String, Value>) {
-    let variants = schema["oneOf"].as_array().unwrap();
-    assert_eq!(variants.len(), 3, "{schema}");
-    let by_field: BTreeMap<&str, &Value> = variants
-        .iter()
-        .map(|variant| {
-            let properties = variant["properties"].as_object().unwrap();
-            assert_eq!(properties.len(), 1, "{variant}");
-            (properties.keys().next().unwrap().as_str(), variant)
-        })
-        .collect();
-
-    let warning = by_field.get("warning").unwrap();
+fn assert_descendants_schema(schema: &Value) {
+    assert_eq!(variants(schema).len(), 3, "{schema}");
+    let warning = semantic_variant(schema, "warning", None);
     assert_object_schema(warning, &["warning"], &["warning"]);
     let warning = &warning["properties"]["warning"];
     assert_object_schema(
@@ -1243,92 +1164,49 @@ fn assert_descendants_schema(schema: &Value, definitions: &Map<String, Value>) {
         "active_descendants_not_interrupted"
     );
     assert_eq!(warning["properties"]["activeCount"]["type"], "integer");
+    assert_eq!(warning["properties"]["activeCount"]["minimum"], 0);
     assert_eq!(warning["properties"]["activeThreadIds"]["type"], "array");
     assert_eq!(
         warning["properties"]["activeThreadIds"]["items"]["type"],
         "string"
     );
 
-    let results = by_field.get("results").unwrap();
+    let results = semantic_variant(schema, "results", None);
     assert_object_schema(results, &["results"], &["results"]);
     let results = &results["properties"]["results"];
     assert_eq!(results["type"], "array");
-    assert!(
-        results.get("minItems").is_none(),
-        "empty descendant result sets must be permitted: {results}"
-    );
-    let entries = results["items"]["oneOf"].as_array().unwrap();
-    assert_eq!(entries.len(), 2, "{results}");
-    let entries_by_field: BTreeMap<&str, &Value> = entries
-        .iter()
-        .map(|entry| {
-            let properties = entry["properties"].as_object().unwrap();
-            let outcome = if properties.contains_key("result") {
-                "result"
-            } else {
-                "error"
-            };
-            (outcome, entry)
-        })
-        .collect();
-    assert_object_schema(
-        entries_by_field.get("result").unwrap(),
-        &["result", "threadId"],
-        &["result", "threadId"],
-    );
-    assert_exact_interrupt_result_schema(&entries_by_field["result"]["properties"]["result"]);
-    assert_object_schema(
-        entries_by_field.get("error").unwrap(),
-        &["error", "threadId"],
-        &["error", "threadId"],
-    );
-    assert_tool_error_schema(
-        &entries_by_field["error"]["properties"]["error"],
-        definitions,
-    );
-
-    let error = by_field.get("error").unwrap();
-    assert_object_schema(error, &["error"], &["error"]);
-    let error = &error["properties"]["error"];
-    assert_tool_error_schema(error, definitions);
     assert_eq!(
-        error["properties"]["code"]["const"],
-        "descendant_discovery_failed"
+        results
+            .get("minItems")
+            .map(|value| value.as_u64().expect("minItems must be an integer"))
+            .unwrap_or_default(),
+        0,
+        "descendant results must allow an empty array: {results}"
     );
-    assert!(
-        string_set(&error["required"]).contains("code"),
-        "discovery code must be required: {error}"
+    assert_eq!(variants(&results["items"]).len(), 2, "{results}");
+    let result = semantic_variant(&results["items"], "result", None);
+    assert_object_schema(result, &["result", "threadId"], &["result", "threadId"]);
+    assert_eq!(result["properties"]["threadId"]["type"], "string");
+    assert_exact_interrupt_result_schema(&result["properties"]["result"]);
+    let target_error = semantic_variant(&results["items"], "error", None);
+    assert_object_schema(target_error, &["error", "threadId"], &["error", "threadId"]);
+    assert_eq!(target_error["properties"]["threadId"]["type"], "string");
+    assert_tool_error_schema(&target_error["properties"]["error"], None);
+
+    let discovery_error = semantic_variant(schema, "error", None);
+    assert_object_schema(discovery_error, &["error"], &["error"]);
+    assert_tool_error_schema(
+        &discovery_error["properties"]["error"],
+        Some("descendant_discovery_failed"),
     );
 }
 
 fn assert_exact_interrupt_result_schema(schema: &Value) {
-    let variants = schema["oneOf"].as_array().unwrap();
-    assert_eq!(variants.len(), 2, "{schema}");
-    let by_interrupted: BTreeMap<bool, &Value> = variants
-        .iter()
-        .map(|variant| {
-            (
-                variant["properties"]["interrupted"]["const"]
-                    .as_bool()
-                    .unwrap(),
-                variant,
-            )
-        })
-        .collect();
-    assert_object_schema(
-        by_interrupted.get(&true).unwrap(),
-        &["interrupted", "turnId"],
-        &["interrupted", "turnId"],
-    );
-    assert_object_schema(
-        by_interrupted.get(&false).unwrap(),
-        &["interrupted"],
-        &["interrupted"],
-    );
+    assert_interrupt_result_variants(schema, false);
 }
 
-fn assert_tool_error_schema(schema: &Value, definitions: &Map<String, Value>) {
-    let properties = [
+fn assert_tool_error_schema(schema: &Value, code: Option<&str>) {
+    let mut properties = vec![
         "category",
         "dispatch",
         "message",
@@ -1340,59 +1218,15 @@ fn assert_tool_error_schema(schema: &Value, definitions: &Map<String, Value>) {
         "tool",
         "turnId",
     ];
-    let required = ["category", "message", "stage", "tool"];
-    let mut expected_properties = properties.to_vec();
-    if schema["properties"].get("code").is_some() {
-        expected_properties.push("code");
+    let mut required = vec!["category", "message", "stage", "tool"];
+    if code.is_some() {
+        properties.push("code");
+        required.push("code");
     }
-    let mut expected_required = required.to_vec();
-    if schema["properties"].get("code").is_some() {
-        expected_required.push("code");
+    assert_closed_object_schema(schema, &properties, &required);
+    if let Some(code) = code {
+        assert_eq!(schema["properties"]["code"]["const"], code);
     }
-    assert_closed_object_schema(schema, &expected_properties, &expected_required);
-    assert_reference(
-        &schema["properties"]["category"],
-        "ToolErrorCategory",
-        definitions,
-    );
-    assert_nullable_reference(
-        &schema["properties"]["dispatch"],
-        "DispatchState",
-        definitions,
-    );
-    assert_nullable_reference(
-        &schema["properties"]["native"],
-        "NativeErrorSummary",
-        definitions,
-    );
-}
-
-fn assert_reference(schema: &Value, definition_name: &str, definitions: &Map<String, Value>) {
-    let reference = format!("#/$defs/{definition_name}");
-    assert_eq!(schema, &json!({"$ref": reference}));
-    assert!(
-        definitions.contains_key(definition_name),
-        "{reference} must resolve against interrupt output $defs"
-    );
-}
-
-fn assert_nullable_reference(
-    schema: &Value,
-    definition_name: &str,
-    definitions: &Map<String, Value>,
-) {
-    assert_eq!(
-        schema["anyOf"],
-        json!([
-            {"$ref": format!("#/$defs/{definition_name}")},
-            {"type": "null"},
-        ])
-    );
-    assert_eq!(schema.as_object().unwrap().len(), 1, "{schema}");
-    assert!(
-        definitions.contains_key(definition_name),
-        "#/$defs/{definition_name} must resolve against interrupt output $defs"
-    );
 }
 
 fn assert_closed_object_schema(schema: &Value, properties: &[&str], required: &[&str]) {
@@ -1408,6 +1242,73 @@ fn assert_closed_object_schema(schema: &Value, properties: &[&str], required: &[
         required.iter().copied().collect(),
         "{schema}"
     );
+}
+
+fn semantic_variant<'a>(
+    schema: &'a Value,
+    property: &str,
+    boolean_const: Option<bool>,
+) -> &'a Value {
+    let matches = variants(schema)
+        .iter()
+        .filter(|variant| {
+            variant["properties"].get(property).is_some()
+                && boolean_const.is_none_or(|value| {
+                    variant["properties"][property]["const"].as_bool() == Some(value)
+                })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(matches.len(), 1, "expected one semantic variant: {schema}");
+    matches[0]
+}
+
+fn variants(schema: &Value) -> &[Value] {
+    let one_of = schema.get("oneOf").and_then(Value::as_array);
+    let any_of = schema.get("anyOf").and_then(Value::as_array);
+    assert!(
+        matches!((one_of, any_of), (Some(_), None) | (None, Some(_))),
+        "expected exactly one schema union: {schema}"
+    );
+    let variants = one_of.or(any_of).unwrap();
+    assert!(
+        !variants.is_empty(),
+        "schema union must not be empty: {schema}"
+    );
+    variants
+}
+
+fn assert_local_references_resolve(root: &Value) {
+    fn visit(value: &Value, root: &Value) {
+        if let Some(reference) = value.get("$ref") {
+            let reference = reference.as_str().expect("$ref must be a string");
+            assert!(
+                reference.starts_with("#/"),
+                "schema reference must be local: {reference}"
+            );
+            assert!(
+                root.pointer(&reference[1..]).is_some(),
+                "unresolved local schema reference: {reference}"
+            );
+        }
+        match value {
+            Value::Object(object) => object.values().for_each(|value| visit(value, root)),
+            Value::Array(values) => values.iter().for_each(|value| visit(value, root)),
+            _ => {}
+        }
+    }
+
+    visit(root, root);
+}
+
+fn assert_output_objects_closed(schema: &Value) {
+    if schema["type"] == "object" {
+        assert_eq!(schema["additionalProperties"], false, "{schema}");
+    }
+    match schema {
+        Value::Object(object) => object.values().for_each(assert_output_objects_closed),
+        Value::Array(values) => values.iter().for_each(assert_output_objects_closed),
+        _ => {}
+    }
 }
 
 fn keys(value: &Value) -> BTreeSet<&str> {

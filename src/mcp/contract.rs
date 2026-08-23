@@ -547,36 +547,17 @@ pub(super) fn remove_null_schema(schema: &mut Value) {
     }
 }
 
-pub(super) fn interrupt_output_schema() -> Arc<Map<String, Value>> {
+fn interrupt_output_schema() -> Arc<Map<String, Value>> {
     let mut error_schema = raw_schema::<ToolErrorData>();
     let mut definitions = error_schema
         .remove("$defs")
-        .unwrap_or_else(|| Value::Object(Map::new()));
+        .expect("ToolErrorData schema must contain $defs for local references");
     let mut error_schema = Value::Object(error_schema);
     close_output_objects(&mut error_schema);
     close_output_objects(&mut definitions);
 
-    let exact_result = serde_json::json!({
-        "oneOf": [
-            {
-                "type": "object",
-                "properties": {
-                    "interrupted": {"const": true, "type": "boolean"},
-                    "turnId": {"type": "string"}
-                },
-                "required": ["interrupted", "turnId"],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "interrupted": {"const": false, "type": "boolean"}
-                },
-                "required": ["interrupted"],
-                "additionalProperties": false
-            }
-        ]
-    });
+    let exact_variants = exact_interrupt_result_variants();
+    let exact_result = serde_json::json!({"oneOf": exact_variants.clone()});
     let warning = serde_json::json!({
         "type": "object",
         "properties": {
@@ -634,31 +615,42 @@ pub(super) fn interrupt_output_schema() -> Arc<Map<String, Value>> {
             }
         ]
     });
-    let mut schema = serde_json::json!({
-        "oneOf": [
-            {
-                "type": "object",
-                "properties": {
-                    "interrupted": {"const": true, "type": "boolean"},
-                    "turnId": {"type": "string"},
-                    "descendants": descendants.clone()
-                },
-                "required": ["interrupted", "turnId"],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "interrupted": {"const": false, "type": "boolean"},
-                    "descendants": descendants
-                },
-                "required": ["interrupted"],
-                "additionalProperties": false
-            }
-        ],
-        "$defs": definitions
-    });
+    let root_variants = exact_variants
+        .iter()
+        .cloned()
+        .map(|mut variant| {
+            variant
+                .get_mut("properties")
+                .and_then(Value::as_object_mut)
+                .expect("exact interrupt result variants have properties")
+                .insert("descendants".to_owned(), descendants.clone());
+            variant
+        })
+        .collect::<Vec<_>>();
+    let mut schema = serde_json::json!({"oneOf": root_variants, "$defs": definitions});
     Arc::new(schema.as_object_mut().unwrap().clone())
+}
+
+fn exact_interrupt_result_variants() -> Vec<Value> {
+    vec![
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "interrupted": {"const": true, "type": "boolean"},
+                "turnId": {"type": "string"}
+            },
+            "required": ["interrupted", "turnId"],
+            "additionalProperties": false
+        }),
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "interrupted": {"const": false, "type": "boolean"}
+            },
+            "required": ["interrupted"],
+            "additionalProperties": false
+        }),
+    ]
 }
 
 fn close_output_objects(value: &mut Value) {

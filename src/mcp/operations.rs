@@ -532,7 +532,7 @@ fn attribute_interrupt_error(mut error: ToolErrorData, thread_id: &str) -> ToolE
     error
 }
 
-pub(super) async fn interrupt_exact_thread(
+async fn interrupt_exact_thread(
     client: &AppServerClient,
     connection: &mut AppServerConnection,
     thread_id: &str,
