@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "codex-session-control": {
+      "type": "stdio",
+      "command": "./bin/codex-session-control",
+      "cwd": ".",
+      "env_vars": [
+        "XDG_RUNTIME_DIR",
+        "CODEX_LINUX_APP_ID",
+        "CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET"
+      ],
+      "tool_timeout_sec": 86460
+    }
+  }
+}
