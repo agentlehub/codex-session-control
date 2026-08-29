@@ -19,6 +19,10 @@ mod test_support;
 
 #[tokio::main]
 async fn main() {
+    if std::env::args_os().len() != 1 {
+        eprintln!("codex-session-control is a stdio MCP server and does not accept arguments");
+        std::process::exit(2);
+    }
     if let Err(error) = run_mcp_server().await {
         eprintln!("{error}");
         std::process::exit(1);

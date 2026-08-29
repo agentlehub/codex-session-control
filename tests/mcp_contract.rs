@@ -349,10 +349,9 @@ fn read_pipe_retries_interrupted_reads() {
 }
 
 #[test]
-fn child_guard_captures_output_after_normal_exit() {
+fn child_guard_captures_runtime_error_after_stdin_eof() {
     let mut command = Command::new(cargo_bin("codex-session-control"));
     command
-        .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -360,21 +359,35 @@ fn child_guard_captures_output_after_normal_exit() {
     let child = ChildGuard::spawn(&mut command).unwrap();
     let output = child.wait_with_output(CATALOG_EXIT_TIMEOUT).unwrap();
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
     assert!(
-        String::from_utf8(output.stdout)
+        String::from_utf8(output.stderr)
             .unwrap()
-            .starts_with("codex-session-control ")
+            .contains("connection closed: initialize request")
     );
-    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn binary_is_direct_stdio_and_accepts_no_commands() {
+    let output = Command::new(cargo_bin("codex-session-control"))
+        .arg("mcp-server")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("does not accept arguments")
+    );
 }
 
 #[test]
 fn child_guard_terminates_and_reaps_on_timeout() {
     let mut command = Command::new(cargo_bin("codex-session-control"));
     command
-        .arg("--verbose")
-        .arg("mcp-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -467,7 +480,6 @@ fn child_guard_continuous_output_fixture() {
 fn child_guard_drop_terminates_and_reaps() {
     let mut command = Command::new(cargo_bin("codex-session-control"));
     command
-        .arg("mcp-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -486,7 +498,6 @@ fn child_guard_drop_terminates_and_reaps() {
 fn child_guard_drop_terminates_process_group() {
     let mut leader_command = Command::new(cargo_bin("codex-session-control"));
     leader_command
-        .arg("mcp-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -494,7 +505,6 @@ fn child_guard_drop_terminates_process_group() {
 
     let mut member_command = Command::new(cargo_bin("codex-session-control"));
     member_command
-        .arg("mcp-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -547,8 +557,6 @@ fn public_catalog_is_exact() {
 
     let mut command = Command::new(cargo_bin("codex-session-control"));
     command
-        .arg("--verbose")
-        .arg("mcp-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
