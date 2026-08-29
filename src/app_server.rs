@@ -21,6 +21,11 @@ use crate::{
     model::{ProductConfig, Thread, ThreadGoal, ThreadSnapshot, Turn, TurnItemsView},
 };
 
+#[allow(
+    dead_code,
+    reason = "endpoint consumption is added by the subsequent app-server integration slice"
+)]
+mod endpoint;
 mod protocol;
 
 use protocol::{
