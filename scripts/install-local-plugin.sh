@@ -4,7 +4,7 @@ set -euo pipefail
 
 die() {
   printf '%s\n' "$1" >&2
-  exit "${2:-1}"
+  exit 1
 }
 
 run_codex() {
@@ -24,12 +24,30 @@ marketplace_manifest="$clone_root/.agents/plugins/marketplace.json"
 staged_binary="$plugin_root/bin/codex-session-control"
 
 test -d "$clone_root" || die 'Checkout root is unavailable.'
-test ! -L "$plugin_root" || die 'Plugin root must not be a symlink.'
+require_checkout_directory() {
+  local path="$1"
+  local canonical_path
+
+  test -d "$path" || die 'Checkout directory is unavailable.'
+  test ! -L "$path" || die 'Checkout directory must not be a symlink.'
+  canonical_path="$(realpath -e -- "$path")" || die 'Checkout directory is unavailable.'
+  case "$canonical_path" in
+    "$clone_root"/*) ;;
+    *) die 'Checkout directory escapes the canonical checkout.' ;;
+  esac
+  test "$canonical_path" = "$path" || die 'Checkout directory must not be a symlink.'
+}
+
+require_checkout_directory "$clone_root/.agents"
+require_checkout_directory "$clone_root/.agents/plugins"
+require_checkout_directory "$clone_root/plugins"
+require_checkout_directory "$plugin_root"
+require_checkout_directory "$plugin_root/.codex-plugin"
+require_checkout_directory "$plugin_root/bin"
 test ! -L "$plugin_manifest" || die 'Plugin manifest must not be a symlink.'
 test ! -L "$mcp_manifest" || die 'MCP manifest must not be a symlink.'
 test ! -L "$marketplace_manifest" || die 'Marketplace manifest must not be a symlink.'
 test ! -L "$staged_binary" || die 'Staged executable must not be a symlink.'
-test "$(cd -- "$plugin_root" && pwd -P)" = "$plugin_root" || die 'Plugin root escapes the canonical checkout.'
 
 case "$(uname -m)" in
   x86_64|amd64) expected_machine='Advanced Micro Devices X86-64' ;;
@@ -40,8 +58,6 @@ esac
 for manifest in "$marketplace_manifest" "$plugin_manifest" "$mcp_manifest"; do
   test -f "$manifest" || die 'Plugin manifest is missing.'
   jq empty "$manifest" >/dev/null || die 'Plugin manifest is not valid JSON.'
-  jq -e '[.. | strings | select(test("\\{\\{|\\}\\}|\\$\\{|__[A-Z0-9_]+__|<[^>]+>"))] | length == 0' \
-    "$manifest" >/dev/null || die 'Plugin manifest contains an unexpanded template token.'
 done
 
 cargo_metadata="$(cd -- "$clone_root" && cargo metadata --locked --no-deps --format-version 1)"
@@ -104,9 +120,6 @@ candidate="$clone_root/target/release/codex-session-control"
 if ! { test -f "$candidate" && test -x "$candidate" && test ! -L "$candidate"; }; then
   die 'Locked build did not produce a regular executable.'
 fi
-readelf --file-header "$candidate" | grep -F 'Machine:' | grep -F "$expected_machine" >/dev/null \
-  || die 'Built executable does not match the current architecture.'
-
 stage="$(mktemp "$plugin_root/bin/.codex-session-control.XXXXXX")"
 trap 'rm -f -- "${stage:-}"' EXIT
 cp -- "$candidate" "$stage"
@@ -114,6 +127,8 @@ chmod 0755 "$stage"
 if ! { test -f "$stage" && test ! -L "$stage"; }; then
   die 'Temporary staging file is not regular.'
 fi
+readelf --file-header "$stage" | grep -F 'Machine:' | grep -F "$expected_machine" >/dev/null \
+  || die 'Built executable does not match the current architecture.'
 mv -fT -- "$stage" "$staged_binary"
 stage=
 

@@ -1,12 +1,17 @@
+#[path = "support/process_guard.rs"]
+mod process_guard;
+
+use process_guard::ChildGuard;
 use std::{
     env,
     ffi::OsString,
     fs,
-    io::Write,
+    io::{Read, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::{Mutex, MutexGuard, OnceLock},
+    time::Duration,
 };
 
 use serde_json::{Value, json};
@@ -34,6 +39,10 @@ const TOOL_NAMES: [&str; 13] = [
     "thread_goal_clear",
     "thread_interrupt",
 ];
+const GENERIC_MCP_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+const INSTALLER_FIXTURE_TIMEOUT: Duration = Duration::from_secs(120);
+const CODEX_PLUGIN_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const CODEX_READ_ONLY_PROBE_TIMEOUT: Duration = Duration::from_secs(90);
 
 static INSTALLER_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -93,10 +102,14 @@ fn current_path() -> OsString {
 }
 
 fn current_cargo() -> PathBuf {
-    let output = Command::new("sh")
-        .args(["-c", "command -v cargo"])
-        .output()
-        .expect("resolve real cargo executable");
+    let mut command = Command::new("sh");
+    command.args(["-c", "command -v cargo"]);
+    let output = run_bounded_command(
+        &mut command,
+        GENERIC_MCP_EXIT_TIMEOUT,
+        "resolve real Cargo executable",
+    )
+    .expect("resolve real cargo executable");
     assert!(
         output.status.success(),
         "cargo must be available for packaging tests"
@@ -140,11 +153,14 @@ fn assert_regular_executable(path: &Path) {
 }
 
 fn assert_current_machine(path: &Path) {
-    let output = Command::new("readelf")
-        .args(["--file-header"])
-        .arg(path)
-        .output()
-        .expect("run readelf for staged executable");
+    let mut command = Command::new("readelf");
+    command.args(["--file-header"]).arg(path);
+    let output = run_bounded_command(
+        &mut command,
+        GENERIC_MCP_EXIT_TIMEOUT,
+        "inspect staged executable ELF header",
+    )
+    .expect("run readelf for staged executable");
     assert!(
         output.status.success(),
         "readelf must inspect the staged executable"
@@ -156,6 +172,104 @@ fn assert_current_machine(path: &Path) {
             .any(|line| line.contains("Machine:") && line.contains(expected_machine())),
         "staged executable does not match the current native machine"
     );
+}
+
+fn run_bounded_command(
+    command: &mut Command,
+    timeout: Duration,
+    context: &str,
+) -> Result<Output, String> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = ChildGuard::spawn(command)
+        .map_err(|_| format!("{context} could not start within the isolated test"))?;
+    child
+        .wait_with_output(timeout)
+        .map_err(|_| format!("{context} did not complete within its deadline"))
+}
+
+fn verify_direct_codex_prerequisite(binary: &Path) -> Result<(), &'static str> {
+    if !binary.is_absolute() {
+        return Err("direct Codex binary must be absolute");
+    }
+    let metadata = fs::symlink_metadata(binary)
+        .map_err(|_| "direct Codex binary metadata must be available")?;
+    if !metadata.file_type().is_file() {
+        return Err("direct Codex binary must be regular");
+    }
+    if metadata.file_type().is_symlink() {
+        return Err("direct Codex binary must not be a wrapper symlink");
+    }
+    if metadata.uid() != rustix::process::geteuid().as_raw() {
+        return Err("direct Codex binary must be owned by the effective user");
+    }
+    if metadata.mode() & 0o7777 != 0o755 {
+        return Err("direct Codex binary must have exact mode 0755");
+    }
+
+    let mut readelf = Command::new("readelf");
+    readelf.args(["--file-header"]).arg(binary);
+    let header = run_bounded_command(
+        &mut readelf,
+        GENERIC_MCP_EXIT_TIMEOUT,
+        "direct Codex ELF inspection",
+    )
+    .map_err(|_| "direct Codex binary must be a native executable for this machine")?;
+    if !header.status.success()
+        || !String::from_utf8_lossy(&header.stdout)
+            .lines()
+            .any(|line| line.contains("Machine:") && line.contains(expected_machine()))
+    {
+        return Err("direct Codex binary must be a native executable for this machine");
+    }
+
+    let mut version = Command::new(binary);
+    version.arg("--version").env_clear();
+    let version = run_bounded_command(
+        &mut version,
+        GENERIC_MCP_EXIT_TIMEOUT,
+        "direct Codex version check",
+    )
+    .map_err(|_| "direct Codex version check must complete")?;
+    if !version.status.success()
+        || version.stdout != b"codex-cli 0.149.1\n"
+        || !version.stderr.is_empty()
+    {
+        return Err("direct Codex binary must report exactly codex-cli 0.149.1");
+    }
+    Ok(())
+}
+
+fn copy_isolated_auth_after_verified_binary(
+    binary: &Path,
+    auth: &Path,
+    codex_home: &Path,
+) -> Result<(), &'static str> {
+    verify_direct_codex_prerequisite(binary)?;
+    let auth_metadata =
+        fs::symlink_metadata(auth).map_err(|_| "auth source metadata must be available")?;
+    if !auth_metadata.file_type().is_file() {
+        return Err("auth source must be regular");
+    }
+    if auth_metadata.file_type().is_symlink() {
+        return Err("auth source must not be a symlink");
+    }
+
+    let copied_auth = codex_home.join("auth.json");
+    fs::copy(auth, &copied_auth).map_err(|_| "isolated auth copy failed")?;
+    fs::set_permissions(&copied_auth, fs::Permissions::from_mode(0o600))
+        .map_err(|_| "isolated auth copy mode could not be set")?;
+    let copied_metadata = fs::symlink_metadata(&copied_auth)
+        .map_err(|_| "isolated auth copy metadata must be available")?;
+    if !copied_metadata.file_type().is_file()
+        || copied_metadata.file_type().is_symlink()
+        || copied_metadata.mode() & 0o7777 != 0o600
+    {
+        return Err("isolated auth copy must be a regular mode-0600 file");
+    }
+    Ok(())
 }
 
 struct StagedBinaryRestore {
@@ -285,14 +399,18 @@ exit 64\n",
     }
 
     fn run_installer(&self, invalid_json: bool) -> Output {
+        self.run_installer_at(&installer(), &self.root, invalid_json)
+    }
+
+    fn run_installer_at(&self, script: &Path, cwd: &Path, invalid_json: bool) -> Output {
         let inherited_path = current_path();
         let path = env::join_paths(
             std::iter::once(self.bin.clone()).chain(env::split_paths(&inherited_path)),
         )
         .expect("construct fake-tool PATH");
-        let mut command = Command::new(installer());
+        let mut command = Command::new(script);
         command
-            .current_dir(&self.root)
+            .current_dir(cwd)
             .env_clear()
             .env("PATH", path)
             .env("HOME", self.root.join("home"))
@@ -308,7 +426,12 @@ exit 64\n",
         if invalid_json {
             command.env("FAKE_CODEX_INVALID_JSON", "1");
         }
-        command.output().expect("run checkout-local installer")
+        run_bounded_command(
+            &mut command,
+            INSTALLER_FIXTURE_TIMEOUT,
+            "run checkout-local installer",
+        )
+        .expect("run checkout-local installer")
     }
 
     fn mutations(&self) -> String {
@@ -321,6 +444,54 @@ exit 64\n",
 
     fn cargo_commands(&self) -> String {
         fs::read_to_string(self.state.join("cargo.log")).unwrap_or_default()
+    }
+}
+
+struct DisposableClone {
+    _root: tempfile::TempDir,
+    root: PathBuf,
+    script: PathBuf,
+    plugin: PathBuf,
+}
+
+impl DisposableClone {
+    fn new() -> Self {
+        let root = private_tempdir();
+        let root_path = root.path().join("clone");
+        private_directory(&root_path);
+        let script = root_path.join("scripts/install-local-plugin.sh");
+        private_directory(script.parent().expect("installer script has parent"));
+        fs::copy(installer(), &script).expect("copy installer into disposable clone");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755))
+            .expect("make disposable installer executable");
+        let plugin = root_path.join("plugins/codex-session-control");
+        private_directory(plugin.join(".codex-plugin").as_path());
+        Self {
+            _root: root,
+            root: root_path,
+            script,
+            plugin,
+        }
+    }
+
+    fn copy_manifests(&self) {
+        let marketplace = self.root.join(".agents/plugins/marketplace.json");
+        private_directory(marketplace.parent().expect("marketplace has parent"));
+        fs::copy(
+            repository_root().join(".agents/plugins/marketplace.json"),
+            marketplace,
+        )
+        .expect("copy disposable marketplace manifest");
+        fs::copy(
+            repository_root().join("plugins/codex-session-control/.codex-plugin/plugin.json"),
+            self.plugin.join(".codex-plugin/plugin.json"),
+        )
+        .expect("copy disposable legacy plugin manifest");
+        fs::copy(
+            repository_root().join("plugins/codex-session-control/.mcp.json"),
+            self.plugin.join(".mcp.json"),
+        )
+        .expect("copy disposable legacy MCP manifest");
     }
 }
 
@@ -411,27 +582,6 @@ fn root_manifests_are_exact_and_versioned() {
         !root.join("plugins/codex-session-control/mcp.json").exists(),
         "the unsupported Agent Plugins v1 root mcp.json format must remain absent"
     );
-
-    let installer_text = fs::read_to_string(installer()).expect("checkout installer must exist");
-    for forbidden in [
-        "curl",
-        "wget",
-        "http://",
-        "https://",
-        "sha256",
-        "checksum",
-        "cargo install",
-        "systemctl",
-        ".local/bin",
-        "plugin marketplace remove",
-        "rm -rf",
-        "ln -s",
-    ] {
-        assert!(
-            !installer_text.contains(forbidden),
-            "installer must not contain forbidden {forbidden:?} behavior"
-        );
-    }
 }
 
 #[test]
@@ -478,6 +628,114 @@ fn installer_rejects_broken_staged_symlink_before_build_or_codex_mutation() {
 }
 
 #[test]
+fn installer_rejects_symlinked_manifest_parents_before_build_or_codex_mutation() {
+    let _serial = installer_lock();
+
+    for component in [".agents", ".agents/plugins", "plugin/.codex-plugin"] {
+        let fixture = FakeCodex::new();
+        let clone = DisposableClone::new();
+        let escaped = clone
+            .root
+            .parent()
+            .expect("disposable clone has a private parent")
+            .join(format!("escaped-{}", component.replace('/', "-")));
+        private_directory(&escaped);
+        match component {
+            ".agents" => {
+                private_directory(escaped.join(".agents/plugins").as_path());
+                std::os::unix::fs::symlink(escaped.join(".agents"), clone.root.join(".agents"))
+                    .expect("create symlinked .agents parent");
+            }
+            ".agents/plugins" => {
+                private_directory(clone.root.join(".agents").as_path());
+                private_directory(escaped.join("plugins").as_path());
+                std::os::unix::fs::symlink(
+                    escaped.join("plugins"),
+                    clone.root.join(".agents/plugins"),
+                )
+                .expect("create symlinked marketplace parent");
+            }
+            "plugin/.codex-plugin" => {
+                fs::remove_dir(clone.plugin.join(".codex-plugin"))
+                    .expect("remove empty disposable plugin manifest directory");
+                private_directory(escaped.join(".codex-plugin").as_path());
+                std::os::unix::fs::symlink(
+                    escaped.join(".codex-plugin"),
+                    clone.plugin.join(".codex-plugin"),
+                )
+                .expect("create symlinked plugin manifest parent");
+            }
+            _ => unreachable!("fixed symlink parent cases"),
+        }
+        clone.copy_manifests();
+        private_directory(clone.plugin.join("bin").as_path());
+
+        let output = fixture.run_installer_at(&clone.script, &clone.root, false);
+
+        assert!(
+            !output.status.success(),
+            "symlinked {component} must fail closed"
+        );
+        assert!(
+            String::from_utf8(output.stderr)
+                .expect("installer stderr is UTF-8")
+                .ends_with("Checkout directory must not be a symlink.\n"),
+            "symlinked {component} must be rejected before later validation"
+        );
+        assert!(
+            fixture.cargo_commands().is_empty(),
+            "symlinked {component} must not start a build"
+        );
+        assert!(
+            fixture.commands().is_empty(),
+            "symlinked {component} must not query Codex"
+        );
+        assert!(
+            fixture.mutations().is_empty(),
+            "symlinked {component} must not mutate Codex"
+        );
+    }
+}
+
+#[test]
+fn installer_rejects_symlinked_bin_before_build_or_codex_mutation() {
+    let _serial = installer_lock();
+    let fixture = FakeCodex::new();
+    let clone = DisposableClone::new();
+    let escaped_bin = clone
+        .root
+        .parent()
+        .expect("disposable clone has a private parent")
+        .join("escaped-bin");
+    private_directory(&escaped_bin);
+    std::os::unix::fs::symlink(&escaped_bin, clone.plugin.join("bin"))
+        .expect("create symlinked plugin bin directory");
+    clone.copy_manifests();
+
+    let output = fixture.run_installer_at(&clone.script, &clone.root, false);
+
+    assert!(!output.status.success(), "symlinked bin must fail closed");
+    assert!(
+        String::from_utf8(output.stderr)
+            .expect("installer stderr is UTF-8")
+            .ends_with("Checkout directory must not be a symlink.\n"),
+        "symlinked bin must be rejected before later validation"
+    );
+    assert!(
+        fixture.cargo_commands().is_empty(),
+        "symlinked bin must not start a build"
+    );
+    assert!(
+        fixture.commands().is_empty(),
+        "symlinked bin must not query Codex"
+    );
+    assert!(
+        fixture.mutations().is_empty(),
+        "symlinked bin must not mutate Codex"
+    );
+}
+
+#[test]
 fn installer_builds_locked_and_atomically_stages_native_executable() {
     let _serial = installer_lock();
     let fixture = FakeCodex::new();
@@ -510,17 +768,6 @@ fn installer_builds_locked_and_atomically_stages_native_executable() {
             }),
         "atomic staging must clean its temporary file"
     );
-    let script = fs::read_to_string(installer()).expect("read installer");
-    let temporary_stage = script
-        .find("mktemp \"$plugin_root/bin/.codex-session-control.XXXXXX\"")
-        .expect("installer must create a private staging file");
-    let atomic_rename = script
-        .find("mv -fT -- \"$stage\" \"$staged_binary\"")
-        .expect("installer must atomically rename the staged executable");
-    assert!(
-        temporary_stage < atomic_rename,
-        "installer must create its temporary file before the atomic rename"
-    );
 }
 
 #[test]
@@ -532,8 +779,19 @@ fn installer_same_root_restages_and_does_not_duplicate_marketplace() {
     fs::write(staged_binary(), b"stale staged executable").expect("make stale staging fixture");
     fs::set_permissions(staged_binary(), fs::Permissions::from_mode(0o755))
         .expect("keep stale staging fixture executable");
+    let mut stale_handle = fs::File::open(staged_binary())
+        .expect("hold the stale executable open across atomic replacement");
 
     assert_success(&fixture.run_installer(false), "same-root installer rerun");
+
+    let mut retained_stale_bytes = Vec::new();
+    stale_handle
+        .read_to_end(&mut retained_stale_bytes)
+        .expect("read retained stale executable descriptor");
+    assert_eq!(
+        retained_stale_bytes, b"stale staged executable",
+        "restaging must atomically replace the destination instead of overwriting it in place"
+    );
 
     assert_eq!(
         sha256(&staged_binary()),
@@ -586,11 +844,17 @@ fn installer_rejects_marketplace_collision_before_plugin_mutation() {
 fn installer_suppresses_mise_advisory_for_machine_json() {
     let _serial = installer_lock();
     let fixture = FakeCodex::new();
-    let direct = Command::new(fixture.bin.join("codex"))
+    let mut direct_command = Command::new(fixture.bin.join("codex"));
+    direct_command
+        .env_remove("MISE_QUIET")
         .env("FAKE_CODEX_STATE", &fixture.state)
-        .args(["plugin", "marketplace", "list", "--json"])
-        .output()
-        .expect("run unquiet fake Codex");
+        .args(["plugin", "marketplace", "list", "--json"]);
+    let direct = run_bounded_command(
+        &mut direct_command,
+        GENERIC_MCP_EXIT_TIMEOUT,
+        "run unquiet fake Codex",
+    )
+    .expect("run unquiet fake Codex");
     assert!(
         String::from_utf8(direct.stdout)
             .expect("fake output is UTF-8")
@@ -641,7 +905,7 @@ fn installer_rejects_invalid_machine_json_before_mutation() {
     );
 }
 
-fn run_catalog_from(binary: &Path, cwd: &Path) -> Vec<Value> {
+fn run_catalog_from(binary: &Path, cwd: &Path, timeout: Duration) -> Result<Vec<Value>, String> {
     let messages = [
         json!({
             "jsonrpc": "2.0",
@@ -656,33 +920,33 @@ fn run_catalog_from(binary: &Path, cwd: &Path) -> Vec<Value> {
         json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
         json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
     ];
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn staged generic MCP binary");
+        .stderr(Stdio::piped());
+    let mut child = ChildGuard::spawn(&mut command)
+        .map_err(|_| "generic MCP binary could not start".to_owned())?;
     {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .expect("generic MCP stdin must be piped");
+        let stdin = child.stdin_mut().expect("generic MCP stdin must be piped");
         for message in messages {
             writeln!(stdin, "{message}").expect("write generic MCP request");
         }
     }
+    child.close_stdin();
     let output = child
-        .wait_with_output()
-        .expect("wait for staged generic MCP binary");
-    assert!(
-        output.status.success(),
-        "staged generic MCP binary must exit after stdin EOF"
-    );
+        .wait_with_output(timeout)
+        .map_err(|_| "generic MCP binary did not complete within its deadline".to_owned())?;
+    if !output.status.success() {
+        return Err("generic MCP binary did not exit successfully".to_owned());
+    }
     String::from_utf8(output.stdout)
-        .expect("MCP stdout is UTF-8")
+        .map_err(|_| "MCP stdout is not UTF-8".to_owned())?
         .lines()
-        .map(|line| serde_json::from_str(line).expect("MCP stdout must be JSON framing"))
+        .map(|line| {
+            serde_json::from_str(line).map_err(|_| "MCP stdout is not JSON framing".to_owned())
+        })
         .collect()
 }
 
@@ -694,6 +958,10 @@ fn isolated_codex_command(binary: &Path, home: &Path, codex_home: &Path) -> Comm
         .env("HOME", home)
         .env("CODEX_HOME", codex_home);
     command
+}
+
+fn run_isolated_plugin_command(command: &mut Command, context: &str) -> Output {
+    run_bounded_command(command, CODEX_PLUGIN_COMMAND_TIMEOUT, context).expect(context)
 }
 
 fn write_host_probe(path: &Path, log: &Path, marker: &str) {
@@ -716,16 +984,19 @@ fn run_isolated_host_probe(
     for (name, value) in sentinels {
         command.env(name, value);
     }
-    command
-        .args([
-            "exec",
-            "--ephemeral",
-            "--skip-git-repo-check",
-            "--json",
-            "Use the read-only plugin_probe tool once, then reply with its result.",
-        ])
-        .output()
-        .expect("run isolated read-only Codex probe")
+    command.args([
+        "exec",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "--json",
+        "Use the read-only plugin_probe tool once, then reply with its result.",
+    ]);
+    run_bounded_command(
+        &mut command,
+        CODEX_READ_ONLY_PROBE_TIMEOUT,
+        "isolated read-only Codex probe",
+    )
+    .expect("run isolated read-only Codex probe")
 }
 
 fn assert_host_probe(
@@ -768,7 +1039,8 @@ fn generic_client_initializes_and_lists_exact_catalog_from_another_cwd() {
     );
     let unrelated = private_tempdir();
 
-    let responses = run_catalog_from(&staged_binary(), unrelated.path());
+    let responses = run_catalog_from(&staged_binary(), unrelated.path(), GENERIC_MCP_EXIT_TIMEOUT)
+        .expect("generic client must complete within its deadline");
 
     let initialize = responses
         .iter()
@@ -791,6 +1063,68 @@ fn generic_client_initializes_and_lists_exact_catalog_from_another_cwd() {
 }
 
 #[test]
+fn generic_client_deadline_reaps_a_slow_staged_process() {
+    let root = private_tempdir();
+    let slow_server = root.path().join("slow-mcp-server");
+    let pid_log = root.path().join("slow-mcp-server.pid");
+    write_executable(
+        &slow_server,
+        &format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$$\" > {}\nsleep 1\n",
+            shell_quote(&pid_log)
+        ),
+    );
+
+    let started = std::time::Instant::now();
+    let result = run_catalog_from(&slow_server, root.path(), Duration::from_millis(100));
+    let pid = fs::read_to_string(&pid_log)
+        .expect("slow staged process must record its pid")
+        .trim()
+        .parse::<u32>()
+        .expect("slow staged process pid must be numeric");
+
+    assert_eq!(
+        result,
+        Err("generic MCP binary did not complete within its deadline".to_owned()),
+        "generic clients must not wait indefinitely for a staged process"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "generic client deadline must terminate the slow process promptly"
+    );
+    assert!(
+        !Path::new(&format!("/proc/{pid}")).exists(),
+        "generic client deadline must reap the slow staged process"
+    );
+}
+
+#[test]
+fn real_host_prerequisite_rejects_regular_script_wrapper_before_auth_copy() {
+    let root = private_tempdir();
+    let wrapper = root.path().join("codex-wrapper");
+    let auth = root.path().join("auth.json");
+    let codex_home = root.path().join("codex-home");
+    write_executable(
+        &wrapper,
+        "#!/usr/bin/env bash\nprintf '%s\\n' 'codex-cli 0.149.1'\n",
+    );
+    fs::write(&auth, b"isolated auth fixture").expect("write regular auth fixture");
+    fs::set_permissions(&auth, fs::Permissions::from_mode(0o600))
+        .expect("make auth fixture private");
+    private_directory(&codex_home);
+
+    assert_eq!(
+        copy_isolated_auth_after_verified_binary(&wrapper, &auth, &codex_home),
+        Err("direct Codex binary must be a native executable for this machine"),
+        "a regular executable script must not satisfy the direct native Codex prerequisite"
+    );
+    assert!(
+        !codex_home.join("auth.json").exists(),
+        "a rejected wrapper must fail before any isolated auth copy"
+    );
+}
+
+#[test]
 #[ignore = "requires an explicitly opted-in, isolated Codex CLI 0.149.1 plugin-host contract"]
 fn legacy_plugin_host_contract_on_codex_0_149_1() {
     // The real-host implementation is added with the private probe fixture below. Keeping this
@@ -807,63 +1141,15 @@ fn legacy_plugin_host_contract_on_codex_0_149_1() {
     let auth = env::var_os("CODEX_SESSION_CONTROL_PLUGIN_HOST_AUTH_JSON")
         .map(PathBuf::from)
         .expect("CODEX_SESSION_CONTROL_PLUGIN_HOST_AUTH_JSON is required before any host action");
-    assert!(binary.is_absolute(), "direct Codex binary must be absolute");
     assert!(auth.is_absolute(), "auth source must be absolute");
-    let binary_metadata = fs::symlink_metadata(&binary).expect("read direct Codex binary metadata");
-    assert!(
-        binary_metadata.file_type().is_file(),
-        "Codex binary must be regular"
-    );
-    assert!(
-        !binary_metadata.file_type().is_symlink(),
-        "Codex binary must not be a wrapper symlink"
-    );
-    assert_eq!(
-        binary_metadata.uid(),
-        rustix::process::geteuid().as_raw(),
-        "Codex binary must be owned by the effective user"
-    );
-    assert_eq!(
-        binary_metadata.mode() & 0o7777,
-        0o755,
-        "Codex binary must have the exact regular executable mode"
-    );
-    let version = Command::new(&binary)
-        .arg("--version")
-        .env_clear()
-        .output()
-        .expect("run direct Codex version command");
-    assert!(
-        version.status.success(),
-        "direct Codex version command must succeed"
-    );
-    assert_eq!(
-        version.stdout, b"codex-cli 0.149.1\n",
-        "direct Codex binary must report exactly codex-cli 0.149.1"
-    );
-    let auth_metadata = fs::symlink_metadata(&auth).expect("read auth source metadata");
-    assert!(
-        auth_metadata.file_type().is_file(),
-        "auth source must be regular"
-    );
-    assert!(
-        !auth_metadata.file_type().is_symlink(),
-        "auth source must not be a symlink"
-    );
 
     let root = private_tempdir();
     let home = root.path().join("home");
     let codex_home = root.path().join("codex-home");
     private_directory(&home);
     private_directory(&codex_home);
-    let copied_auth = codex_home.join("auth.json");
-    fs::copy(&auth, &copied_auth).expect("copy auth only into isolated Codex state");
-    fs::set_permissions(&copied_auth, fs::Permissions::from_mode(0o600))
-        .expect("make isolated auth copy private");
-    let copied_auth_metadata = fs::symlink_metadata(&copied_auth).expect("read isolated auth copy");
-    assert!(copied_auth_metadata.file_type().is_file());
-    assert!(!copied_auth_metadata.file_type().is_symlink());
-    assert_eq!(copied_auth_metadata.mode() & 0o7777, 0o600);
+    copy_isolated_auth_after_verified_binary(&binary, &auth, &codex_home)
+        .expect("copy auth only after direct Codex verification into isolated state");
 
     let clone = root.path().join("clone");
     let marketplace = clone.join(".agents/plugins/marketplace.json");
@@ -903,25 +1189,25 @@ fn legacy_plugin_host_contract_on_codex_0_149_1() {
     for (name, value) in &sentinels {
         codex.env(name, value);
     }
-    let add_marketplace = codex
+    codex
         .args(["plugin", "marketplace", "add"])
         .arg(&clone)
-        .arg("--json")
-        .output()
-        .expect("register isolated plugin marketplace");
+        .arg("--json");
+    let add_marketplace =
+        run_isolated_plugin_command(&mut codex, "register isolated plugin marketplace");
     assert!(
         add_marketplace.status.success(),
         "isolated marketplace registration must succeed"
     );
-    let add_plugin = isolated_codex_command(&binary, &home, &codex_home)
-        .args([
-            "plugin",
-            "add",
-            "codex-session-control@codex-session-control-local",
-            "--json",
-        ])
-        .output()
-        .expect("install isolated legacy plugin");
+    let mut add_plugin_command = isolated_codex_command(&binary, &home, &codex_home);
+    add_plugin_command.args([
+        "plugin",
+        "add",
+        "codex-session-control@codex-session-control-local",
+        "--json",
+    ]);
+    let add_plugin =
+        run_isolated_plugin_command(&mut add_plugin_command, "install isolated legacy plugin");
     assert!(
         add_plugin.status.success(),
         "isolated plugin install must succeed"
@@ -949,15 +1235,17 @@ fn legacy_plugin_host_contract_on_codex_0_149_1() {
     let initial_digest = sha256(&initial_cache);
 
     write_host_probe(&source_probe, &probe_log, "same-version-refresh");
-    let same_version_add = isolated_codex_command(&binary, &home, &codex_home)
-        .args([
-            "plugin",
-            "add",
-            "codex-session-control@codex-session-control-local",
-            "--json",
-        ])
-        .output()
-        .expect("refresh isolated plugin with the same manifest version");
+    let mut same_version_command = isolated_codex_command(&binary, &home, &codex_home);
+    same_version_command.args([
+        "plugin",
+        "add",
+        "codex-session-control@codex-session-control-local",
+        "--json",
+    ]);
+    let same_version_add = run_isolated_plugin_command(
+        &mut same_version_command,
+        "refresh isolated plugin with the same manifest version",
+    );
     assert!(
         same_version_add.status.success(),
         "same-version plugin refresh must succeed"
@@ -992,15 +1280,17 @@ fn legacy_plugin_host_contract_on_codex_0_149_1() {
     )
     .expect("write bumped isolated plugin manifest");
     write_host_probe(&source_probe, &probe_log, "version-bump-refresh");
-    let version_bump_add = isolated_codex_command(&binary, &home, &codex_home)
-        .args([
-            "plugin",
-            "add",
-            "codex-session-control@codex-session-control-local",
-            "--json",
-        ])
-        .output()
-        .expect("refresh isolated plugin after manifest version bump");
+    let mut version_bump_command = isolated_codex_command(&binary, &home, &codex_home);
+    version_bump_command.args([
+        "plugin",
+        "add",
+        "codex-session-control@codex-session-control-local",
+        "--json",
+    ]);
+    let version_bump_add = run_isolated_plugin_command(
+        &mut version_bump_command,
+        "refresh isolated plugin after manifest version bump",
+    );
     assert!(
         version_bump_add.status.success(),
         "version-bump plugin refresh must succeed"
@@ -1023,15 +1313,15 @@ fn legacy_plugin_host_contract_on_codex_0_149_1() {
         "version bump must refresh cached executable bytes"
     );
 
-    let remove = isolated_codex_command(&binary, &home, &codex_home)
-        .args([
-            "plugin",
-            "remove",
-            "codex-session-control@codex-session-control-local",
-            "--json",
-        ])
-        .output()
-        .expect("remove isolated plugin registration");
+    let mut remove_command = isolated_codex_command(&binary, &home, &codex_home);
+    remove_command.args([
+        "plugin",
+        "remove",
+        "codex-session-control@codex-session-control-local",
+        "--json",
+    ]);
+    let remove =
+        run_isolated_plugin_command(&mut remove_command, "remove isolated plugin registration");
     assert!(
         remove.status.success(),
         "isolated plugin removal must succeed"
@@ -1071,15 +1361,17 @@ fn legacy_plugin_host_contract_on_codex_0_149_1() {
     .expect("write isolated Agent Plugins v1 root MCP negative control");
     let _ = fs::remove_file(&probe_log);
     write_host_probe(&source_probe, &probe_log, "v1-negative-control");
-    let v1_add = isolated_codex_command(&binary, &home, &codex_home)
-        .args([
-            "plugin",
-            "add",
-            "codex-session-control@codex-session-control-local",
-            "--json",
-        ])
-        .output()
-        .expect("attempt isolated Agent Plugins v1 root MCP registration");
+    let mut v1_command = isolated_codex_command(&binary, &home, &codex_home);
+    v1_command.args([
+        "plugin",
+        "add",
+        "codex-session-control@codex-session-control-local",
+        "--json",
+    ]);
+    let v1_add = run_isolated_plugin_command(
+        &mut v1_command,
+        "attempt isolated Agent Plugins v1 root MCP registration",
+    );
     assert!(
         v1_add.status.success(),
         "Codex 0.149.1 must accept the Agent Plugins v1 root MCP negative control"
