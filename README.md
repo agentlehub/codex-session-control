@@ -22,7 +22,8 @@ All of this is possible through the underlying Codex app-server, but integrating
 Requirements:
 
 - Linux on x86-64 or ARM64 with a working systemd user session
-- Codex CLI `0.147.0` on `PATH` <!-- generated: supported-codex-version -->
+- Native app-server protocol validated against Codex `0.150.0-alpha.12.2`. <!-- generated: supported-codex-version -->
+- Codex CLI `0.149.1` on `PATH` is the plugin-host target.
 - `curl` and `sha256sum`
 
 Download and run the release installer:

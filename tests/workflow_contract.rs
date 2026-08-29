@@ -35,13 +35,24 @@ fn tested_codex_version_has_one_canonical_source() {
         .strip_suffix('\n')
         .expect("tested Codex version must end with one newline");
     assert!(!version.contains(['\r', '\n']));
-    let components = version.split('.').collect::<Vec<_>>();
-    assert_eq!(components.len(), 3, "tested Codex version must be SemVer");
-    assert!(components.iter().all(|component| {
-        !component.is_empty()
-            && component.bytes().all(|byte| byte.is_ascii_digit())
-            && (component == &"0" || !component.starts_with('0'))
-    }));
+    assert_eq!(
+        semver::Version::parse(version).unwrap().to_string(),
+        version,
+        "tested Codex version must be canonical SemVer"
+    );
+    for canonical_full_version in [
+        "0.150.0-alpha.12.2",
+        "1.2.3+build.7",
+        "1.2.3-alpha.1+linux.x86-64",
+    ] {
+        assert_eq!(
+            semver::Version::parse(canonical_full_version)
+                .unwrap()
+                .to_string(),
+            canonical_full_version,
+            "canonical full SemVer must round-trip: {canonical_full_version}"
+        );
+    }
 
     let build_script = fs::read_to_string(root.join("build.rs")).unwrap();
     assert_required(
@@ -49,6 +60,8 @@ fn tested_codex_version_has_one_canonical_source() {
         &[
             "supported-codex-version.txt",
             "CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION",
+            "semver::Version::parse",
+            "parsed.to_string() == version",
         ],
         "tested Codex version build bridge",
     );
@@ -59,14 +72,6 @@ fn tested_codex_version_has_one_canonical_source() {
         &["env!(\"CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION\")"],
         "application tested Codex version",
     );
-    let disposable_ci =
-        fs::read_to_string(root.join("scripts/ci/disposable-systemd-user-contract.sh")).unwrap();
-    assert_required(
-        &disposable_ci,
-        &["cat \"$repository_root/supported-codex-version.txt\""],
-        "disposable systemd tested Codex version",
-    );
-
     let readme = fs::read_to_string(root.join("README.md")).unwrap();
     let marker = "<!-- generated: supported-codex-version -->";
     let marked_lines = readme
@@ -75,8 +80,14 @@ fn tested_codex_version_has_one_canonical_source() {
         .collect::<Vec<_>>();
     assert_eq!(
         marked_lines,
-        [format!("- Codex CLI `{version}` on `PATH` {marker}")],
+        [format!(
+            "- Native app-server protocol validated against Codex `{version}`. {marker}"
+        )],
         "README must expose exactly one generated tested-version line"
+    );
+    assert!(
+        readme.contains("- Codex CLI `0.149.1` on `PATH` is the plugin-host target."),
+        "README must separately state the Codex CLI plugin-host target"
     );
 
     let fixture_raw =
@@ -102,7 +113,7 @@ fn tested_codex_version_has_one_canonical_source() {
         &[
             "supported-codex-version.txt",
             "generated: supported-codex-version",
-            "VERSION must be stable SemVer",
+            "VERSION must be canonical SemVer",
         ],
         "supported Codex version setter",
     );
@@ -119,7 +130,9 @@ fn tested_codex_version_setter_updates_only_generated_version_data() {
     let source_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let original_version =
         fs::read_to_string(source_root.join("supported-codex-version.txt")).unwrap();
-    let original_version = original_version.trim();
+    let original_version = original_version
+        .strip_suffix('\n')
+        .expect("tested Codex version must end with one newline");
     let original_readme = fs::read_to_string(source_root.join("README.md")).unwrap();
     let original_fixture =
         fs::read(source_root.join("tests/fixtures/app-server-contract.json")).unwrap();
@@ -145,49 +158,79 @@ fn tested_codex_version_setter_updates_only_generated_version_data() {
         &setter,
     )
     .unwrap();
-    let current = semver::Version::parse(original_version).unwrap();
-    let fake_version = format!("{}.0.0", current.major.checked_add(1).unwrap());
-    let output = Command::new(&setter).arg(&fake_version).output().unwrap();
-    assert!(
-        output.status.success(),
-        "setter failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        fs::read_to_string(root.path().join("supported-codex-version.txt")).unwrap(),
-        format!("{fake_version}\n")
-    );
-    let readme = fs::read_to_string(root.path().join("README.md")).unwrap();
-    let old_line = format!(
-        "- Codex CLI `{original_version}` on `PATH` <!-- generated: supported-codex-version -->"
-    );
-    let new_line = format!(
-        "- Codex CLI `{fake_version}` on `PATH` <!-- generated: supported-codex-version -->"
-    );
-    assert_eq!(readme, original_readme.replace(&old_line, &new_line));
-    assert_eq!(
-        fs::read(fixtures.join("app-server-contract.json")).unwrap(),
-        original_fixture
-    );
+    let marker = "<!-- generated: supported-codex-version -->";
+    let mut expected_version = original_version.to_owned();
+    let mut expected_readme = original_readme.clone();
+    for accepted_version in [
+        "0.150.0-alpha.12.2",
+        "1.2.3+build.7",
+        "1.2.3-alpha.1+linux.x86-64",
+    ] {
+        let output = Command::new(&setter)
+            .arg(accepted_version)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "setter rejected {accepted_version}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("supported-codex-version.txt")).unwrap(),
+            format!("{accepted_version}\n")
+        );
+        let old_line = format!(
+            "- Native app-server protocol validated against Codex `{expected_version}`. {marker}"
+        );
+        let new_line = format!(
+            "- Native app-server protocol validated against Codex `{accepted_version}`. {marker}"
+        );
+        expected_readme = expected_readme.replace(&old_line, &new_line);
+        assert_eq!(
+            fs::read_to_string(root.path().join("README.md")).unwrap(),
+            expected_readme
+        );
+        assert_eq!(
+            fs::read(fixtures.join("app-server-contract.json")).unwrap(),
+            original_fixture
+        );
+        expected_version = accepted_version.to_owned();
+    }
 
     let version_before_rejection =
         fs::read(root.path().join("supported-codex-version.txt")).unwrap();
     let readme_before_rejection = fs::read(root.path().join("README.md")).unwrap();
     let fixture_before_rejection = fs::read(fixtures.join("app-server-contract.json")).unwrap();
-    let rejected = Command::new(&setter).arg("1.2.3-beta.1").output().unwrap();
-    assert!(!rejected.status.success());
-    assert_eq!(
-        fs::read(root.path().join("supported-codex-version.txt")).unwrap(),
-        version_before_rejection
-    );
-    assert_eq!(
-        fs::read(root.path().join("README.md")).unwrap(),
-        readme_before_rejection
-    );
-    assert_eq!(
-        fs::read(fixtures.join("app-server-contract.json")).unwrap(),
-        fixture_before_rejection
-    );
+    for rejected_version in [
+        "1.2.3-01",
+        "1.2.3-alpha..1",
+        "1.2.3-alpha/1",
+        "1.2.3-alpha\\1",
+        "1.2.3 ",
+        "1.2.3\n",
+        "../1.2.3",
+    ] {
+        let rejected = Command::new(&setter)
+            .arg(rejected_version)
+            .output()
+            .unwrap();
+        assert!(
+            !rejected.status.success(),
+            "setter accepted invalid SemVer: {rejected_version:?}"
+        );
+        assert_eq!(
+            fs::read(root.path().join("supported-codex-version.txt")).unwrap(),
+            version_before_rejection
+        );
+        assert_eq!(
+            fs::read(root.path().join("README.md")).unwrap(),
+            readme_before_rejection
+        );
+        assert_eq!(
+            fs::read(fixtures.join("app-server-contract.json")).unwrap(),
+            fixture_before_rejection
+        );
+    }
 
     let real_mv = Command::new("sh")
         .args(["-c", "command -v mv"])
@@ -212,7 +255,7 @@ fn tested_codex_version_setter_updates_only_generated_version_data() {
     let mut path = vec![fake_bin.clone()];
     path.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
     let path = std::env::join_paths(path).unwrap();
-    let failed_version = format!("{}.0.0", current.major.checked_add(2).unwrap());
+    let failed_version = "2.0.0";
     let failed_replace = Command::new(&setter)
         .arg(&failed_version)
         .env("PATH", &path)

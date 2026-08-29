@@ -14,19 +14,12 @@ fn main() {
         !version.contains(['\r', '\n']),
         "supported Codex version must contain exactly one line"
     );
-    let components = version.split('.').collect::<Vec<_>>();
-    assert_eq!(
-        components.len(),
-        3,
-        "supported Codex version must be stable SemVer"
-    );
+    let parsed = semver::Version::parse(version).unwrap_or_else(|error| {
+        panic!("supported Codex version must be canonical SemVer: {error}")
+    });
     assert!(
-        components.iter().all(|component| {
-            !component.is_empty()
-                && component.bytes().all(|byte| byte.is_ascii_digit())
-                && (component == &"0" || !component.starts_with('0'))
-        }),
-        "supported Codex version must be stable SemVer"
+        parsed.to_string() == version,
+        "supported Codex version must be canonical SemVer"
     );
     println!("cargo::rustc-env={VERSION_ENV}={version}");
 }

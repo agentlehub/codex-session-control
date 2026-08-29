@@ -8,8 +8,13 @@ if [ "$#" -ne 1 ]; then
 fi
 
 version="$1"
-if ! [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-  printf 'VERSION must be stable SemVer: %s\n' "$version" >&2
+LC_ALL=C
+numeric_identifier='(0|[1-9][0-9]*)'
+prerelease_identifier="($numeric_identifier|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+build_identifier='[0-9A-Za-z-]+'
+semver_pattern="^$numeric_identifier\\.$numeric_identifier\\.$numeric_identifier(-$prerelease_identifier(\\.$prerelease_identifier)*)?(\\+$build_identifier(\\.$build_identifier)*)?$"
+if ! [[ "$version" =~ $semver_pattern ]]; then
+  printf 'VERSION must be canonical SemVer: %s\n' "$version" >&2
   exit 2
 fi
 
@@ -18,7 +23,7 @@ repository_root="$(cd -- "$script_dir/.." && pwd)"
 version_file="$repository_root/supported-codex-version.txt"
 readme="$repository_root/README.md"
 marker='<!-- generated: supported-codex-version -->'
-replacement="- Codex CLI \`$version\` on \`PATH\` $marker"
+replacement="- Native app-server protocol validated against Codex \`$version\`. $marker"
 
 marker_count="$(awk -v marker="$marker" '
   {

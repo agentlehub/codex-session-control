@@ -1,5 +1,5 @@
 {
-  "codexVersion": "0.147.0",
+  "codexVersion": "0.150.0-alpha.12.2",
   "errorExemplars": {
     "activeTurnMismatch": {
       "code": -32600,
@@ -10,7 +10,7 @@
       "message": "thread not loaded: 00000000-0000-7000-8000-000000000000"
     }
   },
-  "schemaSha256": "87557fffd00346edf42cdafca5d4f0b1365beb79710d2e7c0bfb9f04b2539f0f",
+  "schemaSha256": "d63d84b779fe213945e682116cdd83a8f7ab8bcf816ff7b96aa0fe53dd38f2ec",
   "successfulExemplars": {
     "activeTurn": {
       "turn": {
@@ -55,7 +55,7 @@
       "codexHome": "/tmp/codex-session-control-fixture/home/.codex",
       "platformFamily": "unix",
       "platformOs": "linux",
-      "userAgent": "codex_session_control/0.147.0 (Arch Linux Unknown; x86_64) dumb (codex_session_control; 0.2.3)"
+      "userAgent": "codex_session_control/0.150.0-alpha.12.2 (Linux Unknown; x86_64) dumb (codex_session_control; 0.3.2)"
     },
     "threadList": {
       "data": [
@@ -121,7 +121,7 @@
       }
     },
     "turnsList": {
-      "backwardsCursor": "{\"turnId\":\"turn_session_control_held\",\"includeAnchor\":true}",
+      "backwardsCursor": "{\"requestedThreadId\":\"thread_session_control_1\",\"rolloutOrdinal\":21,\"includeAnchor\":true,\"scope\":{\"kind\":\"turns\"}}",
       "data": [
         {
           "completedAt": 0,
