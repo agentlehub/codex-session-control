@@ -363,6 +363,7 @@ Final commands and state checks must come from fresh post-implementation evidenc
 - `tests/cli_contract.rs`, `tests/cli_contract/`
 - `tests/app_server_integration/normal_home.rs`
 - `tests/app_server_integration/normal_home_paths.rs`
+- `tests/app_server_integration/protocol_support.rs` after moving only the retained direct native connection seam into `tests/app_server_integration/live_harness.rs`
 - `.github/workflows/release.yml`, `.github/workflows/publish.yml`
 
 No production or packaging file outside these targets may change without updating the implementation plan against this specification.

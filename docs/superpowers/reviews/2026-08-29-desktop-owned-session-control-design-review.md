@@ -56,6 +56,10 @@ Saved because: the first readiness review found material packaging, protocol-ver
   - Disposition: fixed
   - Evidence pointer: `.github/ISSUE_TEMPLATE/bug.yml` target, reader-workflow verification, acceptance criterion 29
   - Next action: none
+- `MAJOR` Plan discovery found an unclassified integration support module
+  - Disposition: fixed
+  - Evidence pointer: exact deletion of `tests/app_server_integration/protocol_support.rs` after moving only the retained native connection seam
+  - Next action: none
 
 ## Decisions
 
