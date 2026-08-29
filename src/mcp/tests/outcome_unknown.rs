@@ -350,13 +350,27 @@ impl ReplacementHarness {
         self.log.lock().unwrap().clone()
     }
 
-    async fn wait_for_requests(&self, count: usize) {
+    async fn wait_for_requests(&mut self, count: usize) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         loop {
             let request_received = self.request_received.notified();
-            if self.log.lock().unwrap().len() >= count {
+            let recorded = self.log();
+            if recorded.len() >= count {
                 return;
             }
-            request_received.await;
+            let listener_task = self
+                .listener_task
+                .as_mut()
+                .expect("replacement listener must remain joinable");
+            tokio::select! {
+                _ = request_received => {}
+                result = listener_task => panic!(
+                    "replacement authority stopped before recording {count} request(s): {result:?}"
+                ),
+                _ = tokio::time::sleep_until(deadline) => panic!(
+                    "replacement authority did not record {count} request(s) within one second: {recorded:?}"
+                ),
+            }
         }
     }
 
