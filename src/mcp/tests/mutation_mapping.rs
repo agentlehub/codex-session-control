@@ -36,7 +36,7 @@ async fn create_uses_exact_sequence_and_effective_native_values() {
         ),
     ])
     .await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
 
     let result = create_thread(
@@ -88,7 +88,7 @@ async fn create_initial_turn_failure_preserves_known_thread_without_cleanup() {
         ),
     ])
     .await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
 
     let error = create_thread(
@@ -146,7 +146,7 @@ async fn fork_defaults_and_explicit_values_map_without_extra_reads() {
             }),
         )])
         .await;
-        let client = AppServerClient::from_config(&harness.config);
+        let client = harness.client();
         let mut connection = client.connect_initialized().await.unwrap();
         let ValidatedInput::ThreadFork(input) =
             validate_input("thread_fork", arguments(public_input), &meta("caller")).unwrap()
@@ -175,7 +175,7 @@ async fn message_send_reports_empty_rollout_as_safe_to_retry_without_dispatching
             json!({"code": -32603, "message": native_message}),
         )])
         .await;
-        let client = AppServerClient::from_config(&harness.config);
+        let client = harness.client();
         let mut connection = client.connect_initialized().await.unwrap();
 
         let error = send_message(
@@ -219,7 +219,7 @@ async fn message_send_preserves_other_pre_read_failures() {
         native_error(),
     )])
     .await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
 
     let error = send_message(
@@ -271,7 +271,7 @@ async fn message_send_rejects_malformed_compact_snapshot_without_dispatching() {
         ),
     ])
     .await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
 
     let error = send_message(
@@ -312,7 +312,7 @@ async fn idle_message_reads_once_then_starts_with_overrides() {
         json!({"turn": native_turn("started", "inProgress")}),
     ));
     let harness = FakeAppServer::start(steps).await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
 
     let result = send_message(
@@ -360,7 +360,7 @@ async fn active_message_reads_once_then_steers_the_exact_turn() {
         json!({"turnId": "active-turn"}),
     ));
     let harness = FakeAppServer::start(steps).await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
 
     let result = send_message(
@@ -404,7 +404,7 @@ async fn active_message_override_is_rejected_before_prompt_dispatch() {
             false,
         ))
         .await;
-        let client = AppServerClient::from_config(&harness.config);
+        let client = harness.client();
         let mut connection = client.connect_initialized().await.unwrap();
 
         let error = send_message(
@@ -456,7 +456,7 @@ async fn message_race_never_retries_the_opposite_operation() {
         let mut steps = snapshot_steps("target", status, 20, latest, false);
         steps.push(FakeStep::error(method, params, native_error()));
         let harness = FakeAppServer::start(steps).await;
-        let client = AppServerClient::from_config(&harness.config);
+        let client = harness.client();
         let mut connection = client.connect_initialized().await.unwrap();
 
         let error = send_message(
@@ -501,7 +501,7 @@ async fn title_and_goal_clear_use_exact_single_requests() {
         json!({}),
     )])
     .await;
-    let title_client = AppServerClient::from_config(&title_harness.config);
+    let title_client = title_harness.client();
     let mut title_connection = title_client.connect_initialized().await.unwrap();
     let result: ThreadTitleSetResult = set_title(
         &title_client,
@@ -522,7 +522,7 @@ async fn title_and_goal_clear_use_exact_single_requests() {
         json!({"cleared": true}),
     )])
     .await;
-    let clear_client = AppServerClient::from_config(&clear_harness.config);
+    let clear_client = clear_harness.client();
     let mut clear_connection = clear_client.connect_initialized().await.unwrap();
     let result = clear_goal(
         &clear_client,

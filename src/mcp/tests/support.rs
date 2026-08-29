@@ -1,6 +1,6 @@
 use super::*;
 
-use std::{any::Any, panic::AssertUnwindSafe};
+use std::{any::Any, panic::AssertUnwindSafe, path::PathBuf};
 
 use futures_util::FutureExt;
 
@@ -80,7 +80,7 @@ impl FakeStep {
 
 pub(super) struct FakeAppServer {
     pub(super) _root: TempDir,
-    pub(super) config: ProductConfig,
+    socket_path: PathBuf,
     pub(super) log: Arc<Mutex<Vec<Value>>>,
     pub(super) connections: Arc<AtomicUsize>,
     request_received: Arc<tokio::sync::Notify>,
@@ -119,12 +119,6 @@ impl FakeAppServer {
         let listener = UnixListener::bind(&socket_path).unwrap();
         fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600)).unwrap();
 
-        let config = ProductConfig {
-            schema_version: 2,
-            codex_executable: "/usr/bin/codex".into(),
-            codex_home: codex_home.clone(),
-            socket_path,
-        };
         let log = Arc::new(Mutex::new(Vec::new()));
         let connections = Arc::new(AtomicUsize::new(0));
         let request_received = Arc::new(tokio::sync::Notify::new());
@@ -216,7 +210,7 @@ impl FakeAppServer {
         });
         Self {
             _root: root,
-            config,
+            socket_path,
             log,
             connections,
             request_received,
@@ -231,6 +225,10 @@ impl FakeAppServer {
 
     pub(super) fn connection_count(&self) -> usize {
         self.connections.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn client(&self) -> AppServerClient {
+        AppServerClient::for_test(self.socket_path.clone(), TESTED_CODEX_VERSION)
     }
 
     pub(super) async fn wait_for_requests(&self, count: usize) {

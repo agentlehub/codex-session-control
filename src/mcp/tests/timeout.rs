@@ -19,7 +19,7 @@ async fn sequential_native_reads_receive_fresh_ten_second_deadlines() {
         .delayed(Duration::from_secs(9)),
     ])
     .await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
     let task =
         tokio::spawn(async move { connection.thread_read("target", None, None, None).await });

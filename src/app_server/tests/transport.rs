@@ -2,7 +2,29 @@ use super::*;
 use crate::model::ThreadStatus;
 
 #[tokio::test]
-async fn initialize_precedes_initialized_and_checks_codex_home() {
+async fn websocket_upgrade_uses_exact_rpc_path() {
+    let harness = FakeAppServer::start(FakeScript::happy()).await;
+
+    for path in ["/", "/rpc?x=1", "/other"] {
+        let stream = UnixStream::connect(&harness.socket_path).await.unwrap();
+        let target = format!("ws://localhost{path}");
+        assert!(client_async(target, stream).await.is_err(), "{path}");
+    }
+
+    harness
+        .client(TESTED_CODEX_VERSION)
+        .connect_initialized()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        harness.recorded_upgrade_targets(),
+        ["/", "/rpc?x=1", "/other", "/rpc"]
+    );
+}
+
+#[tokio::test]
+async fn initialize_precedes_initialized_and_accepts_any_absolute_codex_home() {
     let harness = FakeAppServer::start(FakeScript::happy()).await;
     let client = harness.client(TESTED_CODEX_VERSION);
     let connection = client.connect_initialized().await.unwrap();
@@ -27,9 +49,26 @@ async fn initialize_precedes_initialized_and_checks_codex_home() {
     assert_eq!(harness.connection_count(), 1);
     drop(connection);
 
-    let mismatch = harness.client_with_codex_home("/tmp/not-the-target", TESTED_CODEX_VERSION);
-    let error = mismatch.connect_initialized().await.unwrap_err();
-    assert_eq!(error.category, ToolErrorCategory::TargetUnavailable);
+    let different_absolute_home =
+        FakeAppServer::start(FakeScript::happy().with_initialize_codex_home(Some("/other/home")))
+            .await;
+    different_absolute_home
+        .client(TESTED_CODEX_VERSION)
+        .connect_initialized()
+        .await
+        .unwrap();
+
+    for codex_home in [None, Some("relative/home")] {
+        let invalid =
+            FakeAppServer::start(FakeScript::happy().with_initialize_codex_home(codex_home)).await;
+        let error = invalid
+            .client(TESTED_CODEX_VERSION)
+            .connect_initialized()
+            .await
+            .unwrap_err();
+        assert_eq!(error.category, ToolErrorCategory::TargetUnavailable);
+        assert_eq!(error.stage, "initialize");
+    }
 }
 
 #[tokio::test]
@@ -123,27 +162,6 @@ async fn socket_parent_owner_mode_and_type_are_required() {
         );
         assert_eq!(error.stage, "socket_validation");
         assert_eq!(harness.connection_count(), 0);
-    }
-}
-
-#[tokio::test]
-async fn socket_mode_requires_owner_read_write_and_no_group_or_other_bits() {
-    let temporary = crate::test_support::private_tempdir();
-    std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let socket_path = temporary.path().join("app-server.sock");
-
-    for mode in 0..=0o777 {
-        let listener = UnixListener::bind(&socket_path).unwrap();
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(mode)).unwrap();
-
-        assert_eq!(
-            validate_socket(&socket_path).is_ok(),
-            matches!(mode, 0o600 | 0o700),
-            "mode {mode:04o}"
-        );
-
-        drop(listener);
-        std::fs::remove_file(&socket_path).unwrap();
     }
 }
 
@@ -347,7 +365,7 @@ async fn tested_version_has_no_warning() {
     let harness =
         FakeAppServer::start(FakeScript::happy().with_codex_version(TESTED_CODEX_VERSION)).await;
     let connection = harness
-        .configured_client()
+        .client(TESTED_CODEX_VERSION)
         .connect_initialized()
         .await
         .unwrap();
@@ -362,7 +380,7 @@ async fn untested_version_exposes_connection_warning() {
     let harness =
         FakeAppServer::start(FakeScript::happy().with_codex_version(&untested_version)).await;
     let connection = harness
-        .configured_client()
+        .client(TESTED_CODEX_VERSION)
         .connect_initialized()
         .await
         .unwrap();

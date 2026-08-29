@@ -5,7 +5,7 @@ use std::{
     os::unix::fs::{PermissionsExt, symlink},
     process::Stdio,
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -20,7 +20,13 @@ use tokio::{
     process::{Child, Command},
     sync::{Mutex, Notify},
 };
-use tokio_tungstenite::accept_async;
+use tokio_tungstenite::{
+    accept_hdr_async,
+    tungstenite::{
+        handshake::server::{ErrorResponse, Request, Response},
+        http::StatusCode,
+    },
+};
 
 use super::protocol::ProtocolFixture;
 use super::*;
@@ -50,6 +56,7 @@ enum SocketViolation {
 #[derive(Clone, Debug)]
 struct FakeScript {
     codex_version: String,
+    initialize_codex_home: Option<Option<String>>,
     native_frames: Vec<ServerFrame>,
     barrier: Option<TransportBarrier>,
     failure_point: FailurePoint,
@@ -59,6 +66,7 @@ struct FakeScript {
 struct FakeServerState {
     codex_home: PathBuf,
     frames: Arc<Mutex<Vec<Value>>>,
+    upgrade_targets: Arc<StdMutex<Vec<String>>>,
     connections: Arc<AtomicUsize>,
     barrier: Arc<Notify>,
     closed: Arc<Notify>,
@@ -70,6 +78,7 @@ impl FakeScript {
     fn happy() -> Self {
         Self {
             codex_version: TESTED_CODEX_VERSION.to_owned(),
+            initialize_codex_home: None,
             native_frames: Vec::new(),
             barrier: None,
             failure_point: FailurePoint::Never,
@@ -83,6 +92,11 @@ impl FakeScript {
 
     fn with_codex_version(mut self, version: &str) -> Self {
         self.codex_version = version.to_owned();
+        self
+    }
+
+    fn with_initialize_codex_home(mut self, codex_home: Option<&str>) -> Self {
+        self.initialize_codex_home = Some(codex_home.map(ToOwned::to_owned));
         self
     }
 
@@ -118,6 +132,7 @@ struct FakeAppServer {
     socket_path: PathBuf,
     codex_home: PathBuf,
     frames: Arc<Mutex<Vec<Value>>>,
+    upgrade_targets: Arc<StdMutex<Vec<String>>>,
     connections: Arc<AtomicUsize>,
     barrier: Arc<Notify>,
     closed: Arc<Notify>,
@@ -135,6 +150,7 @@ impl FakeAppServer {
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let codex_home = temporary.path().join("codex-home");
         let frames = Arc::new(Mutex::new(Vec::new()));
+        let upgrade_targets = Arc::new(StdMutex::new(Vec::new()));
         let connections = Arc::new(AtomicUsize::new(0));
         let barrier = Arc::new(Notify::new());
         let closed = Arc::new(Notify::new());
@@ -145,6 +161,7 @@ impl FakeAppServer {
         let state = FakeServerState {
             codex_home: codex_home.clone(),
             frames: Arc::clone(&frames),
+            upgrade_targets: Arc::clone(&upgrade_targets),
             connections: Arc::clone(&connections),
             barrier: Arc::clone(&barrier),
             closed: Arc::clone(&closed),
@@ -160,6 +177,7 @@ impl FakeAppServer {
             socket_path,
             codex_home,
             frames,
+            upgrade_targets,
             connections,
             barrier,
             closed,
@@ -206,6 +224,7 @@ impl FakeAppServer {
             _listener_guard: listener_guard,
             socket_path,
             frames: Arc::new(Mutex::new(Vec::new())),
+            upgrade_targets: Arc::new(StdMutex::new(Vec::new())),
             connections: Arc::new(AtomicUsize::new(0)),
             barrier: Arc::new(Notify::new()),
             closed: Arc::new(Notify::new()),
@@ -216,36 +235,7 @@ impl FakeAppServer {
     }
 
     fn client(&self, tested_version: &str) -> AppServerClient {
-        let mut client = AppServerClient::new(
-            self.socket_path.clone(),
-            self.codex_home.clone(),
-            "0.1.0".to_owned(),
-            tested_version.to_owned(),
-        );
-        client.failure_point = self.failure_point;
-        client
-    }
-
-    fn configured_client(&self) -> AppServerClient {
-        AppServerClient::from_config(&ProductConfig {
-            schema_version: 2,
-            codex_executable: PathBuf::from("/tmp/codex"),
-            codex_home: self.codex_home.clone(),
-            socket_path: self.socket_path.clone(),
-        })
-    }
-
-    fn client_with_codex_home(
-        &self,
-        codex_home: impl Into<PathBuf>,
-        tested_version: &str,
-    ) -> AppServerClient {
-        let mut client = AppServerClient::new(
-            self.socket_path.clone(),
-            codex_home.into(),
-            "0.1.0".to_owned(),
-            tested_version.to_owned(),
-        );
+        let mut client = AppServerClient::for_test(self.socket_path.clone(), tested_version);
         client.failure_point = self.failure_point;
         client
     }
@@ -256,6 +246,10 @@ impl FakeAppServer {
 
     async fn recorded_frames(&self) -> Vec<Value> {
         self.frames.lock().await.clone()
+    }
+
+    fn recorded_upgrade_targets(&self) -> Vec<String> {
+        self.upgrade_targets.lock().unwrap().clone()
     }
 
     async fn wait_for_frames(&self, count: usize) {
@@ -289,6 +283,7 @@ async fn serve_fake(listener: UnixListener, script: FakeScript, state: FakeServe
     let FakeServerState {
         codex_home,
         frames,
+        upgrade_targets,
         connections,
         barrier,
         closed,
@@ -304,12 +299,31 @@ async fn serve_fake(listener: UnixListener, script: FakeScript, state: FakeServe
         let script = script.clone();
         let codex_home = codex_home.clone();
         let frames = Arc::clone(&frames);
+        let upgrade_targets = Arc::clone(&upgrade_targets);
         let barrier = Arc::clone(&barrier);
         let closed = Arc::clone(&closed);
         let frame_recorded = Arc::clone(&frame_recorded);
         let native_state_changed = Arc::clone(&native_state_changed);
         tokio::spawn(async move {
-            let Ok(mut websocket) = accept_async(stream).await else {
+            let Ok(mut websocket) =
+                accept_hdr_async(stream, move |request: &Request, response: Response| {
+                    let target = request
+                        .uri()
+                        .path_and_query()
+                        .map(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_owned();
+                    upgrade_targets.lock().unwrap().push(target.clone());
+                    if target == "/rpc" {
+                        Ok(response)
+                    } else {
+                        let mut error = ErrorResponse::new(Some("expected /rpc".to_owned()));
+                        *error.status_mut() = StatusCode::NOT_FOUND;
+                        Err(error)
+                    }
+                })
+                .await
+            else {
                 return;
             };
             let Some(Ok(Message::Text(initialize))) = websocket.next().await else {
@@ -327,19 +341,29 @@ async fn serve_fake(listener: UnixListener, script: FakeScript, state: FakeServe
                 pending::<()>().await;
             }
 
+            let mut initialize_response = json!({
+                "id": initialize["id"],
+                "result": {
+                    "codexHome": codex_home,
+                    "platformFamily": "unix",
+                    "platformOs": "linux",
+                    "userAgent": format!("codex-cli {}", script.codex_version),
+                }
+            });
+            match &script.initialize_codex_home {
+                Some(Some(codex_home)) => {
+                    initialize_response["result"]["codexHome"] = json!(codex_home);
+                }
+                Some(None) => {
+                    initialize_response["result"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("codexHome");
+                }
+                None => {}
+            }
             websocket
-                .send(Message::text(
-                    json!({
-                        "id": initialize["id"],
-                        "result": {
-                            "codexHome": codex_home,
-                            "platformFamily": "unix",
-                            "platformOs": "linux",
-                            "userAgent": format!("codex-cli {}", script.codex_version),
-                        }
-                    })
-                    .to_string(),
-                ))
+                .send(Message::text(initialize_response.to_string()))
                 .await
                 .unwrap();
             let Some(Ok(Message::Text(initialized))) = websocket.next().await else {
@@ -420,9 +444,9 @@ fn initialize_frame(id: u64, _codex_home: &Path) -> Value {
         "method": "initialize",
         "params": {
             "clientInfo": {
-                "name": "codex_session_control",
-                "title": "Codex Session Control",
-                "version": "0.1.0",
+                        "name": "codex_session_control",
+                        "title": "Codex Session Control",
+                        "version": env!("CARGO_PKG_VERSION"),
             },
             "capabilities": {
                 "experimentalApi": true,

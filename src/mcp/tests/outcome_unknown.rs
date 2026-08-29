@@ -242,7 +242,7 @@ async fn every_mutation_dispatches_once_and_observes_at_most_once() {
             success_inferred: false,
         };
         let harness = FakeAppServer::start_connections(scripts).await;
-        let client = AppServerClient::from_config(&harness.config);
+        let client = harness.client();
         let mut connection = client.connect_initialized().await.unwrap();
         let context = mutation_context(&case);
 
@@ -314,7 +314,7 @@ async fn reconciliation_failure_keeps_outcome_unknown_without_replay() {
         }],
     ])
     .await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
     let context =
         MutationContext::for_thread("target".to_owned(), ReconciliationPolicy::CompactThreadRead);
@@ -360,7 +360,7 @@ async fn fork_timeout_preserves_context_attribution_without_replay() {
         delay: Duration::ZERO,
     }])
     .await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
 
     let operation = tokio::spawn(async move {
@@ -419,7 +419,7 @@ async fn interrupt_race_preserves_targeted_and_latest_turn_ids_without_inference
         )],
     ])
     .await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
     let context = MutationContext::for_turn(
         "target".to_owned(),

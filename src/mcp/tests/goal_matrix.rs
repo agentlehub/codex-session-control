@@ -55,7 +55,7 @@ async fn native_owns_the_complete_one_request_goal_matrix() {
             )
         };
         let harness = FakeAppServer::start(vec![step]).await;
-        let client = AppServerClient::from_config(&harness.config);
+        let client = harness.client();
         let mut connection = client.connect_initialized().await.unwrap();
 
         let result = match tool {
@@ -132,7 +132,7 @@ async fn malformed_goal_mutation_results_are_attributed_to_the_set_stage() {
             result,
         )])
         .await;
-        let client = AppServerClient::from_config(&harness.config);
+        let client = harness.client();
         let mut connection = client.connect_initialized().await.unwrap();
 
         let error = set_goal(
@@ -170,7 +170,7 @@ async fn goal_set_rejects_response_for_a_different_thread() {
             thread_id: "target".to_owned(),
             objective: "replacement objective".to_owned(),
         }),
-        &harness.config,
+        &harness.client(),
     )
     .await
     .unwrap_err();
@@ -194,7 +194,7 @@ async fn absent_goal_pause_and_resume_still_issue_exactly_one_native_mutation() 
             json!({"code": -32090, "message": "goal does not exist"}),
         )])
         .await;
-        let client = AppServerClient::from_config(&harness.config);
+        let client = harness.client();
         let mut connection = client.connect_initialized().await.unwrap();
 
         let result = if tool == "thread_goal_pause" {
@@ -234,7 +234,7 @@ async fn running_turn_goal_replace_has_no_controller_preflight() {
         json!({"goal": native_goal("target", "active")}),
     )])
     .await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
 
     let goal = set_goal(

@@ -244,7 +244,7 @@ enabled = false
         title: &str,
     ) -> Result<NativeConnection, Box<dyn Error>> {
         let stream = UnixStream::connect(&self.socket).await?;
-        let (websocket, _) = client_async("ws://localhost/", stream).await?;
+        let (websocket, _) = client_async("ws://localhost/rpc", stream).await?;
         let mut native = NativeConnection {
             websocket,
             next_id: 1,

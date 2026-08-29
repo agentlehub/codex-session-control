@@ -157,12 +157,7 @@ enabled = false
     };
     wait_for_socket(&mut codex.child, &socket_path).await?;
 
-    let client = AppServerClient::new(
-        socket_path,
-        codex_home.clone(),
-        env!("CARGO_PKG_VERSION").to_owned(),
-        TESTED_CODEX_VERSION.to_owned(),
-    );
+    let client = AppServerClient::for_test(socket_path, TESTED_CODEX_VERSION);
     let mut connection = client
         .connect_initialized()
         .await

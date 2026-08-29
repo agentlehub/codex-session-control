@@ -18,7 +18,7 @@ async fn run_wait(
     timeout: Duration,
 ) -> (Result<ThreadsWaitResult, ToolErrorData>, FakeAppServer) {
     let harness = FakeAppServer::start(steps).await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
     let ids = thread_ids
         .iter()
@@ -210,7 +210,7 @@ async fn shared_transport_failure_is_request_wide_error() {
         delay: Duration::ZERO,
     }])
     .await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
     let error = threads_wait(
         &mut connection,
@@ -239,7 +239,7 @@ async fn quiet_poll_occurs_at_exactly_one_second() {
         false,
     ));
     let harness = FakeAppServer::start(steps).await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
     let task = tokio::spawn(async move {
         threads_wait(
@@ -279,7 +279,7 @@ async fn per_target_stage_timeout_keeps_complete_pass_attribution() {
         false,
     ));
     let harness = FakeAppServer::start(steps).await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
     let task = tokio::spawn(async move {
         threads_wait(
@@ -318,7 +318,7 @@ async fn requested_expiry_during_poll_is_successful_timeout() {
         delay: Duration::ZERO,
     });
     let harness = FakeAppServer::start(steps).await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
     let task = tokio::spawn(async move {
         threads_wait(

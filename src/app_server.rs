@@ -3,14 +3,12 @@
     reason = "native protocol stages return the approved structured ToolErrorData directly"
 )]
 
-use std::{
-    future::Future,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{future::Future, path::Path, time::Duration};
+
+#[cfg(test)]
+use std::path::PathBuf;
 
 use futures_util::{SinkExt, StreamExt};
-use rustix::fs::FileType;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::net::UnixStream;
@@ -18,16 +16,13 @@ use tokio_tungstenite::{WebSocketStream, client_async, tungstenite::Message};
 
 use crate::{
     error::{DispatchState, NativeErrorSummary, ToolErrorCategory, ToolErrorData},
-    model::{ProductConfig, Thread, ThreadGoal, ThreadSnapshot, Turn, TurnItemsView},
+    model::{Thread, ThreadGoal, ThreadSnapshot, Turn, TurnItemsView},
 };
 
-#[allow(
-    dead_code,
-    reason = "endpoint consumption is added by the subsequent app-server integration slice"
-)]
 mod endpoint;
 mod protocol;
 
+use endpoint::DesktopEndpoint;
 use protocol::{
     classify_native_error, compact_snapshot_from_native, protocol_fixture, thread_list_from_native,
     thread_read_from_native,
@@ -49,20 +44,46 @@ pub(crate) const TESTED_CODEX_CLI_VERSION_OUTPUT: &str = concat!(
     "\n"
 );
 
-pub(crate) const fn socket_mode_is_owner_only(mode: u32) -> bool {
-    matches!(mode & 0o777, 0o600 | 0o700)
-}
-
 type ClientWebSocket = WebSocketStream<UnixStream>;
 
 #[derive(Clone, Debug)]
 pub struct AppServerClient {
-    socket_path: PathBuf,
-    codex_home: PathBuf,
+    endpoint_source: EndpointSource,
     product_version: String,
     tested_codex_version: String,
     #[cfg(test)]
     failure_point: FailurePoint,
+}
+
+#[derive(Debug)]
+enum EndpointSource {
+    Desktop,
+    #[cfg(test)]
+    Fixed(DesktopEndpoint),
+}
+
+impl Clone for EndpointSource {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Desktop => Self::Desktop,
+            #[cfg(test)]
+            Self::Fixed(endpoint) => Self::Fixed(DesktopEndpoint::explicit(
+                endpoint.socket_path().to_path_buf(),
+            )),
+        }
+    }
+}
+
+impl EndpointSource {
+    fn resolve(&self) -> Result<DesktopEndpoint, ToolErrorData> {
+        match self {
+            Self::Desktop => DesktopEndpoint::resolve(),
+            #[cfg(test)]
+            Self::Fixed(endpoint) => Ok(DesktopEndpoint::explicit(
+                endpoint.socket_path().to_path_buf(),
+            )),
+        }
+    }
 }
 
 pub struct AppServerConnection {
@@ -95,119 +116,142 @@ pub enum MutationDispatch {
 }
 
 impl AppServerClient {
-    pub fn new(
-        socket_path: PathBuf,
-        codex_home: PathBuf,
-        product_version: String,
-        tested_codex_version: String,
+    fn new(
+        endpoint_source: EndpointSource,
+        product_version: &str,
+        tested_codex_version: &str,
     ) -> Self {
         Self {
-            socket_path,
-            codex_home,
-            product_version,
-            tested_codex_version,
+            endpoint_source,
+            product_version: product_version.to_owned(),
+            tested_codex_version: tested_codex_version.to_owned(),
             #[cfg(test)]
             failure_point: FailurePoint::Never,
         }
     }
 
+    pub fn desktop() -> Self {
+        Self::new(
+            EndpointSource::Desktop,
+            env!("CARGO_PKG_VERSION"),
+            TESTED_CODEX_VERSION,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(socket_path: PathBuf, tested_codex_version: &str) -> Self {
+        Self::new(
+            EndpointSource::Fixed(DesktopEndpoint::explicit(socket_path)),
+            env!("CARGO_PKG_VERSION"),
+            tested_codex_version,
+        )
+    }
+
     pub async fn connect_initialized(&self) -> Result<AppServerConnection, ToolErrorData> {
-        validate_socket(&self.socket_path)?;
+        let endpoint = self.endpoint_source.resolve()?;
+        endpoint.validate()?;
 
         let (websocket, _) = with_native_stage_timeout("connect", async {
-            let stream = UnixStream::connect(&self.socket_path)
+            let stream = UnixStream::connect(endpoint.socket_path())
                 .await
                 .map_err(|_| transport_error("connect"))?;
-            client_async("ws://localhost/", stream)
+            client_async("ws://localhost/rpc", stream)
                 .await
                 .map_err(|_| transport_error("connect"))
         })
         .await?;
-        let mut connection = AppServerConnection {
-            websocket,
-            next_request_id: 1,
-            dispatch: MutationDispatch::NotDispatched,
-            compatibility_warning: None,
-            #[cfg(test)]
-            failure_point: self.failure_point,
-            #[cfg(test)]
-            initialize_result: None,
-        };
+        let mut connection = AppServerConnection::new(websocket);
+        #[cfg(test)]
+        {
+            connection.failure_point = self.failure_point;
+        }
         with_native_stage_timeout("initialize", async {
-            let initialize_result: Value = connection
-                .request_with_timeout(
-                    "initialize",
-                    "initialize",
-                    json!({
-                        "clientInfo": {
-                            "name": "codex_session_control",
-                            "title": "Codex Session Control",
-                            "version": self.product_version,
-                        },
-                        "capabilities": {
-                            "experimentalApi": true,
-                            "mcpServerOpenaiFormElicitation": false,
-                            "requestAttestation": false,
-                            "optOutNotificationMethods": [],
-                        }
-                    }),
-                    false,
-                    (None, None),
-                    false,
-                )
-                .await?;
-
-            let reported_home = initialize_result
-                .get("codexHome")
-                .and_then(Value::as_str)
-                .map(Path::new);
-            if reported_home != Some(self.codex_home.as_path()) {
-                return Err(ToolErrorData::fixed(
-                    ToolErrorCategory::TargetUnavailable,
-                    "initialize",
-                    "initialize",
-                ));
-            }
-
-            let reported_version = initialize_result
-                .get("userAgent")
-                .and_then(Value::as_str)
-                .and_then(extract_codex_version)
-                .unwrap_or_else(|| "unknown".to_owned());
-            if reported_version != self.tested_codex_version {
-                connection.compatibility_warning = Some(format!(
-                    "WARNING: Target Codex {reported_version} is untested. Codex session control was validated against Codex {}. Report this warning to the operator. The accompanying structured data remains authoritative.",
-                    self.tested_codex_version
-                ));
-            }
-            #[cfg(test)]
-            {
-                connection.initialize_result = Some(initialize_result);
-            }
-
             connection
-                .websocket
-                .send(Message::text(json!({"method": "initialized"}).to_string()))
+                .initialize(&self.product_version, &self.tested_codex_version)
                 .await
-                .map_err(|_| transport_error("initialize"))?;
-            Ok(())
         })
         .await?;
 
         Ok(connection)
     }
-
-    pub fn from_config(config: &ProductConfig) -> Self {
-        Self::new(
-            config.socket_path.clone(),
-            config.codex_home.clone(),
-            env!("CARGO_PKG_VERSION").to_owned(),
-            TESTED_CODEX_VERSION.to_owned(),
-        )
-    }
 }
 
 impl AppServerConnection {
+    fn new(websocket: ClientWebSocket) -> Self {
+        Self {
+            websocket,
+            next_request_id: 1,
+            dispatch: MutationDispatch::NotDispatched,
+            compatibility_warning: None,
+            #[cfg(test)]
+            failure_point: FailurePoint::Never,
+            #[cfg(test)]
+            initialize_result: None,
+        }
+    }
+
+    async fn initialize(
+        &mut self,
+        product_version: &str,
+        tested_codex_version: &str,
+    ) -> Result<(), ToolErrorData> {
+        let initialize_result: Value = self
+            .request_with_timeout(
+                "initialize",
+                "initialize",
+                json!({
+                    "clientInfo": {
+                        "name": "codex_session_control",
+                        "title": "Codex Session Control",
+                        "version": product_version,
+                    },
+                    "capabilities": {
+                        "experimentalApi": true,
+                        "mcpServerOpenaiFormElicitation": false,
+                        "requestAttestation": false,
+                        "optOutNotificationMethods": [],
+                    }
+                }),
+                false,
+                (None, None),
+                false,
+            )
+            .await?;
+
+        let valid_codex_home = initialize_result
+            .get("codexHome")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty() && Path::new(value).is_absolute());
+        if !valid_codex_home {
+            return Err(ToolErrorData::fixed(
+                ToolErrorCategory::TargetUnavailable,
+                "initialize",
+                "initialize",
+            ));
+        }
+
+        let reported_version = initialize_result
+            .get("userAgent")
+            .and_then(Value::as_str)
+            .and_then(extract_codex_version)
+            .unwrap_or_else(|| "unknown".to_owned());
+        if reported_version != tested_codex_version {
+            self.compatibility_warning = Some(format!(
+                "WARNING: Target Codex {reported_version} is untested. Codex session control was validated against Codex {tested_codex_version}. Report this warning to the operator. The accompanying structured data remains authoritative."
+            ));
+        }
+        #[cfg(test)]
+        {
+            self.initialize_result = Some(initialize_result);
+        }
+
+        self.websocket
+            .send(Message::text(json!({"method": "initialized"}).to_string()))
+            .await
+            .map_err(|_| transport_error("initialize"))?;
+        Ok(())
+    }
+
     pub async fn request<R: DeserializeOwned>(
         &mut self,
         method: &'static str,
@@ -569,25 +613,6 @@ pub async fn with_native_stage_timeout<T>(
     tokio::time::timeout(NATIVE_STAGE_TIMEOUT, future)
         .await
         .map_err(|_| ToolErrorData::fixed(ToolErrorCategory::StageTimeout, stage, stage))?
-}
-
-fn validate_socket(socket_path: &Path) -> Result<(), ToolErrorData> {
-    let error = || transport_error("socket_validation");
-    let parent = socket_path.parent().ok_or_else(error)?;
-    let parent_stat = rustix::fs::lstat(parent).map_err(|_| error())?;
-    let socket_stat = rustix::fs::lstat(socket_path).map_err(|_| error())?;
-    let uid = rustix::process::geteuid().as_raw();
-
-    if FileType::from_raw_mode(parent_stat.st_mode) != FileType::Directory
-        || parent_stat.st_uid != uid
-        || parent_stat.st_mode & 0o777 != 0o700
-        || FileType::from_raw_mode(socket_stat.st_mode) != FileType::Socket
-        || socket_stat.st_uid != uid
-        || !socket_mode_is_owner_only(socket_stat.st_mode)
-    {
-        return Err(error());
-    }
-    Ok(())
 }
 
 fn extract_codex_version(user_agent: &str) -> Option<String> {
