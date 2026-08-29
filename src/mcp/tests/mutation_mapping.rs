@@ -341,6 +341,376 @@ async fn idle_message_reads_once_then_starts_with_overrides() {
     );
 }
 
+fn assert_no_prompt_dispatch(harness: &FakeAppServer) {
+    assert!(harness.log().iter().all(|request| {
+        !matches!(
+            request["method"].as_str(),
+            Some("turn/start" | "turn/steer")
+        )
+    }));
+}
+
+#[tokio::test]
+async fn not_loaded_message_resumes_before_starting() {
+    let mut steps = snapshot_steps(
+        "target",
+        json!({"type": "notLoaded"}),
+        20,
+        Some(native_turn("previous", "completed")),
+        false,
+    );
+    steps.push(FakeStep::result(
+        "thread/resume",
+        json!({"threadId": "target", "excludeTurns": true}),
+        json!({
+            "thread": native_thread("target", json!({"type": "idle"}), 2),
+        }),
+    ));
+    steps.push(FakeStep::result(
+        "turn/start",
+        json!({
+            "threadId": "target",
+            "input": [{"type": "text", "text": "message"}],
+            "model": "model",
+            "effort": "high",
+        }),
+        json!({"turn": native_turn("started", "inProgress")}),
+    ));
+    let harness = FakeAppServer::start(steps).await;
+    let client = harness.client();
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let result = send_message(
+        &client,
+        &mut connection,
+        ThreadMessageSendInput {
+            thread_id: "target".to_owned(),
+            prompt: "message".to_owned(),
+            model: Some("model".to_owned()),
+            reasoning_effort: Some("high".to_owned()),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(result.action, ThreadMessageAction::Started));
+    assert_eq!(result.thread_id, "target");
+    assert_eq!(result.turn_id, "started");
+    assert_eq!(harness.connection_count(), 1);
+    assert_eq!(
+        harness
+            .log()
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "thread/read",
+            "thread/turns/list",
+            "thread/resume",
+            "turn/start"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn not_loaded_message_rejects_a_different_resumed_thread_without_starting() {
+    let mut steps = snapshot_steps(
+        "target",
+        json!({"type": "notLoaded"}),
+        20,
+        Some(native_turn("previous", "completed")),
+        false,
+    );
+    steps.push(FakeStep::result(
+        "thread/resume",
+        json!({"threadId": "target", "excludeTurns": true}),
+        json!({
+            "thread": native_thread("different", json!({"type": "idle"}), 2),
+        }),
+    ));
+    let harness = FakeAppServer::start(steps).await;
+    let client = harness.client();
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let error = send_message(
+        &client,
+        &mut connection,
+        ThreadMessageSendInput {
+            thread_id: "target".to_owned(),
+            prompt: "message".to_owned(),
+            model: None,
+            reasoning_effort: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.category, ToolErrorCategory::NativeError);
+    assert_eq!(error.tool, "thread_message_send");
+    assert_eq!(error.stage, "thread/resume");
+    assert_eq!(error.thread_id.as_deref(), Some("target"));
+    assert_no_prompt_dispatch(&harness);
+}
+
+#[tokio::test]
+async fn not_loaded_message_rejects_a_resume_that_remains_not_loaded() {
+    let mut steps = snapshot_steps(
+        "target",
+        json!({"type": "notLoaded"}),
+        20,
+        Some(native_turn("previous", "completed")),
+        false,
+    );
+    steps.push(FakeStep::result(
+        "thread/resume",
+        json!({"threadId": "target", "excludeTurns": true}),
+        json!({
+            "thread": native_thread("target", json!({"type": "notLoaded"}), 2),
+        }),
+    ));
+    let harness = FakeAppServer::start(steps).await;
+    let client = harness.client();
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let error = send_message(
+        &client,
+        &mut connection,
+        ThreadMessageSendInput {
+            thread_id: "target".to_owned(),
+            prompt: "message".to_owned(),
+            model: None,
+            reasoning_effort: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.category, ToolErrorCategory::NativeError);
+    assert_eq!(error.tool, "thread_message_send");
+    assert_eq!(error.stage, "thread/resume");
+    assert_eq!(error.thread_id.as_deref(), Some("target"));
+    assert_no_prompt_dispatch(&harness);
+}
+
+#[tokio::test]
+async fn not_loaded_message_reports_an_active_resume_as_a_native_conflict() {
+    let mut steps = snapshot_steps(
+        "target",
+        json!({"type": "notLoaded"}),
+        20,
+        Some(native_turn("previous", "completed")),
+        false,
+    );
+    steps.push(FakeStep::result(
+        "thread/resume",
+        json!({"threadId": "target", "excludeTurns": true}),
+        json!({
+            "thread": native_thread(
+                "target",
+                json!({"type": "active", "activeFlags": []}),
+                2,
+            ),
+        }),
+    ));
+    let harness = FakeAppServer::start(steps).await;
+    let client = harness.client();
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let error = send_message(
+        &client,
+        &mut connection,
+        ThreadMessageSendInput {
+            thread_id: "target".to_owned(),
+            prompt: "message".to_owned(),
+            model: None,
+            reasoning_effort: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.category, ToolErrorCategory::NativeConflict);
+    assert_eq!(error.tool, "thread_message_send");
+    assert_eq!(error.stage, "thread/resume");
+    assert_eq!(error.thread_id.as_deref(), Some("target"));
+    assert_no_prompt_dispatch(&harness);
+}
+
+#[tokio::test]
+async fn not_loaded_message_propagates_resume_failure_without_starting() {
+    let mut steps = snapshot_steps(
+        "target",
+        json!({"type": "notLoaded"}),
+        20,
+        Some(native_turn("previous", "completed")),
+        false,
+    );
+    steps.push(FakeStep::error(
+        "thread/resume",
+        json!({"threadId": "target", "excludeTurns": true}),
+        native_error(),
+    ));
+    let harness = FakeAppServer::start(steps).await;
+    let client = harness.client();
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let error = send_message(
+        &client,
+        &mut connection,
+        ThreadMessageSendInput {
+            thread_id: "target".to_owned(),
+            prompt: "message".to_owned(),
+            model: None,
+            reasoning_effort: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.category, ToolErrorCategory::NativeError);
+    assert_eq!(error.tool, "thread_message_send");
+    assert_eq!(error.stage, "thread/resume");
+    assert_eq!(error.thread_id.as_deref(), Some("target"));
+    assert_eq!(error.native.unwrap().code, Some(-32090));
+    assert_no_prompt_dispatch(&harness);
+}
+
+#[tokio::test]
+async fn not_loaded_message_resume_transport_failure_after_write_sends_no_prompt() {
+    let mut steps = snapshot_steps(
+        "target",
+        json!({"type": "notLoaded"}),
+        20,
+        Some(native_turn("previous", "completed")),
+        false,
+    );
+    steps.push(FakeStep {
+        method: "thread/resume",
+        params: json!({"threadId": "target", "excludeTurns": true}),
+        response: FakeResponse::Disconnect,
+        notify_after: false,
+        delay: Duration::ZERO,
+    });
+    let harness = FakeAppServer::start(steps).await;
+    let client = harness.client();
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let error = send_message(
+        &client,
+        &mut connection,
+        ThreadMessageSendInput {
+            thread_id: "target".to_owned(),
+            prompt: "message".to_owned(),
+            model: None,
+            reasoning_effort: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.category, ToolErrorCategory::AuthorityTransportFailure);
+    assert_eq!(error.tool, "thread_message_send");
+    assert_eq!(error.stage, "thread/resume");
+    assert_eq!(error.thread_id.as_deref(), Some("target"));
+    assert_eq!(
+        harness
+            .log()
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["thread/read", "thread/turns/list", "thread/resume"]
+    );
+    assert_no_prompt_dispatch(&harness);
+}
+
+#[tokio::test]
+async fn not_loaded_message_rejects_malformed_resume_without_starting() {
+    let mut steps = snapshot_steps(
+        "target",
+        json!({"type": "notLoaded"}),
+        20,
+        Some(native_turn("previous", "completed")),
+        false,
+    );
+    steps.push(FakeStep::result(
+        "thread/resume",
+        json!({"threadId": "target", "excludeTurns": true}),
+        json!({"thread": {"id": "target"}}),
+    ));
+    let harness = FakeAppServer::start(steps).await;
+    let client = harness.client();
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let error = send_message(
+        &client,
+        &mut connection,
+        ThreadMessageSendInput {
+            thread_id: "target".to_owned(),
+            prompt: "message".to_owned(),
+            model: None,
+            reasoning_effort: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.category, ToolErrorCategory::NativeError);
+    assert_eq!(error.tool, "thread_message_send");
+    assert_eq!(error.stage, "thread/resume");
+    assert_eq!(error.thread_id.as_deref(), Some("target"));
+    assert_no_prompt_dispatch(&harness);
+}
+
+#[tokio::test]
+async fn system_error_message_reads_once_then_starts_with_overrides() {
+    let mut steps = snapshot_steps(
+        "target",
+        json!({"type": "systemError"}),
+        20,
+        Some(native_turn("previous", "completed")),
+        false,
+    );
+    steps.push(FakeStep::result(
+        "turn/start",
+        json!({
+            "threadId": "target",
+            "input": [{"type": "text", "text": "message"}],
+            "model": "model",
+            "effort": "high",
+        }),
+        json!({"turn": native_turn("started", "inProgress")}),
+    ));
+    let harness = FakeAppServer::start(steps).await;
+    let client = harness.client();
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let result = send_message(
+        &client,
+        &mut connection,
+        ThreadMessageSendInput {
+            thread_id: "target".to_owned(),
+            prompt: "message".to_owned(),
+            model: Some("model".to_owned()),
+            reasoning_effort: Some("high".to_owned()),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(result.action, ThreadMessageAction::Started));
+    assert_eq!(result.thread_id, "target");
+    assert_eq!(result.turn_id, "started");
+    assert_eq!(harness.connection_count(), 1);
+    assert_eq!(
+        harness
+            .log()
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["thread/read", "thread/turns/list", "turn/start"]
+    );
+}
+
 #[tokio::test]
 async fn active_message_reads_once_then_steers_the_exact_turn() {
     let mut steps = snapshot_steps(
