@@ -257,7 +257,7 @@ fn tested_codex_version_setter_updates_only_generated_version_data() {
     let path = std::env::join_paths(path).unwrap();
     let failed_version = "2.0.0";
     let failed_replace = Command::new(&setter)
-        .arg(&failed_version)
+        .arg(failed_version)
         .env("PATH", &path)
         .output()
         .unwrap();
@@ -282,7 +282,7 @@ fn tested_codex_version_setter_updates_only_generated_version_data() {
     fs::write(&fake_mktemp, "#!/bin/sh\nexit 92\n").unwrap();
     fs::set_permissions(&fake_mktemp, fs::Permissions::from_mode(0o755)).unwrap();
     let failed_stage = Command::new(&setter)
-        .arg(&failed_version)
+        .arg(failed_version)
         .env("PATH", &path)
         .output()
         .unwrap();
