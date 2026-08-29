@@ -46,7 +46,7 @@ pub(crate) const TESTED_CODEX_CLI_VERSION_OUTPUT: &str = concat!(
 
 type ClientWebSocket = WebSocketStream<UnixStream>;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct AppServerClient {
     endpoint_source: EndpointSource,
     product_version: String,
@@ -60,18 +60,6 @@ enum EndpointSource {
     Desktop,
     #[cfg(test)]
     Fixed(DesktopEndpoint),
-}
-
-impl Clone for EndpointSource {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Desktop => Self::Desktop,
-            #[cfg(test)]
-            Self::Fixed(endpoint) => Self::Fixed(DesktopEndpoint::explicit(
-                endpoint.socket_path().to_path_buf(),
-            )),
-        }
-    }
 }
 
 impl EndpointSource {

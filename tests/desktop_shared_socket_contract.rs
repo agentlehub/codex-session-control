@@ -79,7 +79,10 @@ fn start_native_server(socket_path: &Path) -> NativeServer {
                         "id": initialize["id"],
                         "result": {
                             "codexHome": "/tmp/desktop-owned-codex-home",
-                            "userAgent": "codex-cli 0.150.0-alpha.12.2",
+                            "userAgent": concat!(
+                                "codex-cli ",
+                                env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION")
+                            ),
                         }
                     })
                     .to_string(),
