@@ -222,6 +222,46 @@ async fn shared_transport_failure_is_request_wide_error() {
     assert_eq!(error.category, ToolErrorCategory::AuthorityTransportFailure);
 }
 
+#[tokio::test]
+async fn in_flight_wait_disconnect_is_not_replayed() {
+    let mut steps = snapshot_steps(
+        "target",
+        json!({"type": "active", "activeFlags": []}),
+        10,
+        Some(native_turn("turn-1", "inProgress")),
+        true,
+    );
+    steps.push(FakeStep {
+        method: "thread/read",
+        params: json!({"threadId": "target", "includeTurns": false}),
+        response: FakeResponse::Disconnect,
+        notify_after: false,
+        delay: Duration::ZERO,
+    });
+    let harness = FakeAppServer::start(steps).await;
+    let client = harness.client();
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let error = threads_wait(
+        &mut connection,
+        &["target".to_owned()],
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.category, ToolErrorCategory::AuthorityTransportFailure);
+    assert_eq!(harness.connection_count(), 1);
+    assert_eq!(
+        harness
+            .log()
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["thread/read", "thread/turns/list", "thread/read"]
+    );
+}
+
 #[tokio::test(start_paused = true)]
 async fn quiet_poll_occurs_at_exactly_one_second() {
     let mut steps = snapshot_steps(

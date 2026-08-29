@@ -24,6 +24,31 @@ async fn websocket_upgrade_uses_exact_rpc_path() {
 }
 
 #[tokio::test]
+async fn future_operation_re_resolves_replaced_socket() {
+    let mut harness = FakeAppServer::start(FakeScript::happy()).await;
+    let client = harness.client(TESTED_CODEX_VERSION);
+
+    let mut first_connection = client.connect_initialized().await.unwrap();
+    let _: serde_json::Value = first_connection
+        .request("thread/read", json!({"threadId": "thread-1"}))
+        .await
+        .unwrap();
+    drop(first_connection);
+    harness.wait_for_close().await;
+
+    harness.replace_socket(FakeScript::happy()).await;
+
+    let mut second_connection = client.connect_initialized().await.unwrap();
+    let response: serde_json::Value = second_connection
+        .request("thread/read", json!({"threadId": "thread-1"}))
+        .await
+        .unwrap();
+
+    assert_eq!(response["thread"]["id"], "thread-1");
+    assert_eq!(harness.connection_count(), 2);
+}
+
+#[tokio::test]
 async fn initialize_precedes_initialized_and_accepts_any_absolute_codex_home() {
     let harness = FakeAppServer::start(FakeScript::happy()).await;
     let client = harness.client(TESTED_CODEX_VERSION);

@@ -129,6 +129,7 @@ impl FakeScript {
 struct FakeAppServer {
     _temporary: TempDir,
     _listener_guard: Option<UnixListener>,
+    listener_task: Option<tokio::task::JoinHandle<()>>,
     socket_path: PathBuf,
     codex_home: PathBuf,
     frames: Arc<Mutex<Vec<Value>>>,
@@ -169,11 +170,12 @@ impl FakeAppServer {
             native_state_changed: Arc::clone(&native_state_changed),
         };
 
-        tokio::spawn(serve_fake(listener, script, state));
+        let listener_task = tokio::spawn(serve_fake(listener, script, state));
 
         Self {
             _temporary: temporary,
             _listener_guard: None,
+            listener_task: Some(listener_task),
             socket_path,
             codex_home,
             frames,
@@ -222,6 +224,7 @@ impl FakeAppServer {
             codex_home: temporary.path().join("codex-home"),
             _temporary: temporary,
             _listener_guard: listener_guard,
+            listener_task: None,
             socket_path,
             frames: Arc::new(Mutex::new(Vec::new())),
             upgrade_targets: Arc::new(StdMutex::new(Vec::new())),
@@ -276,6 +279,32 @@ impl FakeAppServer {
 
     async fn wait_for_close(&self) {
         self.closed.notified().await;
+    }
+
+    async fn replace_socket(&mut self, script: FakeScript) {
+        let listener_task = self
+            .listener_task
+            .take()
+            .expect("replacement harness owns its listener task");
+        listener_task.abort();
+        let join_error = listener_task.await.unwrap_err();
+        assert!(join_error.is_cancelled());
+        std::fs::remove_file(&self.socket_path).unwrap();
+
+        let listener = UnixListener::bind(&self.socket_path).unwrap();
+        std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let state = FakeServerState {
+            codex_home: self.codex_home.clone(),
+            frames: Arc::clone(&self.frames),
+            upgrade_targets: Arc::clone(&self.upgrade_targets),
+            connections: Arc::clone(&self.connections),
+            barrier: Arc::clone(&self.barrier),
+            closed: Arc::clone(&self.closed),
+            frame_recorded: Arc::clone(&self.frame_recorded),
+            native_state_changed: Arc::clone(&self.native_state_changed),
+        };
+        self.listener_task = Some(tokio::spawn(serve_fake(listener, script, state)));
     }
 }
 

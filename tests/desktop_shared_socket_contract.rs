@@ -24,8 +24,10 @@ const RUNTIME_DIR: &str = "XDG_RUNTIME_DIR";
 const APP_ID: &str = "CODEX_LINUX_APP_ID";
 
 struct NativeServer {
+    socket_path: std::path::PathBuf,
     upgrade_target: Receiver<String>,
     completion: Receiver<Result<(), String>>,
+    listener_thread: Option<thread::JoinHandle<()>>,
 }
 
 struct ToolRun {
@@ -48,7 +50,7 @@ fn start_native_server(socket_path: &Path) -> NativeServer {
     let (upgrade_sender, upgrade_target) = mpsc::channel();
     let (completion_sender, completion) = mpsc::channel();
 
-    thread::spawn(move || {
+    let listener_thread = thread::spawn(move || {
         let result = (|| -> Result<(), String> {
             let (stream, _) = listener.accept().map_err(|error| error.to_string())?;
             let mut websocket = accept_hdr(stream, |request: &Request, response: Response| {
@@ -109,8 +111,25 @@ fn start_native_server(socket_path: &Path) -> NativeServer {
     });
 
     NativeServer {
+        socket_path: socket_path.to_path_buf(),
         upgrade_target,
         completion,
+        listener_thread: Some(listener_thread),
+    }
+}
+
+impl NativeServer {
+    fn replace_socket(&mut self) {
+        self.listener_thread
+            .take()
+            .expect("replacement harness owns its listener thread")
+            .join()
+            .unwrap();
+        fs::remove_file(&self.socket_path).unwrap();
+        let replacement = start_native_server(&self.socket_path);
+        self.upgrade_target = replacement.upgrade_target;
+        self.completion = replacement.completion;
+        self.listener_thread = replacement.listener_thread;
     }
 }
 
@@ -269,6 +288,104 @@ fn derived_desktop_socket_is_used_without_an_explicit_override() {
         .recv_timeout(Duration::from_secs(2))
         .unwrap()
         .unwrap();
+}
+
+#[test]
+fn stdio_host_recovers_on_next_call_after_socket_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    let socket_parent = root.path().join("explicit");
+    private_directory(&socket_parent);
+    let socket = socket_parent.join("app-server.sock");
+    let mut server = start_native_server(&socket);
+
+    let mut command = Command::new(cargo_bin("codex-session-control"));
+    command
+        .env_remove(EXPLICIT_SOCKET)
+        .env_remove(RUNTIME_DIR)
+        .env_remove(APP_ID)
+        .env(EXPLICIT_SOCKET, &socket)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let pid = child.id();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout);
+
+    send_json(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "desktop-socket-contract", "version": "1.0"},
+            }
+        }),
+    );
+    read_response_for_id(&mut reader, 1);
+    send_json(
+        &mut stdin,
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+    );
+    send_json(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "threads_list", "arguments": {}},
+        }),
+    );
+    let first_response = read_response_for_id(&mut reader, 2);
+    assert_ne!(first_response["result"]["isError"], json!(true));
+    assert_eq!(
+        server
+            .upgrade_target
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap(),
+        "/rpc"
+    );
+    server
+        .completion
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+
+    server.replace_socket();
+
+    send_json(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "threads_list", "arguments": {}},
+        }),
+    );
+    let second_response = read_response_for_id(&mut reader, 3);
+    assert_ne!(second_response["result"]["isError"], json!(true));
+    assert_eq!(child.id(), pid);
+    assert_eq!(
+        server
+            .upgrade_target
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap(),
+        "/rpc"
+    );
+    server
+        .completion
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap()
+        .unwrap();
+
+    drop(reader);
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success());
 }
 
 #[test]

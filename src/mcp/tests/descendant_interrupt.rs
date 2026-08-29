@@ -754,4 +754,5 @@ async fn descendant_outcome_unknown_retains_evidence_and_is_never_retried() {
             .count(),
         2
     );
+    assert_eq!(harness.connection_count(), 4);
 }
