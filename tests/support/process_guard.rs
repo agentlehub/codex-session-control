@@ -1,10 +1,12 @@
 #![allow(dead_code)] // Integration crates use distinct subsets of this shared guard.
 
+use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use std::{
     io::{self, Read},
+    os::fd::AsFd,
     os::unix::process::CommandExt,
     process::{Child, ChildStdin, Command, ExitStatus, Output},
-    thread::{self, JoinHandle},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -45,59 +47,95 @@ impl ChildGuard {
 
     pub fn wait_with_output(mut self, timeout: Duration) -> io::Result<Output> {
         let child = self.child.as_mut().expect("child already reaped");
-        let stdout = child
+        let mut stdout = child
             .stdout
             .take()
             .ok_or_else(|| io::Error::other("child stdout was not piped"))?;
-        let stderr = child
+        let mut stderr = child
             .stderr
             .take()
             .ok_or_else(|| io::Error::other("child stderr was not piped"))?;
-        let stdout_reader = read_pipe(stdout);
-        let stderr_reader = read_pipe(stderr);
+        set_nonblocking(&stdout)?;
+        set_nonblocking(&stderr)?;
+
         let deadline = Instant::now() + timeout;
+        let mut stdout_capture = PipeCapture::new();
+        let mut stderr_capture = PipeCapture::new();
+        let mut stdout_closed = false;
+        let mut stderr_closed = false;
+        let mut status = None;
 
         loop {
-            match self
-                .child
-                .as_mut()
-                .expect("child already reaped")
-                .try_wait()
-            {
-                Ok(Some(status)) => {
-                    self.child.take();
-                    let cleanup_result = self.terminate_process_group();
-                    let output_result = collect_output(status, stdout_reader, stderr_reader);
-                    cleanup_result?;
-                    return output_result;
-                }
-                Ok(None) => {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        self.terminate_and_reap()?;
-                        let stdout_result = join_pipe(stdout_reader, "stdout");
-                        let stderr_result = join_pipe(stderr_reader, "stderr");
-                        let stdout = stdout_result?;
-                        let stderr = stderr_result?;
-                        return Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            format!(
-                                "child did not exit within {timeout:?}; stdout: {}; stderr: {}",
-                                stdout, stderr
-                            ),
-                        ));
+            stdout_closed = stdout_closed || drain_pipe(&mut stdout, &mut stdout_capture)?;
+            stderr_closed = stderr_closed || drain_pipe(&mut stderr, &mut stderr_capture)?;
+
+            if status.is_none() {
+                match self
+                    .child
+                    .as_mut()
+                    .expect("child already reaped")
+                    .try_wait()
+                {
+                    Ok(Some(exited)) => {
+                        self.child.take();
+                        self.terminate_process_group()?;
+                        status = Some(exited);
                     }
-                    thread::sleep(CHILD_POLL_INTERVAL.min(remaining));
-                }
-                Err(error) => {
-                    self.terminate_and_reap()?;
-                    let stdout_result = join_pipe(stdout_reader, "stdout");
-                    let stderr_result = join_pipe(stderr_reader, "stderr");
-                    let _ = stdout_result?;
-                    let _ = stderr_result?;
-                    return Err(error);
+                    Ok(None) => {}
+                    Err(error) => {
+                        return self.cleanup_after_error(error);
+                    }
                 }
             }
+
+            if let Some(status) = status
+                && stdout_closed
+                && stderr_closed
+            {
+                if stdout_capture.truncated || stderr_capture.truncated {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "child output exceeded capture limit; stdout: {}; stderr: {}",
+                            stdout_capture.summary(),
+                            stderr_capture.summary()
+                        ),
+                    ));
+                }
+                return Ok(Output {
+                    status,
+                    stdout: stdout_capture.bytes,
+                    stderr: stderr_capture.bytes,
+                });
+            }
+
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                if let Err(error) = self.terminate_and_reap() {
+                    return Err(io::Error::other(format!(
+                        "child cleanup failed after deadline: {error}"
+                    )));
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "child did not complete within {timeout:?}; stdout: {}; stderr: {}",
+                        stdout_capture.summary(),
+                        stderr_capture.summary()
+                    ),
+                ));
+            }
+
+            thread::sleep(CHILD_POLL_INTERVAL.min(remaining));
+        }
+    }
+
+    fn cleanup_after_error<T>(&mut self, error: io::Error) -> io::Result<T> {
+        match self.terminate_and_reap() {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(io::Error::other(format!(
+                "child wait failed: {error}; cleanup failed: {cleanup_error}"
+            ))),
         }
     }
 
@@ -167,6 +205,32 @@ impl Drop for ChildGuard {
 pub struct PipeCapture {
     pub bytes: Vec<u8>,
     pub total_bytes: usize,
+    pub truncated: bool,
+}
+
+impl PipeCapture {
+    pub fn new() -> Self {
+        Self {
+            bytes: Vec::with_capacity(PIPE_CAPTURE_LIMIT),
+            total_bytes: 0,
+            truncated: false,
+        }
+    }
+
+    fn append(&mut self, bytes: &[u8]) {
+        self.total_bytes = self.total_bytes.saturating_add(bytes.len());
+        let retained = bytes.len().min(PIPE_CAPTURE_LIMIT - self.bytes.len());
+        self.bytes.extend_from_slice(&bytes[..retained]);
+        self.truncated |= retained != bytes.len();
+    }
+
+    fn summary(&self) -> String {
+        if self.truncated {
+            format!("{} bytes (truncated)", self.total_bytes)
+        } else {
+            format!("{} bytes", self.total_bytes)
+        }
+    }
 }
 
 fn write_lossy_bytes(
@@ -207,52 +271,22 @@ impl std::fmt::Display for PipeCapture {
     }
 }
 
-pub fn read_pipe(mut pipe: impl Read + Send + 'static) -> JoinHandle<io::Result<PipeCapture>> {
-    thread::spawn(move || {
-        let mut captured = Vec::with_capacity(PIPE_CAPTURE_LIMIT);
-        let mut total_bytes = 0usize;
-        let mut buffer = [0u8; 8 * 1024];
-        loop {
-            let bytes_read = match pipe.read(&mut buffer) {
-                Ok(bytes_read) => bytes_read,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error),
-            };
-            if bytes_read == 0 {
-                break;
-            }
-            total_bytes = total_bytes.saturating_add(bytes_read);
-            let retained = bytes_read.min(PIPE_CAPTURE_LIMIT - captured.len());
-            captured.extend_from_slice(&buffer[..retained]);
+fn set_nonblocking(pipe: impl AsFd) -> io::Result<()> {
+    let flags = fcntl_getfl(&pipe).map_err(io::Error::from)?;
+    fcntl_setfl(&pipe, flags | OFlags::NONBLOCK).map_err(io::Error::from)
+}
+
+pub fn drain_pipe(mut pipe: impl Read, capture: &mut PipeCapture) -> io::Result<bool> {
+    let mut buffer = [0u8; 8 * 1024];
+    loop {
+        match pipe.read(&mut buffer) {
+            Ok(0) => return Ok(true),
+            Ok(bytes_read) => capture.append(&buffer[..bytes_read]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) => return Err(error),
         }
-        Ok(PipeCapture {
-            bytes: captured,
-            total_bytes,
-        })
-    })
-}
-
-pub fn join_pipe(
-    reader: JoinHandle<io::Result<PipeCapture>>,
-    stream: &str,
-) -> io::Result<PipeCapture> {
-    reader
-        .join()
-        .map_err(|_| io::Error::other(format!("{stream} reader panicked")))?
-}
-
-fn collect_output(
-    status: ExitStatus,
-    stdout_reader: JoinHandle<io::Result<PipeCapture>>,
-    stderr_reader: JoinHandle<io::Result<PipeCapture>>,
-) -> io::Result<Output> {
-    let stdout = join_pipe(stdout_reader, "stdout");
-    let stderr = join_pipe(stderr_reader, "stderr");
-    Ok(Output {
-        status,
-        stdout: stdout?.bytes,
-        stderr: stderr?.bytes,
-    })
+    }
 }
 
 pub fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> io::Result<Option<ExitStatus>> {

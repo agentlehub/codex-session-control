@@ -2,7 +2,7 @@
 mod process_guard;
 
 use process_guard::{
-    ChildGuard, PIPE_CAPTURE_LIMIT, PipeCapture, join_pipe, read_pipe, terminate_test_child,
+    ChildGuard, PIPE_CAPTURE_LIMIT, PipeCapture, drain_pipe, terminate_test_child,
     wait_for_child_exit,
 };
 use std::{
@@ -42,6 +42,7 @@ fn pipe_capture_bounds_invalid_utf8_diagnostics() {
     let capture = PipeCapture {
         bytes: vec![0xff; PIPE_CAPTURE_LIMIT],
         total_bytes: PIPE_CAPTURE_LIMIT * 2,
+        truncated: true,
     };
 
     let diagnostic = format!("stdout: {capture}; stderr: {capture}");
@@ -59,7 +60,7 @@ fn pipe_capture_bounds_invalid_utf8_diagnostics() {
 }
 
 #[test]
-fn read_pipe_retries_interrupted_reads() {
+fn drain_pipe_retries_interrupted_reads() {
     struct InterruptedOnce<R> {
         inner: R,
         interrupted: bool,
@@ -76,15 +77,17 @@ fn read_pipe_retries_interrupted_reads() {
     }
 
     let expected = b"captured after an interrupted read".to_vec();
-    let capture = join_pipe(
-        read_pipe(InterruptedOnce {
+    let mut capture = PipeCapture::new();
+    let closed = drain_pipe(
+        InterruptedOnce {
             inner: io::Cursor::new(expected.clone()),
             interrupted: false,
-        }),
-        "test",
+        },
+        &mut capture,
     )
     .unwrap();
 
+    assert!(closed);
     assert_eq!(capture.bytes, expected);
     assert_eq!(capture.total_bytes, expected.len());
 }
@@ -147,6 +150,118 @@ fn child_guard_terminates_and_reaps_on_timeout() {
 }
 
 #[test]
+fn child_guard_rejects_successful_output_that_exceeds_the_capture_limit() {
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", "head -c 65537 /dev/zero"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let child = ChildGuard::spawn(&mut command).unwrap();
+    let error = child
+        .wait_with_output(CATALOG_EXIT_TIMEOUT)
+        .expect_err("successful oversized output must fail closed");
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(
+        error.to_string().contains("exceeded"),
+        "truncation failure must identify bounded output"
+    );
+}
+
+#[test]
+fn child_guard_times_out_when_detached_writer_holds_pipes() {
+    struct DetachedPipeHolder {
+        pid: Option<i32>,
+    }
+
+    impl DetachedPipeHolder {
+        fn await_pid(pid_file: &std::path::Path) -> Self {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                if let Ok(value) = std::fs::read_to_string(pid_file)
+                    && let Ok(pid) = value.trim().parse::<i32>()
+                {
+                    return Self { pid: Some(pid) };
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "detached pipe holder did not record a pid"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        fn terminate_and_reap(&mut self) -> io::Result<()> {
+            let pid = self
+                .pid
+                .ok_or_else(|| io::Error::other("detached pid was already reaped"))?;
+            let detached = rustix::process::Pid::from_raw(pid)
+                .ok_or_else(|| io::Error::other("detached pid is zero"))?;
+            match rustix::process::kill_process(detached, rustix::process::Signal::KILL) {
+                Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+                Err(error) => return Err(io::Error::from(error)),
+            }
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                if std::time::Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "detached pipe holder was not reaped",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            self.pid = None;
+            Ok(())
+        }
+    }
+
+    impl Drop for DetachedPipeHolder {
+        fn drop(&mut self) {
+            if self.pid.is_some() {
+                let _ = self.terminate_and_reap();
+            }
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let pid_file = root.path().join("detached-pipe-holder.pid");
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg("setsid sh -c 'printf \"%s\\n\" \"$$\" > \"$1\"; exec sleep 60' detached \"$1\" &")
+        .arg("guard-fixture")
+        .arg(&pid_file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = ChildGuard::spawn(&mut command).unwrap();
+    let mut detached = DetachedPipeHolder::await_pid(&pid_file);
+
+    let started = std::time::Instant::now();
+    let error = child
+        .wait_with_output(Duration::from_millis(100))
+        .expect_err("detached pipe holder must not block the guard");
+    let elapsed = started.elapsed();
+    let detached_pid = detached.pid.expect("detached holder pid remains available");
+    detached
+        .terminate_and_reap()
+        .expect("detached pipe holder must be explicitly reaped");
+
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "detached pipe holder delayed deadline completion for {elapsed:?}"
+    );
+    assert!(
+        !std::path::Path::new(&format!("/proc/{detached_pid}")).exists(),
+        "detached pipe holder must be explicitly cleaned up"
+    );
+}
+
+#[test]
 fn child_guard_bounds_continuously_logged_timeout_output() {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
@@ -175,29 +290,11 @@ fn child_guard_bounds_continuously_logged_timeout_output() {
         "timeout diagnostic retained {} bytes",
         diagnostic.len()
     );
-    assert!(diagnostic.contains("stdout diagnostic"));
-    assert!(diagnostic.contains("stderr diagnostic"));
-    let capture_prefix = format!("captured first {PIPE_CAPTURE_LIMIT} of ");
-    let totals = diagnostic
-        .match_indices(&capture_prefix)
-        .map(|(index, _)| {
-            diagnostic[index + capture_prefix.len()..]
-                .split_once(" bytes]")
-                .unwrap()
-                .0
-                .parse::<usize>()
-                .unwrap()
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        totals.len(),
-        2,
-        "both streams must report the capture bound"
-    );
-    assert!(
-        totals.iter().all(|total| *total > PIPE_CAPTURE_LIMIT * 2),
-        "both readers must drain beyond the retained prefix: {totals:?}"
-    );
+    assert!(!diagnostic.contains("stdout diagnostic"));
+    assert!(!diagnostic.contains("stderr diagnostic"));
+    assert!(diagnostic.contains("stdout: "));
+    assert!(diagnostic.contains("stderr: "));
+    assert!(diagnostic.matches("(truncated)").count() >= 2);
 }
 
 #[test]

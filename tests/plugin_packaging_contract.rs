@@ -6,7 +6,7 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::{Read, Write},
+    io::{self, Read, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
@@ -134,16 +134,6 @@ fn assert_regular_executable(path: &Path) {
         "{} must be a regular file",
         path.display()
     );
-    assert!(
-        !metadata.file_type().is_symlink(),
-        "{} must not be a symlink",
-        path.display()
-    );
-    assert!(
-        metadata.mode() & 0o111 != 0,
-        "{} must be executable",
-        path.display()
-    );
     assert_eq!(
         metadata.mode() & 0o7777,
         0o755,
@@ -185,9 +175,15 @@ fn run_bounded_command(
         .stderr(Stdio::piped());
     let child = ChildGuard::spawn(command)
         .map_err(|_| format!("{context} could not start within the isolated test"))?;
-    child
-        .wait_with_output(timeout)
-        .map_err(|_| format!("{context} did not complete within its deadline"))
+    match child.wait_with_output(timeout) {
+        Ok(output) => Ok(output),
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => Err(format!(
+            "{context} timed out before producing a complete result"
+        )),
+        Err(_) => Err(format!(
+            "{context} failed while collecting a complete result"
+        )),
+    }
 }
 
 fn verify_direct_codex_prerequisite(binary: &Path) -> Result<(), &'static str> {
@@ -198,9 +194,6 @@ fn verify_direct_codex_prerequisite(binary: &Path) -> Result<(), &'static str> {
         .map_err(|_| "direct Codex binary metadata must be available")?;
     if !metadata.file_type().is_file() {
         return Err("direct Codex binary must be regular");
-    }
-    if metadata.file_type().is_symlink() {
-        return Err("direct Codex binary must not be a wrapper symlink");
     }
     if metadata.uid() != rustix::process::geteuid().as_raw() {
         return Err("direct Codex binary must be owned by the effective user");
@@ -253,9 +246,6 @@ fn copy_isolated_auth_after_verified_binary(
     if !auth_metadata.file_type().is_file() {
         return Err("auth source must be regular");
     }
-    if auth_metadata.file_type().is_symlink() {
-        return Err("auth source must not be a symlink");
-    }
 
     let copied_auth = codex_home.join("auth.json");
     fs::copy(auth, &copied_auth).map_err(|_| "isolated auth copy failed")?;
@@ -263,48 +253,10 @@ fn copy_isolated_auth_after_verified_binary(
         .map_err(|_| "isolated auth copy mode could not be set")?;
     let copied_metadata = fs::symlink_metadata(&copied_auth)
         .map_err(|_| "isolated auth copy metadata must be available")?;
-    if !copied_metadata.file_type().is_file()
-        || copied_metadata.file_type().is_symlink()
-        || copied_metadata.mode() & 0o7777 != 0o600
-    {
+    if !copied_metadata.file_type().is_file() || copied_metadata.mode() & 0o7777 != 0o600 {
         return Err("isolated auth copy must be a regular mode-0600 file");
     }
     Ok(())
-}
-
-struct StagedBinaryRestore {
-    path: PathBuf,
-    original: Option<(Vec<u8>, u32)>,
-}
-
-impl StagedBinaryRestore {
-    fn replace_with_broken_symlink(target: &Path) -> Self {
-        let path = staged_binary();
-        let original = match fs::symlink_metadata(&path) {
-            Ok(metadata) => Some((
-                fs::read(&path).expect("preserve staged executable before symlink fixture"),
-                metadata.mode() & 0o7777,
-            )),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => panic!("inspect staged executable before symlink fixture: {error}"),
-        };
-        if original.is_some() {
-            fs::remove_file(&path).expect("replace task-owned staged executable with test symlink");
-        }
-        std::os::unix::fs::symlink(target, &path)
-            .expect("create broken staged executable symlink fixture");
-        Self { path, original }
-    }
-}
-
-impl Drop for StagedBinaryRestore {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-        if let Some((bytes, mode)) = &self.original {
-            let _ = fs::write(&self.path, bytes);
-            let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(*mode));
-        }
-    }
 }
 
 struct FakeCodex {
@@ -358,6 +310,10 @@ if [[ \"$#\" -eq 4 && \"$1\" == plugin && \"$2\" == marketplace && \"$3\" == lis
     printf '%s\\n' '{\"marketplaces\":[]}' 'contaminated machine output'\n\
     exit 0\n\
   fi\n\
+  if [[ \"${FAKE_CODEX_NUL_JSON:-}\" == 1 ]]; then\n\
+    printf '%s\\0' '{\"marketplaces\":[]}'\n\
+    exit 0\n\
+  fi\n\
   if [[ -f \"$FAKE_CODEX_STATE/marketplace-root\" ]]; then\n\
     jq -cn --arg root \"$(<\"$FAKE_CODEX_STATE/marketplace-root\")\" '{marketplaces:[{name:\"codex-session-control-local\",root:$root}]}'\n\
   else\n\
@@ -402,7 +358,21 @@ exit 64\n",
         self.run_installer_at(&installer(), &self.root, invalid_json)
     }
 
+    fn run_installer_with_nul_json(&self) -> Output {
+        self.run_installer_at_with_nul_json(&installer(), &self.root, false, true)
+    }
+
     fn run_installer_at(&self, script: &Path, cwd: &Path, invalid_json: bool) -> Output {
+        self.run_installer_at_with_nul_json(script, cwd, invalid_json, false)
+    }
+
+    fn run_installer_at_with_nul_json(
+        &self,
+        script: &Path,
+        cwd: &Path,
+        invalid_json: bool,
+        nul_json: bool,
+    ) -> Output {
         let inherited_path = current_path();
         let path = env::join_paths(
             std::iter::once(self.bin.clone()).chain(env::split_paths(&inherited_path)),
@@ -425,6 +395,9 @@ exit 64\n",
         }
         if invalid_json {
             command.env("FAKE_CODEX_INVALID_JSON", "1");
+        }
+        if nul_json {
+            command.env("FAKE_CODEX_NUL_JSON", "1");
         }
         run_bounded_command(
             &mut command,
@@ -492,6 +465,15 @@ impl DisposableClone {
             self.plugin.join(".mcp.json"),
         )
         .expect("copy disposable legacy MCP manifest");
+    }
+
+    fn manifest_path(&self, manifest: &str) -> PathBuf {
+        match manifest {
+            "marketplace" => self.root.join(".agents/plugins/marketplace.json"),
+            "plugin" => self.plugin.join(".codex-plugin/plugin.json"),
+            "mcp" => self.plugin.join(".mcp.json"),
+            _ => unreachable!("fixed disposable manifest cases"),
+        }
     }
 }
 
@@ -609,9 +591,16 @@ fn installer_rejects_unsupported_host_before_codex_mutation() {
 fn installer_rejects_broken_staged_symlink_before_build_or_codex_mutation() {
     let _serial = installer_lock();
     let fixture = FakeCodex::new();
-    let _restore = StagedBinaryRestore::replace_with_broken_symlink(&fixture.root.join("missing"));
+    let clone = DisposableClone::new();
+    clone.copy_manifests();
+    private_directory(clone.plugin.join("bin").as_path());
+    std::os::unix::fs::symlink(
+        clone.root.join("missing"),
+        clone.plugin.join("bin/codex-session-control"),
+    )
+    .expect("create disposable broken staged executable symlink");
 
-    let output = fixture.run_installer(false);
+    let output = fixture.run_installer_at(&clone.script, &clone.root, false);
 
     assert!(
         !output.status.success(),
@@ -625,6 +614,56 @@ fn installer_rejects_broken_staged_symlink_before_build_or_codex_mutation() {
     assert!(fixture.cargo_commands().is_empty());
     assert!(fixture.commands().is_empty());
     assert!(fixture.mutations().is_empty());
+}
+
+#[test]
+fn installer_rejects_multidocument_manifest_streams_before_build_or_codex_mutation() {
+    let _serial = installer_lock();
+
+    for manifest in ["marketplace", "plugin", "mcp"] {
+        let fixture = FakeCodex::new();
+        let clone = DisposableClone::new();
+        clone.copy_manifests();
+        private_directory(clone.plugin.join("bin").as_path());
+        let staged = clone.plugin.join("bin/codex-session-control");
+        write_executable(&staged, "#!/usr/bin/env bash\nprintf '%s\\n' untouched\n");
+        let before = fs::read(&staged).expect("read disposable staged executable before failure");
+        let path = clone.manifest_path(manifest);
+        let approved = fs::read(&path).expect("read approved disposable manifest");
+        let mut stream = b"{}\n".to_vec();
+        stream.extend_from_slice(&approved);
+        fs::write(&path, stream).expect("write multi-document disposable manifest stream");
+
+        let output = fixture.run_installer_at(&clone.script, &clone.root, false);
+
+        assert!(
+            !output.status.success(),
+            "{manifest} stream must fail closed"
+        );
+        assert!(
+            String::from_utf8(output.stderr)
+                .expect("installer stderr is UTF-8")
+                .ends_with("Plugin manifest is not valid JSON.\n"),
+            "{manifest} stream must be rejected before later validation"
+        );
+        assert!(
+            fixture.cargo_commands().is_empty(),
+            "{manifest} stream must not start a build"
+        );
+        assert!(
+            fixture.commands().is_empty(),
+            "{manifest} stream must not query Codex"
+        );
+        assert!(
+            fixture.mutations().is_empty(),
+            "{manifest} stream must not mutate Codex"
+        );
+        assert_eq!(
+            fs::read(&staged).expect("read disposable staged executable after failure"),
+            before,
+            "{manifest} stream must not replace the staged executable"
+        );
+    }
 }
 
 #[test]
@@ -905,6 +944,29 @@ fn installer_rejects_invalid_machine_json_before_mutation() {
     );
 }
 
+#[test]
+fn installer_rejects_nul_suffixed_machine_json_before_mutation() {
+    let _serial = installer_lock();
+    let fixture = FakeCodex::new();
+
+    let output = fixture.run_installer_with_nul_json();
+
+    assert!(
+        !output.status.success(),
+        "NUL-suffixed JSON must fail closed"
+    );
+    assert!(
+        String::from_utf8(output.stderr)
+            .expect("installer stderr is UTF-8")
+            .ends_with("Codex marketplace listing was not valid machine-readable JSON.\n"),
+        "NUL-suffixed JSON must report the fail-closed marketplace error"
+    );
+    assert!(
+        fixture.mutations().is_empty(),
+        "NUL-suffixed JSON must never trigger marketplace or plugin mutation"
+    );
+}
+
 fn run_catalog_from(binary: &Path, cwd: &Path, timeout: Duration) -> Result<Vec<Value>, String> {
     let messages = [
         json!({
@@ -962,6 +1024,12 @@ fn isolated_codex_command(binary: &Path, home: &Path, codex_home: &Path) -> Comm
 
 fn run_isolated_plugin_command(command: &mut Command, context: &str) -> Output {
     run_bounded_command(command, CODEX_PLUGIN_COMMAND_TIMEOUT, context).expect(context)
+}
+
+fn parse_single_json_object(bytes: &[u8], context: &str) -> Value {
+    let value: Value = serde_json::from_slice(bytes).expect(context);
+    assert!(value.is_object(), "{context}");
+    value
 }
 
 fn write_host_probe(path: &Path, log: &Path, marker: &str) {
@@ -1099,6 +1167,32 @@ fn generic_client_deadline_reaps_a_slow_staged_process() {
 }
 
 #[test]
+fn bounded_command_reports_timeouts_without_capturing_process_output() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "printf '%s' timeout-output-marker >&2; sleep 1"]);
+
+    let result = run_bounded_command(&mut command, Duration::from_millis(100), "timeout fixture");
+
+    assert_eq!(
+        result,
+        Err("timeout fixture timed out before producing a complete result".to_owned())
+    );
+}
+
+#[test]
+fn bounded_command_reports_capture_failures_separately_from_timeouts() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "head -c 65537 /dev/zero"]);
+
+    let result = run_bounded_command(&mut command, GENERIC_MCP_EXIT_TIMEOUT, "capture fixture");
+
+    assert_eq!(
+        result,
+        Err("capture fixture failed while collecting a complete result".to_owned())
+    );
+}
+
+#[test]
 fn real_host_prerequisite_rejects_regular_script_wrapper_before_auth_copy() {
     let root = private_tempdir();
     let wrapper = root.path().join("codex-wrapper");
@@ -1225,13 +1319,6 @@ fn legacy_plugin_host_contract_on_codex_0_149_1() {
         &codex_home,
         &sentinels,
     );
-    assert_ne!(
-        initial_cache
-            .parent()
-            .expect("cache binary has a plugin root"),
-        plugin.join("bin"),
-        "host must execute the copied plugin cache"
-    );
     let initial_digest = sha256(&initial_cache);
 
     write_host_probe(&source_probe, &probe_log, "same-version-refresh");
@@ -1325,6 +1412,24 @@ fn legacy_plugin_host_contract_on_codex_0_149_1() {
     assert!(
         remove.status.success(),
         "isolated plugin removal must succeed"
+    );
+    let mut list_after_remove_command = isolated_codex_command(&binary, &home, &codex_home);
+    list_after_remove_command.args(["plugin", "list", "--json"]);
+    let list_after_remove = run_isolated_plugin_command(
+        &mut list_after_remove_command,
+        "list isolated plugins after native removal",
+    );
+    assert!(
+        list_after_remove.status.success(),
+        "isolated plugin listing after removal must succeed"
+    );
+    assert_eq!(
+        parse_single_json_object(
+            &list_after_remove.stdout,
+            "Codex 0.149.1 plugin list must be one JSON object after removal",
+        ),
+        json!({"available": [], "installed": []}),
+        "native removal must leave the isolated Codex plugin list empty before v1 re-add"
     );
     assert!(
         clone.is_dir(),

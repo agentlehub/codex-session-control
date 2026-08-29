@@ -11,8 +11,22 @@ run_codex() {
   env MISE_QUIET=1 codex "$@"
 }
 
-require_single_json_object() {
-  jq -e --slurp 'length == 1 and (.[0] | type == "object")' <<<"$1" >/dev/null
+require_single_json_object_file() {
+  jq -e --slurp 'length == 1 and (.[0] | type == "object")' "$1" >/dev/null
+}
+
+capture_codex_machine_json() {
+  local output="$1"
+  local command_error="$2"
+  local json_error="$3"
+  shift 3
+
+  run_codex "$@" > "$output" || die "$command_error"
+  if ! { test -f "$output" && test ! -L "$output"; }; then
+    die "$json_error"
+  fi
+  chmod 0600 "$output"
+  require_single_json_object_file "$output" || die "$json_error"
 }
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -57,7 +71,7 @@ esac
 
 for manifest in "$marketplace_manifest" "$plugin_manifest" "$mcp_manifest"; do
   test -f "$manifest" || die 'Plugin manifest is missing.'
-  jq empty "$manifest" >/dev/null || die 'Plugin manifest is not valid JSON.'
+  require_single_json_object_file "$manifest" || die 'Plugin manifest is not valid JSON.'
 done
 
 cargo_metadata="$(cd -- "$clone_root" && cargo metadata --locked --no-deps --format-version 1)"
@@ -132,30 +146,38 @@ readelf --file-header "$stage" | grep -F 'Machine:' | grep -F "$expected_machine
 mv -fT -- "$stage" "$staged_binary"
 stage=
 
-marketplace_json="$(run_codex plugin marketplace list --json)" \
-  || die 'Codex marketplace listing failed.'
-require_single_json_object "$marketplace_json" \
-  || die 'Codex marketplace listing was not valid machine-readable JSON.'
+machine_json_dir="$(mktemp -d "$plugin_root/bin/.codex-machine.XXXXXX")"
+chmod 0700 "$machine_json_dir"
+trap 'rm -f -- "${stage:-}"; rm -rf -- "${machine_json_dir:-}"' EXIT
+marketplace_initial_json="$machine_json_dir/marketplace-initial.json"
+marketplace_add_json="$machine_json_dir/marketplace-add.json"
+marketplace_final_json="$machine_json_dir/marketplace-final.json"
+plugin_add_json="$machine_json_dir/plugin-add.json"
+
+capture_codex_machine_json "$marketplace_initial_json" \
+  'Codex marketplace listing failed.' \
+  'Codex marketplace listing was not valid machine-readable JSON.' \
+  plugin marketplace list --json
 marketplace_count="$(jq -er --arg name 'codex-session-control-local' '
   if (.marketplaces | type) == "array" then
     [.marketplaces[] | select(.name == $name)] | length
   else
     error("marketplaces must be an array")
   end
-' <<<"$marketplace_json")" \
+' "$marketplace_initial_json")" \
   || die 'Codex marketplace listing was not valid machine-readable JSON.'
 
 case "$marketplace_count" in
   0)
-    marketplace_add_json="$(run_codex plugin marketplace add "$clone_root" --json)" \
-      || die 'Codex marketplace registration failed.'
-    require_single_json_object "$marketplace_add_json" \
-      || die 'Codex marketplace registration was not valid machine-readable JSON.'
+    capture_codex_machine_json "$marketplace_add_json" \
+      'Codex marketplace registration failed.' \
+      'Codex marketplace registration was not valid machine-readable JSON.' \
+      plugin marketplace add "$clone_root" --json
     ;;
   1)
     jq -e --arg name 'codex-session-control-local' --arg root "$clone_root" '
       [.marketplaces[] | select(.name == $name)] | .[0].root == $root
-    ' <<<"$marketplace_json" >/dev/null \
+    ' "$marketplace_initial_json" >/dev/null \
       || die 'Marketplace name already targets another root.'
     ;;
   *)
@@ -163,20 +185,20 @@ case "$marketplace_count" in
     ;;
 esac
 
-marketplace_json="$(run_codex plugin marketplace list --json)" \
-  || die 'Codex marketplace listing failed.'
-require_single_json_object "$marketplace_json" \
-  || die 'Codex marketplace listing was not valid machine-readable JSON.'
+capture_codex_machine_json "$marketplace_final_json" \
+  'Codex marketplace listing failed.' \
+  'Codex marketplace listing was not valid machine-readable JSON.' \
+  plugin marketplace list --json
 jq -e --arg name 'codex-session-control-local' --arg root "$clone_root" '
   if (.marketplaces | type) == "array" then
     [.marketplaces[] | select(.name == $name)] | length == 1 and .[0].root == $root
   else
     false
   end
-' <<<"$marketplace_json" >/dev/null \
+' "$marketplace_final_json" >/dev/null \
   || die 'Marketplace registration did not converge to the clone root.'
 
-plugin_add_json="$(run_codex plugin add codex-session-control@codex-session-control-local --json)" \
-  || die 'Codex plugin registration failed.'
-require_single_json_object "$plugin_add_json" \
-  || die 'Codex plugin registration was not valid machine-readable JSON.'
+capture_codex_machine_json "$plugin_add_json" \
+  'Codex plugin registration failed.' \
+  'Codex plugin registration was not valid machine-readable JSON.' \
+  plugin add codex-session-control@codex-session-control-local --json
