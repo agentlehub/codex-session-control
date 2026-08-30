@@ -4,103 +4,79 @@ use std::error::Error;
 mod cases;
 #[path = "app_server_integration/live_harness.rs"]
 mod live_harness;
-#[path = "app_server_integration/normal_home.rs"]
-mod normal_home;
-#[path = "app_server_integration/normal_home_paths.rs"]
-mod normal_home_paths;
-#[path = "app_server_integration/protocol_support.rs"]
-mod protocol_support;
-#[path = "support/private_tempdir.rs"]
-mod test_support;
 
-#[tokio::test]
-#[ignore = "requires the configured supported Codex CLI version"]
-async fn live_schema_digest_matches_committed_fixture() -> Result<(), Box<dyn Error>> {
-    cases::live_schema_digest_matches_committed_fixture().await
-}
-
-#[tokio::test]
-#[ignore = "requires the configured supported Codex CLI version"]
-async fn live_read_list_fork_title_goal_interrupt_mappings() -> Result<(), Box<dyn Error>> {
-    cases::live_read_list_fork_title_goal_interrupt_mappings().await
-}
-
-#[tokio::test]
-#[ignore = "requires the configured supported Codex CLI version"]
-async fn live_remote_cli_attaches_and_reconnects() -> Result<(), Box<dyn Error>> {
-    cases::live_remote_cli_attaches_and_reconnects().await
-}
-
-#[tokio::test]
-#[ignore = "requires the configured supported Codex CLI version"]
-async fn live_restart_preserves_shared_home_sessions() -> Result<(), Box<dyn Error>> {
-    cases::live_restart_preserves_shared_home_sessions().await
-}
-
-#[tokio::test]
-#[ignore = "requires the configured supported Codex CLI version"]
-async fn live_socket_removed_when_app_server_exits() -> Result<(), Box<dyn Error>> {
-    cases::live_socket_removed_when_app_server_exits().await
-}
-
-#[tokio::test]
-#[ignore = "requires the configured supported Codex CLI version"]
-async fn live_projection_converges_on_new_task_without_restart() -> Result<(), Box<dyn Error>> {
-    cases::live_projection_converges_on_new_task_without_restart().await
-}
-
-#[tokio::test]
-#[ignore = "CI-owned: requires the explicitly opted-in disposable passwd user"]
-async fn live_remote_cli_executes_projected_goal_tool_round_trip() -> Result<(), Box<dyn Error>> {
-    cases::live_remote_cli_executes_projected_goal_tool_round_trip().await
+#[test]
+fn ledger_persists_each_owned_id_with_file_and_directory_fsync() {
+    cases::ledger_persists_each_owned_id_with_file_and_directory_fsync();
 }
 
 #[test]
-fn disposable_normal_home_contract() {
-    cases::disposable_normal_home_contract();
-}
-
-#[tokio::test]
-async fn goal_output_barrier_ignores_interleaved_responses_requests() -> Result<(), Box<dyn Error>>
-{
-    cases::goal_output_barrier_ignores_interleaved_responses_requests().await
+fn ledger_persists_workspace_before_first_creation() {
+    cases::ledger_persists_workspace_before_first_creation();
 }
 
 #[test]
-fn shutdown_receipts_require_the_operation_specific_stage() {
-    cases::shutdown_receipts_require_the_operation_specific_stage();
+fn live_gate_requires_exact_opt_in_before_mutation() {
+    cases::live_gate_requires_exact_opt_in_before_mutation();
 }
 
 #[test]
-fn normal_home_ci_requires_each_exact_opt_in_before_mutation() {
-    cases::normal_home_ci_requires_each_exact_opt_in_before_mutation();
+fn recovery_requires_exact_opt_in_and_absolute_ledger() {
+    cases::recovery_requires_exact_opt_in_and_absolute_ledger();
 }
 
 #[test]
-fn cleanup_combination_keeps_absence_verification_authoritative() {
-    cases::cleanup_combination_keeps_absence_verification_authoritative();
+fn cleanup_retains_ledger_until_archive_proof() {
+    cases::cleanup_retains_ledger_until_archive_proof();
+}
+
+#[test]
+fn exact_workspace_list_is_source_complete_and_provider_unfiltered() {
+    cases::exact_workspace_list_is_source_complete_and_provider_unfiltered();
 }
 
 #[tokio::test]
-#[ignore = "CI-owned: requires the explicitly opted-in disposable passwd user"]
-async fn live_normal_home_shared_authority() -> Result<(), Box<dyn Error>> {
-    cases::live_normal_home_shared_authority().await
+async fn already_archived_exact_ledger_target_skips_archive_and_converges() {
+    cases::already_archived_exact_ledger_target_skips_archive_and_converges().await;
 }
 
 #[tokio::test]
-#[ignore = "CI-owned: requires the explicitly opted-in disposable passwd user"]
-async fn live_normal_home_restart_boundaries() -> Result<(), Box<dyn Error>> {
-    cases::live_normal_home_restart_boundaries().await
+async fn active_exact_ledger_target_archives_once_then_converges() {
+    cases::active_exact_ledger_target_archives_once_then_converges().await;
 }
 
 #[tokio::test]
-#[ignore = "CI-owned: requires the explicitly opted-in disposable passwd user"]
-async fn live_normal_home_projection_preservation() -> Result<(), Box<dyn Error>> {
-    cases::live_normal_home_projection_preservation().await
+async fn invalid_exact_read_evidence_fails_closed_and_retains_ledger() {
+    cases::invalid_exact_read_evidence_fails_closed_and_retains_ledger().await;
+}
+
+#[test]
+fn cleanup_failure_keeps_normal_tool_run_error() {
+    cases::cleanup_failure_keeps_normal_tool_run_error();
+}
+
+#[test]
+fn cleanup_failure_classifies_tool_run_panic_without_payload() {
+    cases::cleanup_failure_classifies_tool_run_panic_without_payload();
+}
+
+#[test]
+fn mcp_json_rpc_tool_error_preserves_allowlisted_context_without_sensitive_data() {
+    live_harness::mcp_json_rpc_tool_error_preserves_allowlisted_context_without_sensitive_data();
+}
+
+#[test]
+fn mcp_tool_result_error_preserves_allowlisted_context_and_fixed_fallbacks() {
+    live_harness::mcp_tool_result_error_preserves_allowlisted_context_and_fixed_fallbacks();
+}
+
+#[test]
+fn caller_bound_tool_request_keeps_metadata_outside_public_arguments() {
+    live_harness::caller_bound_tool_request_keeps_metadata_outside_public_arguments();
 }
 
 #[tokio::test]
-#[ignore = "CI-owned: requires the explicitly opted-in disposable passwd user"]
-async fn live_normal_home_uninstall_preservation() -> Result<(), Box<dyn Error>> {
-    cases::live_normal_home_uninstall_preservation().await
+#[ignore = "requires explicit disposable-task opt-in and a live Desktop authority"]
+async fn live_desktop_authority_all_thirteen_tools_are_disposable() -> Result<(), Box<dyn Error>> {
+    cases::live_desktop_authority_all_thirteen_tools_are_disposable().await
 }
