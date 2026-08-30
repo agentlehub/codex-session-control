@@ -1140,22 +1140,17 @@ fn generic_client_initializes_and_lists_exact_catalog_from_another_cwd() {
 fn generic_client_deadline_reaps_a_slow_staged_process() {
     let root = private_tempdir();
     let slow_server = root.path().join("slow-mcp-server");
-    let pid_log = root.path().join("slow-mcp-server.pid");
     write_executable(
         &slow_server,
-        &format!(
-            "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$$\" > {}\nsleep 1\n",
-            shell_quote(&pid_log)
-        ),
+        "#!/usr/bin/env bash\nset -euo pipefail\nsleep 1\n",
     );
 
+    let direct_children_before = fs::read_to_string("/proc/thread-self/children")
+        .expect("Linux procfs direct-child state must be available");
     let started = std::time::Instant::now();
     let result = run_catalog_from(&slow_server, root.path(), Duration::from_millis(100));
-    let pid = fs::read_to_string(&pid_log)
-        .expect("slow staged process must record its pid")
-        .trim()
-        .parse::<u32>()
-        .expect("slow staged process pid must be numeric");
+    let direct_children_after = fs::read_to_string("/proc/thread-self/children")
+        .expect("Linux procfs direct-child state must be available");
 
     assert_eq!(
         result,
@@ -1166,8 +1161,8 @@ fn generic_client_deadline_reaps_a_slow_staged_process() {
         started.elapsed() < Duration::from_secs(1),
         "generic client deadline must terminate the slow process promptly"
     );
-    assert!(
-        !Path::new(&format!("/proc/{pid}")).exists(),
+    assert_eq!(
+        direct_children_after, direct_children_before,
         "generic client deadline must reap the slow staged process"
     );
 }
