@@ -134,8 +134,18 @@ candidate="$clone_root/target/release/codex-session-control"
 if ! { test -f "$candidate" && test -x "$candidate" && test ! -L "$candidate"; }; then
   die 'Locked build did not produce a regular executable.'
 fi
+stage=''
+machine_json_dir=''
+cleanup_temporary_artifacts() {
+  if [[ -n "$stage" ]]; then
+    rm -f -- "$stage"
+  fi
+  if [[ -n "$machine_json_dir" ]]; then
+    rm -rf -- "$machine_json_dir"
+  fi
+}
+trap cleanup_temporary_artifacts EXIT
 stage="$(mktemp "$plugin_root/bin/.codex-session-control.XXXXXX")"
-trap 'rm -f -- "${stage:-}"' EXIT
 cp -- "$candidate" "$stage"
 chmod 0755 "$stage"
 if ! { test -f "$stage" && test ! -L "$stage"; }; then
@@ -148,7 +158,6 @@ stage=
 
 machine_json_dir="$(mktemp -d "$plugin_root/bin/.codex-machine.XXXXXX")"
 chmod 0700 "$machine_json_dir"
-trap 'rm -f -- "${stage:-}"; rm -rf -- "${machine_json_dir:-}"' EXIT
 marketplace_initial_json="$machine_json_dir/marketplace-initial.json"
 marketplace_add_json="$machine_json_dir/marketplace-add.json"
 marketplace_final_json="$machine_json_dir/marketplace-final.json"

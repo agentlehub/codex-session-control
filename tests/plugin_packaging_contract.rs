@@ -810,6 +810,76 @@ fn installer_builds_locked_and_atomically_stages_native_executable() {
 }
 
 #[test]
+fn installer_cleans_machine_response_temp_directory_when_private_mode_setup_fails() {
+    struct MachineResponseTempCleanup(PathBuf);
+
+    impl Drop for MachineResponseTempCleanup {
+        fn drop(&mut self) {
+            let Ok(entries) = fs::read_dir(&self.0) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                if entry
+                    .file_name()
+                    .as_encoded_bytes()
+                    .starts_with(b".codex-machine.")
+                {
+                    let _ = fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+    }
+
+    let _serial = installer_lock();
+    let fixture = FakeCodex::new();
+    let bin = staged_binary()
+        .parent()
+        .expect("staged binary has a bin directory")
+        .to_path_buf();
+    write_executable(
+        &fixture.bin.join("chmod"),
+        "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"${2:-}\" == */.codex-machine.* ]]; then\n  exit 1\nfi\nexec /usr/bin/chmod \"$@\"\n",
+    );
+
+    assert!(
+        fs::read_dir(&bin)
+            .expect("read staged binary directory before chmod failure")
+            .all(|entry| {
+                !entry
+                    .expect("read staged binary entry")
+                    .file_name()
+                    .as_encoded_bytes()
+                    .starts_with(b".codex-machine.")
+            }),
+        "test must start without machine-response temporary directories"
+    );
+    let _cleanup = MachineResponseTempCleanup(bin.clone());
+
+    let output = fixture.run_installer(false);
+
+    assert!(
+        !output.status.success(),
+        "private machine-response directory mode failure must fail the installer"
+    );
+    assert!(
+        fixture.mutations().is_empty(),
+        "machine-response directory mode failure must not mutate Codex"
+    );
+    assert!(
+        fs::read_dir(&bin)
+            .expect("read staged binary directory after chmod failure")
+            .all(|entry| {
+                !entry
+                    .expect("read staged binary entry")
+                    .file_name()
+                    .as_encoded_bytes()
+                    .starts_with(b".codex-machine.")
+            }),
+        "machine-response temporary directories must be cleaned after a mode failure"
+    );
+}
+
+#[test]
 fn installer_same_root_restages_and_does_not_duplicate_marketplace() {
     let _serial = installer_lock();
     let fixture = FakeCodex::new();
