@@ -33,7 +33,7 @@
 - If the branch, merge-base, approved design commit, or clean-state assertion fails, stop. Inventory the drift, repair or re-review the specification and this plan, and obtain a coherent approved boundary before deleting code.
 - Preserve `src/mcp/contract.rs` and `tests/mcp_contract.rs` as the public contract authorities. No tool name, order, title, description, annotation, schema, default, result, error, stage, dispatch evidence, or cross-thread policy may drift.
 - Source readiness is anchored by `docs/superpowers/reviews/2026-08-29-desktop-owned-session-control-design-review.md`, whose final state is `passed` after the `b7b9d94` support-module repair. Any new `BLOCKER`/`MAJOR` material routes back to specification repair before implementation.
-- The implementation base for every review is `88f2ac5b124abaa2a355ca88304e9439c692eb0a`; documentation commits `da06acf2c229b5e0aa68ff45ab3aa87037aa4d52`, `109adc71ede97073751c4a1693c51652a10d5c90`, and reapproved source repair `b7b9d94` are source artifacts, not behavior to reimplement.
+- The implementation base for every review is `88f2ac5b124abaa2a355ca88304e9439c692eb0a`; documentation commits `da06acf2c229b5e0aa68ff45ab3aa87037aa4d52`, `109adc71ede97073751c4a1693c51652a10d5c90`, and `b7b9d94` are source artifacts, not behavior to reimplement.
 
 ### Tools and runtime data
 
@@ -133,7 +133,7 @@ Route architecture-sensitive endpoint/version discovery and every review to `gpt
 | Documentation worker | Create `docs/upgrading.md`; modify `.github/ISSUE_TEMPLATE/bug.yml`, `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `docs/architecture.md`, `docs/desktop.md`, `docs/security.md`, and `docs/troubleshooting.md`. Own current plugin/stdio guidance and the evidence-backed cutover. | 13 |
 | Live-validation worker | Modify `tests/app_server_integration.rs`, `tests/app_server_integration/cases.rs`, and `tests/app_server_integration/live_harness.rs`; delete `tests/app_server_integration/normal_home.rs`, `tests/app_server_integration/normal_home_paths.rs`, and `tests/app_server_integration/protocol_support.rs` after moving only its retained `NativeConnection` seam into `live_harness.rs`. Own the sole ignored all-tool gate, durable ownership ledger, hard-kill recovery, and cleanup proof. | 15 |
 
-The reapproved source repair at `b7b9d94` classifies `tests/app_server_integration/protocol_support.rs` as an exact deletion target. Its fake `ResponsesEndpoint` becomes obsolete with the authority-spawning harness; move only the existing `NativeConnection { websocket: WebSocketStream<UnixStream>, next_id: u64 }` and its correlated `request(&mut self, method: &str, params: Value) -> Result<Value, Box<dyn Error>>` method into `live_harness.rs`, then delete the module.
+`tests/app_server_integration/protocol_support.rs` is an exact deletion target. Move only the existing `NativeConnection` type and correlated request loop into `live_harness.rs`; keep `connect`, `initialize`, and `codexHome` ownership handling implemented in `live_harness.rs` itself.
 
 ### Execution waves
 
@@ -1617,6 +1617,9 @@ Intermediate reviews are dependency gates, not operator pauses. The orchestrator
   live_gate_requires_exact_opt_in_before_mutation
   recovery_requires_exact_opt_in_and_absolute_ledger
   cleanup_retains_ledger_until_archive_proof
+  already_archived_exact_ledger_target_skips_archive_and_converges
+  active_exact_ledger_target_archives_once_then_converges
+  invalid_exact_read_evidence_fails_closed_and_retains_ledger
   ```
 
   Add exactly one ignored test:
@@ -1640,11 +1643,14 @@ Intermediate reviews are dependency gates, not operator pauses. The orchestrator
   ```bash
   cargo test --locked --test app_server_integration ledger_ -- --nocapture
   cargo test --locked --test app_server_integration live_gate_requires_exact_opt_in_before_mutation -- --exact
+  cargo test --locked --test app_server_integration already_archived_exact_ledger_target_skips_archive_and_converges -- --exact
+  cargo test --locked --test app_server_integration active_exact_ledger_target_archives_once_then_converges -- --exact
+  cargo test --locked --test app_server_integration invalid_exact_read_evidence_fails_closed_and_retains_ledger -- --exact
   cargo test --locked --test app_server_integration \
     live_desktop_authority_all_thirteen_tools_are_disposable -- --ignored --exact --nocapture
   ```
 
-  Expected: unit contracts FAIL because ledger types are absent; ignored live test exits before mutation because `CODEX_SESSION_CONTROL_LIVE_ALL_TOOLS` is not exactly `1`.
+  Expected: focused reconciliation contracts fail pre-fix (`already_archived...` expects zero archive calls, `active...` expects one archive then exact-read convergence, `invalid...` expects zero archive plus retained ledger/run dir and no deletion), ledger contracts fail because ledger types are absent, and ignored live test exits before mutation because `CODEX_SESSION_CONTROL_LIVE_ALL_TOOLS` is not exactly `1`.
 
 - [ ] **Step 3: Implement an ownership type and crash-durable ledger**
 
@@ -1734,7 +1740,7 @@ Intermediate reviews are dependency gates, not operator pauses. The orchestrator
   }
   ```
 
-  `recover_exact_workspace_ids` reads the exact workspace path durably stored in the ledger before mutation, queries only that workspace, records any create/fork result lost between native acceptance and response handling through the same atomic ledger path, and never searches titles, timestamps, other workspaces, or global diffs. `archive_and_verify` opens a fresh `/rpc` native connection, calls `thread/archive` with `{"threadId": owned_id}` only for ledger values, then checks `thread/list` with `archived: false` and `archived: true`. It succeeds only when every ledger ID is absent from active results and present in archived results. On cleanup failure, retain and report the exact ledger path and remaining IDs.
+  `recover_exact_workspace_ids` reads the exact workspace path durably stored in the ledger before mutation, queries only that workspace, records any create/fork result lost between native acceptance and response handling through the same atomic ledger path, and never searches titles, timestamps, other workspaces, or global diffs. `archive_and_verify` opens a fresh `/rpc` native connection, exact-reads each ledger ID, validates the returned ID, and classifies storage by initialized `codexHome` subtree (`sessions` or `archived_sessions`) only. It skips already-archived IDs, archives only IDs proven active, and then polls exact-read until each target is classified archived. If an exact read is missing, reports a mismatched ID, or yields unclassifiable storage, cleanup fails closed and reports the exact ledger path with remaining IDs. `thread/list` remains an ownership-recovery helper only; it cannot prove archive state for preview-empty threads.
 
   Hard-kill recovery is a separate entry branch and requires both:
 
@@ -1755,28 +1761,91 @@ Intermediate reviews are dependency gates, not operator pauses. The orchestrator
   ```rust
   type NativeWebSocket = WebSocketStream<UnixStream>;
 
-  struct NativeConnection {
+  pub(super) struct NativeConnection {
       websocket: NativeWebSocket,
       next_id: u64,
+      codex_home: Option<PathBuf>,
   }
 
   impl NativeConnection {
-      async fn request(
+      async fn connect(socket: &Path) -> Result<Self, Box<dyn Error>> {
+          let stream = UnixStream::connect(socket).await?;
+          let (websocket, _) = client_async("ws://localhost/rpc", stream).await?;
+          Ok(Self {
+              websocket,
+              next_id: 1,
+              codex_home: None,
+          })
+      }
+
+      pub(super) async fn initialize(&mut self) -> Result<(), Box<dyn Error>> {
+          let initialized = self
+              .request(
+                  "initialize",
+                  json!({
+                      "clientInfo": {
+                          "name": "codex_session_control_live_test",
+                          "title": "Codex Session Control Live Test",
+                          "version": env!("CARGO_PKG_VERSION"),
+                      },
+                      "capabilities": {
+                          "experimentalApi": true,
+                          "mcpServerOpenaiFormElicitation": false,
+                          "requestAttestation": false,
+                          "optOutNotificationMethods": [],
+                      },
+                  }),
+              )
+              .await?;
+          let codex_home = initialized
+              .get("codexHome")
+              .and_then(Value::as_str)
+              .filter(|home| Path::new(home).is_absolute())
+              .map(PathBuf::from)
+              .ok_or_else(|| io::Error::other("initialize omitted an absolute Codex home"))?;
+          let user_agent = initialized
+              .get("userAgent")
+              .and_then(Value::as_str)
+              .ok_or_else(|| io::Error::other("initialize omitted a user agent"))?;
+          if !has_supported_codex_version(user_agent) {
+              return Err(
+                  io::Error::other("Desktop authority is not on the supported version").into(),
+              );
+          }
+          self.codex_home = Some(codex_home);
+          self.websocket
+              .send(Message::text(json!({"method": "initialized"}).to_string()))
+              .await?;
+          Ok(())
+      }
+
+      pub(super) fn initialized_codex_home(&self) -> Option<&Path> {
+          self.codex_home.as_deref()
+      }
+
+      pub(super) async fn request(
           &mut self,
           method: &str,
-          params: Value,
+          params: impl serde::Serialize,
       ) -> Result<Value, Box<dyn Error>> {
           let id = self.next_id;
           self.next_id += 1;
-          self.websocket.send(Message::text(
-              json!({"id": id, "method": method, "params": params}).to_string(),
-          )).await?;
+          self.websocket
+              .send(Message::text(
+                  json!({"id": id, "method": method, "params": params}).to_string(),
+              ))
+              .await?;
           tokio::time::timeout(Duration::from_secs(10), async {
               loop {
-                  let frame = self.websocket.next().await
+                  let frame = self
+                      .websocket
+                      .next()
+                      .await
                       .ok_or_else(|| io::Error::other("app-server disconnected"))?
                       .map_err(io::Error::other)?;
-                  let Message::Text(text) = frame else { continue };
+                  let Message::Text(text) = frame else {
+                      continue;
+                  };
                   let value: Value = serde_json::from_str(text.as_str())?;
                   if value.get("id").and_then(Value::as_u64) != Some(id) {
                       continue;
@@ -1784,15 +1853,20 @@ Intermediate reviews are dependency gates, not operator pauses. The orchestrator
                   if let Some(error) = value.get("error") {
                       return Err(io::Error::other(format!("{method} failed: {error}")));
                   }
-                  return value.get("result").cloned()
+                  return value
+                      .get("result")
+                      .cloned()
                       .ok_or_else(|| io::Error::other(format!("{method} omitted result")));
               }
-          }).await
-              .map_err(|_| format!("{method} timed out"))?
-              .map_err(Into::into)
+          })
+          .await
+          .map_err(|_| io::Error::other(format!("{method} timed out")))?
+          .map_err(Into::into)
       }
   }
   ```
+
+  `initialized_codex_home()` is the only storage-root accessor. Exact storage classification is in `exact_thread_storage` in `tests/app_server_integration/cases.rs`: it validates returned `thread.id` equality, strips and classifies by the first normalized path component under initialized `codexHome` as `sessions` or `archived_sessions`, rejects any non-normal remainder and nested storage markers, and requires at least one rollout-relative component before classification.
 
   This is the current 10-second correlated-result loop moved intact: it ignores notifications and unrelated IDs, returns the exact matching result, surfaces the matching native error, and fails on EOF/timeout. Remove `mod protocol_support;` and delete `tests/app_server_integration/protocol_support.rs`; do not retain its fake `ResponsesEndpoint`, TCP provider, fake authority, service/process ownership, normal-home, remote CLI, or projection helpers.
 
@@ -1802,12 +1876,15 @@ Intermediate reviews are dependency gates, not operator pauses. The orchestrator
 
   ```bash
   cargo test --locked --test app_server_integration ledger_ -- --nocapture
+  cargo test --locked --test app_server_integration already_archived_exact_ledger_target_skips_archive_and_converges -- --exact
+  cargo test --locked --test app_server_integration active_exact_ledger_target_archives_once_then_converges -- --exact
+  cargo test --locked --test app_server_integration invalid_exact_read_evidence_fails_closed_and_retains_ledger -- --exact
   cargo test --locked --test app_server_integration live_gate_requires_exact_opt_in_before_mutation -- --exact
   cargo test --locked --test app_server_integration recovery_requires_exact_opt_in_and_absolute_ledger -- --exact
   cargo test --locked --test app_server_integration --no-run
   ```
 
-  Expected: nonignored safety tests PASS; ignored live gate compiles; no live task is created.
+  Expected: nonignored safety tests PASS with exact behaviors: already-archived path does not archive; active path archives once then converges via exact read; invalid read path dispatches zero archive, retains ledger and run dir, and does not authorize deletion; ignored live gate compiles and no live task is created.
 
 - [ ] **Step 6: Run the authorized live gate**
 
@@ -1839,7 +1916,7 @@ Intermediate reviews are dependency gates, not operator pauses. The orchestrator
 **Review contract:** `## Review Milestones` -> `M4`
 
 - [ ] Dispatch one combined reviewer over Task 15; check exact live-safety specification first, then DRY/YAGNI, then code quality.
-- [ ] Require a path-by-path proof for opt-in before mutation, empty unique workspace, atomic/fsynced record-before-use, `OwnedThreadId` compile-time boundary, exact 13-tool exercise, child stop/reap before cleanup, fresh native archive, archived/active proof, retained ledger on failure, and two-variable hard-kill recovery.
+- [ ] Require a path-by-path proof for opt-in before mutation, empty unique workspace, atomic/fsynced record-before-use, `OwnedThreadId` compile-time boundary, exact 13-tool exercise, child stop/reap before cleanup, fresh native exact-ID active/archived reconciliation with idempotence, retained ledger on failure, and two-variable hard-kill recovery.
 - [ ] Reject any global scan, title/timestamp ownership, untyped mutating target, pre-existing task mutation, cleanup-by-diff, automatic ledger deletion on failed cleanup, or second ignored live end-to-end gate.
 - [ ] Fix valid findings, rerun all nonmutating safety tests and the live gate when its behavior changed, repeat after Critical/Important findings, and continue only with no material finding.
 
