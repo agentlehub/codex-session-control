@@ -2,7 +2,7 @@
 mod process_guard;
 
 use process_guard::{
-    ChildGuard, PIPE_CAPTURE_LIMIT, PipeCapture, drain_pipe, terminate_test_child,
+    ChildGuard, DrainState, PIPE_CAPTURE_LIMIT, PipeCapture, drain_pipe, terminate_test_child,
     wait_for_child_exit,
 };
 use std::{
@@ -19,7 +19,6 @@ use serde_json::{Value, json};
 
 const INSTRUCTIONS: &str = "These tools inspect and control Codex threads through the shared app-server used by connected Codex clients.";
 const CATALOG_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
-const CONTINUOUS_OUTPUT_FIXTURE: &str = "CSC_MCP_CONTRACT_CONTINUOUS_OUTPUT";
 
 const TOOL_EFFECTS: [(&str, bool, bool); 13] = [
     ("thread_create", false, false),
@@ -36,28 +35,6 @@ const TOOL_EFFECTS: [(&str, bool, bool); 13] = [
     ("thread_goal_clear", false, true),
     ("thread_interrupt", false, true),
 ];
-
-#[test]
-fn pipe_capture_bounds_invalid_utf8_diagnostics() {
-    let capture = PipeCapture {
-        bytes: vec![0xff; PIPE_CAPTURE_LIMIT],
-        total_bytes: PIPE_CAPTURE_LIMIT * 2,
-        truncated: true,
-    };
-
-    let diagnostic = format!("stdout: {capture}; stderr: {capture}");
-
-    assert!(
-        diagnostic.len() <= PIPE_CAPTURE_LIMIT * 2 + 256,
-        "invalid UTF-8 expanded diagnostic to {} bytes",
-        diagnostic.len()
-    );
-    assert!(
-        diagnostic.contains('?'),
-        "invalid bytes must remain visible"
-    );
-    assert_eq!(diagnostic.matches("[truncated:").count(), 2);
-}
 
 #[test]
 fn drain_pipe_retries_interrupted_reads() {
@@ -78,16 +55,17 @@ fn drain_pipe_retries_interrupted_reads() {
 
     let expected = b"captured after an interrupted read".to_vec();
     let mut capture = PipeCapture::new();
-    let closed = drain_pipe(
+    let state = drain_pipe(
         InterruptedOnce {
             inner: io::Cursor::new(expected.clone()),
             interrupted: false,
         },
         &mut capture,
+        std::time::Instant::now() + Duration::from_secs(1),
     )
     .unwrap();
 
-    assert!(closed);
+    assert_eq!(state, DrainState::Closed);
     assert_eq!(capture.bytes, expected);
     assert_eq!(capture.total_bytes, expected.len());
 }
@@ -114,10 +92,15 @@ fn child_guard_captures_runtime_error_after_stdin_eof() {
 
 #[test]
 fn binary_is_direct_stdio_and_accepts_no_commands() {
-    let output = Command::new(cargo_bin("codex-session-control"))
+    let mut command = Command::new(cargo_bin("codex-session-control"));
+    command
         .arg("mcp-server")
-        .output()
-        .unwrap();
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = ChildGuard::spawn(&mut command).unwrap();
+    let child_pid = child.id();
+    let output = child.wait_with_output(CATALOG_EXIT_TIMEOUT).unwrap();
 
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
@@ -125,6 +108,10 @@ fn binary_is_direct_stdio_and_accepts_no_commands() {
         String::from_utf8(output.stderr)
             .unwrap()
             .contains("does not accept arguments")
+    );
+    assert!(
+        !std::path::Path::new(&format!("/proc/{child_pid}")).exists(),
+        "argument-rejection child was not reaped"
     );
 }
 
@@ -153,7 +140,10 @@ fn child_guard_terminates_and_reaps_on_timeout() {
 fn child_guard_rejects_successful_output_that_exceeds_the_capture_limit() {
     let mut command = Command::new("sh");
     command
-        .args(["-c", "head -c 65537 /dev/zero"])
+        .args([
+            "-c",
+            &format!("head -c {} /dev/zero", PIPE_CAPTURE_LIMIT + 1),
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -193,10 +183,10 @@ fn child_guard_times_out_when_detached_writer_holds_pipes() {
             }
         }
 
-        fn terminate_and_reap(&mut self) -> io::Result<()> {
+        fn terminate_and_await_disappearance(&mut self) -> io::Result<()> {
             let pid = self
                 .pid
-                .ok_or_else(|| io::Error::other("detached pid was already reaped"))?;
+                .ok_or_else(|| io::Error::other("detached pid was already gone"))?;
             let detached = rustix::process::Pid::from_raw(pid)
                 .ok_or_else(|| io::Error::other("detached pid is zero"))?;
             match rustix::process::kill_process(detached, rustix::process::Signal::KILL) {
@@ -208,7 +198,7 @@ fn child_guard_times_out_when_detached_writer_holds_pipes() {
                 if std::time::Instant::now() >= deadline {
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
-                        "detached pipe holder was not reaped",
+                        "detached pipe holder did not disappear",
                     ));
                 }
                 thread::sleep(Duration::from_millis(10));
@@ -221,7 +211,7 @@ fn child_guard_times_out_when_detached_writer_holds_pipes() {
     impl Drop for DetachedPipeHolder {
         fn drop(&mut self) {
             if self.pid.is_some() {
-                let _ = self.terminate_and_reap();
+                let _ = self.terminate_and_await_disappearance();
             }
         }
     }
@@ -247,8 +237,8 @@ fn child_guard_times_out_when_detached_writer_holds_pipes() {
     let elapsed = started.elapsed();
     let detached_pid = detached.pid.expect("detached holder pid remains available");
     detached
-        .terminate_and_reap()
-        .expect("detached pipe holder must be explicitly reaped");
+        .terminate_and_await_disappearance()
+        .expect("detached pipe holder must be explicitly terminated");
 
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     assert!(
@@ -262,56 +252,65 @@ fn child_guard_times_out_when_detached_writer_holds_pipes() {
 }
 
 #[test]
-fn child_guard_bounds_continuously_logged_timeout_output() {
-    let mut command = Command::new(std::env::current_exe().unwrap());
+fn child_guard_rejects_unthrottled_single_stream_output_promptly() {
+    let mut command = Command::new("sh");
     command
         .args([
-            "--exact",
-            "child_guard_continuous_output_fixture",
-            "--nocapture",
+            "-c",
+            "i=0; while [ \"$i\" -lt 32 ]; do yes stdout & i=$((i + 1)); done; wait",
         ])
-        .env(CONTINUOUS_OUTPUT_FIXTURE, "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
     let child = ChildGuard::spawn(&mut command).unwrap();
     let child_pid = child.id();
-    let error = child.wait_with_output(Duration::from_secs(1)).unwrap_err();
+    let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+    let watchdog = thread::spawn(
+        move || match completed_rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(()) => false,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let process_group = rustix::process::Pid::from_raw(child_pid as i32).unwrap();
+                let _ = rustix::process::kill_process_group(
+                    process_group,
+                    rustix::process::Signal::KILL,
+                );
+                true
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => false,
+        },
+    );
+
+    let started = std::time::Instant::now();
+    let error = child
+        .wait_with_output(Duration::from_millis(100))
+        .unwrap_err();
+    let elapsed = started.elapsed();
+    let _ = completed_tx.send(());
+    let watchdog_fired = watchdog.join().unwrap();
     let diagnostic = error.to_string();
 
-    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(
+        !watchdog_fired,
+        "independent watchdog had to stop an unbounded output drain"
+    );
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "capture limit was not enforced promptly: {elapsed:?}"
+    );
     assert!(
         !std::path::Path::new(&format!("/proc/{child_pid}")).exists(),
-        "continuously logging child was not reaped"
+        "unthrottled writer leader was not reaped"
     );
     assert!(
-        diagnostic.len() <= PIPE_CAPTURE_LIMIT * 2 + 1024,
-        "timeout diagnostic retained {} bytes",
+        diagnostic.len() <= 1024,
+        "capture-limit diagnostic retained {} bytes",
         diagnostic.len()
     );
-    assert!(!diagnostic.contains("stdout diagnostic"));
-    assert!(!diagnostic.contains("stderr diagnostic"));
     assert!(diagnostic.contains("stdout: "));
-    assert!(diagnostic.contains("stderr: "));
-    assert!(diagnostic.matches("(truncated)").count() >= 2);
-}
-
-#[test]
-fn child_guard_continuous_output_fixture() {
-    if std::env::var_os(CONTINUOUS_OUTPUT_FIXTURE).is_none() {
-        return;
-    }
-
-    let stdout_chunk = "stdout diagnostic\n".repeat(4096);
-    let stderr_chunk = "stderr diagnostic\n".repeat(4096);
-    let mut stdout = io::stdout().lock();
-    let mut stderr = io::stderr().lock();
-    loop {
-        stdout.write_all(stdout_chunk.as_bytes()).unwrap();
-        stderr.write_all(stderr_chunk.as_bytes()).unwrap();
-        thread::sleep(Duration::from_millis(10));
-    }
+    assert!(diagnostic.contains("(truncated)"));
+    assert!(diagnostic.contains("stderr: 0 bytes"));
 }
 
 #[test]

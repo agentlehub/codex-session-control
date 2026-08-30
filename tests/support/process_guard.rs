@@ -11,6 +11,7 @@ use std::{
 };
 
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const PIPE_READ_ATTEMPTS_PER_TURN: usize = 4;
 pub const PIPE_CAPTURE_LIMIT: usize = 64 * 1024;
 
 pub struct ChildGuard {
@@ -55,8 +56,18 @@ impl ChildGuard {
             .stderr
             .take()
             .ok_or_else(|| io::Error::other("child stderr was not piped"))?;
-        set_nonblocking(&stdout)?;
-        set_nonblocking(&stderr)?;
+        if let Err(error) = set_nonblocking(&stdout) {
+            return self.cleanup_after_error(io::Error::new(
+                error.kind(),
+                format!("child stdout nonblocking setup failed: {error}"),
+            ));
+        }
+        if let Err(error) = set_nonblocking(&stderr) {
+            return self.cleanup_after_error(io::Error::new(
+                error.kind(),
+                format!("child stderr nonblocking setup failed: {error}"),
+            ));
+        }
 
         let deadline = Instant::now() + timeout;
         let mut stdout_capture = PipeCapture::new();
@@ -64,10 +75,75 @@ impl ChildGuard {
         let mut stdout_closed = false;
         let mut stderr_closed = false;
         let mut status = None;
+        let mut stdout_first = true;
 
         loop {
-            stdout_closed = stdout_closed || drain_pipe(&mut stdout, &mut stdout_capture)?;
-            stderr_closed = stderr_closed || drain_pipe(&mut stderr, &mut stderr_capture)?;
+            if Instant::now() >= deadline {
+                return self.cleanup_after_error(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "child did not complete within {timeout:?}; stdout: {}; stderr: {}",
+                        stdout_capture.summary(),
+                        stderr_capture.summary()
+                    ),
+                ));
+            }
+
+            let stdout_before = stdout_capture.total_bytes;
+            let stderr_before = stderr_capture.total_bytes;
+            let drain_result = {
+                let mut drain_stdout = || {
+                    drain_open_pipe(
+                        "stdout",
+                        &mut stdout,
+                        &mut stdout_capture,
+                        &mut stdout_closed,
+                        deadline,
+                    )
+                };
+                let mut drain_stderr = || {
+                    drain_open_pipe(
+                        "stderr",
+                        &mut stderr,
+                        &mut stderr_capture,
+                        &mut stderr_closed,
+                        deadline,
+                    )
+                };
+                if stdout_first {
+                    drain_stdout().and_then(|limit_exceeded| {
+                        if limit_exceeded {
+                            Ok(true)
+                        } else {
+                            drain_stderr()
+                        }
+                    })
+                } else {
+                    drain_stderr().and_then(|limit_exceeded| {
+                        if limit_exceeded {
+                            Ok(true)
+                        } else {
+                            drain_stdout()
+                        }
+                    })
+                }
+            };
+            stdout_first = !stdout_first;
+
+            match drain_result {
+                Ok(true) => {
+                    return self.cleanup_after_error(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "child output exceeded capture limit; stdout: {}; stderr: {}",
+                            stdout_capture.summary(),
+                            stderr_capture.summary()
+                        ),
+                    ));
+                }
+                Ok(false) => {}
+                Err(error) => return self.cleanup_after_error(error),
+            }
 
             if status.is_none() {
                 match self
@@ -78,7 +154,11 @@ impl ChildGuard {
                 {
                     Ok(Some(exited)) => {
                         self.child.take();
-                        self.terminate_process_group()?;
+                        if let Err(error) = self.terminate_process_group() {
+                            return self.cleanup_after_error(io::Error::other(format!(
+                                "process-group cleanup after child exit failed: {error}"
+                            )));
+                        }
                         status = Some(exited);
                     }
                     Ok(None) => {}
@@ -92,16 +172,6 @@ impl ChildGuard {
                 && stdout_closed
                 && stderr_closed
             {
-                if stdout_capture.truncated || stderr_capture.truncated {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "child output exceeded capture limit; stdout: {}; stderr: {}",
-                            stdout_capture.summary(),
-                            stderr_capture.summary()
-                        ),
-                    ));
-                }
                 return Ok(Output {
                     status,
                     stdout: stdout_capture.bytes,
@@ -111,12 +181,7 @@ impl ChildGuard {
 
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                if let Err(error) = self.terminate_and_reap() {
-                    return Err(io::Error::other(format!(
-                        "child cleanup failed after deadline: {error}"
-                    )));
-                }
-                return Err(io::Error::new(
+                return self.cleanup_after_error(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
                         "child did not complete within {timeout:?}; stdout: {}; stderr: {}",
@@ -126,7 +191,11 @@ impl ChildGuard {
                 ));
             }
 
-            thread::sleep(CHILD_POLL_INTERVAL.min(remaining));
+            if stdout_capture.total_bytes == stdout_before
+                && stderr_capture.total_bytes == stderr_before
+            {
+                thread::sleep(CHILD_POLL_INTERVAL.min(remaining));
+            }
         }
     }
 
@@ -134,7 +203,7 @@ impl ChildGuard {
         match self.terminate_and_reap() {
             Ok(()) => Err(error),
             Err(cleanup_error) => Err(io::Error::other(format!(
-                "child wait failed: {error}; cleanup failed: {cleanup_error}"
+                "child operation failed: {error}; cleanup failed: {cleanup_error}"
             ))),
         }
     }
@@ -205,7 +274,7 @@ impl Drop for ChildGuard {
 pub struct PipeCapture {
     pub bytes: Vec<u8>,
     pub total_bytes: usize,
-    pub truncated: bool,
+    truncated: bool,
 }
 
 impl PipeCapture {
@@ -217,11 +286,13 @@ impl PipeCapture {
         }
     }
 
-    fn append(&mut self, bytes: &[u8]) {
+    fn append(&mut self, bytes: &[u8]) -> bool {
         self.total_bytes = self.total_bytes.saturating_add(bytes.len());
         let retained = bytes.len().min(PIPE_CAPTURE_LIMIT - self.bytes.len());
         self.bytes.extend_from_slice(&bytes[..retained]);
-        self.truncated |= retained != bytes.len();
+        let limit_exceeded = retained != bytes.len();
+        self.truncated |= limit_exceeded;
+        limit_exceeded
     }
 
     fn summary(&self) -> String {
@@ -233,59 +304,68 @@ impl PipeCapture {
     }
 }
 
-fn write_lossy_bytes(
-    formatter: &mut std::fmt::Formatter<'_>,
-    mut bytes: &[u8],
-) -> std::fmt::Result {
-    while !bytes.is_empty() {
-        match std::str::from_utf8(bytes) {
-            Ok(text) => return formatter.write_str(text),
-            Err(error) => {
-                let valid_len = error.valid_up_to();
-                if valid_len > 0 {
-                    let valid = std::str::from_utf8(&bytes[..valid_len])
-                        .expect("valid_up_to must delimit valid UTF-8");
-                    formatter.write_str(valid)?;
-                }
-                formatter.write_str("?")?;
-                let invalid_len = error.error_len().unwrap_or(bytes.len() - valid_len);
-                bytes = &bytes[valid_len + invalid_len..];
-            }
-        }
-    }
-    Ok(())
-}
-
-impl std::fmt::Display for PipeCapture {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write_lossy_bytes(formatter, &self.bytes)?;
-        if self.total_bytes > self.bytes.len() {
-            write!(
-                formatter,
-                " [truncated: captured first {} of {} bytes]",
-                self.bytes.len(),
-                self.total_bytes
-            )?;
-        }
-        Ok(())
-    }
-}
-
 fn set_nonblocking(pipe: impl AsFd) -> io::Result<()> {
     let flags = fcntl_getfl(&pipe).map_err(io::Error::from)?;
     fcntl_setfl(&pipe, flags | OFlags::NONBLOCK).map_err(io::Error::from)
 }
 
-pub fn drain_pipe(mut pipe: impl Read, capture: &mut PipeCapture) -> io::Result<bool> {
+#[derive(Debug, PartialEq, Eq)]
+pub enum DrainState {
+    Open,
+    Closed,
+    LimitExceeded,
+}
+
+pub fn drain_pipe(
+    mut pipe: impl Read,
+    capture: &mut PipeCapture,
+    deadline: Instant,
+) -> io::Result<DrainState> {
     let mut buffer = [0u8; 8 * 1024];
-    loop {
+    for _ in 0..PIPE_READ_ATTEMPTS_PER_TURN {
+        if Instant::now() >= deadline {
+            return Ok(DrainState::Open);
+        }
         match pipe.read(&mut buffer) {
-            Ok(0) => return Ok(true),
-            Ok(bytes_read) => capture.append(&buffer[..bytes_read]),
+            Ok(0) => return Ok(DrainState::Closed),
+            Ok(bytes_read) => {
+                if capture.append(&buffer[..bytes_read]) {
+                    return Ok(DrainState::LimitExceeded);
+                }
+            }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Ok(DrainState::Open);
+            }
             Err(error) => return Err(error),
         }
+    }
+    Ok(DrainState::Open)
+}
+
+fn drain_open_pipe(
+    stream: &str,
+    pipe: &mut impl Read,
+    capture: &mut PipeCapture,
+    closed: &mut bool,
+    deadline: Instant,
+) -> io::Result<bool> {
+    if *closed {
+        return Ok(false);
+    }
+    let state = drain_pipe(pipe, capture, deadline).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("child {stream} capture failed: {error}"),
+        )
+    })?;
+    match state {
+        DrainState::Open => Ok(false),
+        DrainState::Closed => {
+            *closed = true;
+            Ok(false)
+        }
+        DrainState::LimitExceeded => Ok(true),
     }
 }
 
