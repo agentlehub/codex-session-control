@@ -968,6 +968,15 @@ fn installer_rejects_nul_suffixed_machine_json_before_mutation() {
 }
 
 fn run_catalog_from(binary: &Path, cwd: &Path, timeout: Duration) -> Result<Vec<Value>, String> {
+    let mut command = Command::new(binary);
+    run_catalog_command(&mut command, cwd, timeout)
+}
+
+fn run_catalog_command(
+    command: &mut Command,
+    cwd: &Path,
+    timeout: Duration,
+) -> Result<Vec<Value>, String> {
     let messages = [
         json!({
             "jsonrpc": "2.0",
@@ -982,14 +991,13 @@ fn run_catalog_from(binary: &Path, cwd: &Path, timeout: Duration) -> Result<Vec<
         json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
         json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
     ];
-    let mut command = Command::new(binary);
     command
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = ChildGuard::spawn(&mut command)
-        .map_err(|_| "generic MCP binary could not start".to_owned())?;
+    let mut child =
+        ChildGuard::spawn(command).map_err(|_| "generic MCP binary could not start".to_owned())?;
     {
         let stdin = child.stdin_mut().expect("generic MCP stdin must be piped");
         for message in messages {
@@ -1137,18 +1145,15 @@ fn generic_client_initializes_and_lists_exact_catalog_from_another_cwd() {
 }
 
 #[test]
-fn generic_client_deadline_reaps_a_slow_staged_process() {
+fn generic_client_deadline_reaps_a_slow_catalog_process() {
     let root = private_tempdir();
-    let slow_server = root.path().join("slow-mcp-server");
-    write_executable(
-        &slow_server,
-        "#!/usr/bin/env bash\nset -euo pipefail\nsleep 1\n",
-    );
+    let mut slow_server = Command::new("sh");
+    slow_server.args(["-c", "sleep 1"]);
 
     let direct_children_before = fs::read_to_string("/proc/thread-self/children")
         .expect("Linux procfs direct-child state must be available");
     let started = std::time::Instant::now();
-    let result = run_catalog_from(&slow_server, root.path(), Duration::from_millis(100));
+    let result = run_catalog_command(&mut slow_server, root.path(), Duration::from_millis(100));
     let direct_children_after = fs::read_to_string("/proc/thread-self/children")
         .expect("Linux procfs direct-child state must be available");
 
@@ -1159,24 +1164,21 @@ fn generic_client_deadline_reaps_a_slow_staged_process() {
     );
     assert!(
         started.elapsed() < Duration::from_secs(1),
-        "generic client deadline must terminate the slow process promptly"
+        "generic client deadline must terminate the slow catalog process promptly"
     );
     assert_eq!(
         direct_children_after, direct_children_before,
-        "generic client deadline must reap the slow staged process"
+        "generic client deadline must reap the slow catalog process"
     );
 }
 
 #[test]
 fn generic_client_reports_capture_failures_separately_from_timeouts() {
     let root = private_tempdir();
-    let oversized_server = root.path().join("oversized-mcp-server");
-    write_executable(
-        &oversized_server,
-        "#!/usr/bin/env bash\nhead -c 65537 /dev/zero\n",
-    );
+    let mut oversized_server = Command::new("sh");
+    oversized_server.args(["-c", "head -c 65537 /dev/zero"]);
 
-    let result = run_catalog_from(&oversized_server, root.path(), GENERIC_MCP_EXIT_TIMEOUT);
+    let result = run_catalog_command(&mut oversized_server, root.path(), GENERIC_MCP_EXIT_TIMEOUT);
 
     assert_eq!(
         result,
