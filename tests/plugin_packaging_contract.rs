@@ -997,9 +997,15 @@ fn run_catalog_from(binary: &Path, cwd: &Path, timeout: Duration) -> Result<Vec<
         }
     }
     child.close_stdin();
-    let output = child
-        .wait_with_output(timeout)
-        .map_err(|_| "generic MCP binary did not complete within its deadline".to_owned())?;
+    let output = match child.wait_with_output(timeout) {
+        Ok(output) => output,
+        Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+            return Err("generic MCP binary did not complete within its deadline".to_owned());
+        }
+        Err(_) => {
+            return Err("generic MCP binary failed while collecting a complete result".to_owned());
+        }
+    };
     if !output.status.success() {
         return Err("generic MCP binary did not exit successfully".to_owned());
     }
@@ -1163,6 +1169,23 @@ fn generic_client_deadline_reaps_a_slow_staged_process() {
     assert!(
         !Path::new(&format!("/proc/{pid}")).exists(),
         "generic client deadline must reap the slow staged process"
+    );
+}
+
+#[test]
+fn generic_client_reports_capture_failures_separately_from_timeouts() {
+    let root = private_tempdir();
+    let oversized_server = root.path().join("oversized-mcp-server");
+    write_executable(
+        &oversized_server,
+        "#!/usr/bin/env bash\nhead -c 65537 /dev/zero\n",
+    );
+
+    let result = run_catalog_from(&oversized_server, root.path(), GENERIC_MCP_EXIT_TIMEOUT);
+
+    assert_eq!(
+        result,
+        Err("generic MCP binary failed while collecting a complete result".to_owned())
     );
 }
 
