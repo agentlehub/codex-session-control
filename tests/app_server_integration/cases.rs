@@ -9,6 +9,7 @@ use std::{
     path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
+    time::Duration,
 };
 
 use futures_util::{FutureExt, SinkExt, StreamExt};
@@ -31,6 +32,7 @@ const STAGING_NAME: &str = "current.next";
 const LOCK_NAME: &str = "lock";
 const RUNS_NAME: &str = "runs";
 const MAX_JOURNAL_BYTES: usize = 4 * 1024 * 1024;
+const HARD_KILL_BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
 type LiveRunResult = Result<Result<(), LiveCode>, Box<dyn std::any::Any + Send>>;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2327,19 +2329,22 @@ async fn execute_live_mode(mode: LiveMode, opt_in: Option<&OsStr>) -> Result<(),
         return finish_live_result(cleanup_result, preflight_result);
     }
 
-    let run_result = AssertUnwindSafe(run_all_thirteen_tools(&mut harness, &mut ledger))
+    let mut run_result = AssertUnwindSafe(run_all_thirteen_tools(&mut harness, &mut ledger))
         .catch_unwind()
         .await;
     if mode == LiveMode::HardKill && matches!(run_result, Ok(Ok(()))) {
-        let budget = CleanupBudget::new();
-        harness.stop_and_reap_mcp_child(budget).await?;
-        budget.check()?;
-        println!("{}", LiveCode::HardKillReady);
-        std::io::stdout()
-            .flush()
-            .map_err(|_| LiveCode::ToolFailed)?;
-        std::future::pending::<()>().await;
-        unreachable!("hard-kill mode is terminated only by its private runner")
+        let handshake = (|| {
+            let mut output = std::io::stdout().lock();
+            // End libtest's in-progress `test ...` line before the exact runner token.
+            writeln!(output, "\n{}", LiveCode::HardKillReady)?;
+            output.flush()
+        })();
+        if handshake.is_ok() {
+            tokio::time::sleep(HARD_KILL_BARRIER_TIMEOUT).await;
+            run_result = Ok(Err(LiveCode::DeadlineExceeded));
+        } else {
+            run_result = Ok(Err(LiveCode::ToolFailed));
+        }
     }
 
     let budget = CleanupBudget::new();
