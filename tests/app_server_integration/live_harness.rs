@@ -5,7 +5,7 @@ use std::{
     os::unix::fs::{FileTypeExt, MetadataExt},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{Arc, Mutex},
+    sync::Mutex,
     time::Duration,
 };
 
@@ -63,7 +63,7 @@ const SESSION_CONTROL_TOOLS: [&str; 13] = [
 #[derive(Debug)]
 enum EndpointSource {
     Desktop {
-        deterministic_sockets: Option<Arc<Mutex<VecDeque<PathBuf>>>>,
+        deterministic_sockets: Option<Mutex<VecDeque<PathBuf>>>,
     },
     Fixed(PathBuf),
 }
@@ -195,7 +195,7 @@ impl LiveHarness {
         Ok(Self {
             workspace,
             endpoint_source: EndpointSource::Desktop {
-                deterministic_sockets: Some(Arc::new(Mutex::new(sockets.into()))),
+                deterministic_sockets: Some(Mutex::new(sockets.into())),
             },
             mcp: None,
         })

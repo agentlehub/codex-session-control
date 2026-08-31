@@ -12,12 +12,11 @@ use crate::error::{ToolErrorCategory, ToolErrorData};
 #[cfg(test)]
 use super::endpoint_policy::{
     APP_ID_ENV as CODEX_LINUX_APP_ID, BRIDGE_SOCKET_ENV as CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET,
-    RUNTIME_DIR_ENV as XDG_RUNTIME_DIR,
+    RUNTIME_DIR_ENV as XDG_RUNTIME_DIR, owned_private_directory, owned_private_socket,
 };
 use super::endpoint_policy::{
     EndpointMetadata, EndpointResolutionError, ResolvedEndpoint, endpoint_metadata_is_safe,
-    is_normalized_absolute_path, owned_private_directory, owned_private_socket,
-    resolve_endpoint_with,
+    is_normalized_absolute_path, resolve_endpoint_with,
 };
 
 const SOCKET_VALIDATION_STAGE: &str = "socket_validation";
@@ -109,6 +108,7 @@ fn selected_lstat(path: &Path) -> Result<Stat, ToolErrorData> {
     }
 }
 
+#[cfg(test)]
 fn owned_directory_is_private(st_uid: u32, st_mode: u32, euid: u32) -> bool {
     owned_private_directory(
         st_uid,
@@ -118,6 +118,7 @@ fn owned_directory_is_private(st_uid: u32, st_mode: u32, euid: u32) -> bool {
     )
 }
 
+#[cfg(test)]
 fn owned_socket_is_private(st_uid: u32, st_mode: u32, euid: u32) -> bool {
     owned_private_socket(
         st_uid,

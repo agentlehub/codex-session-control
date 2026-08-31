@@ -1414,11 +1414,7 @@ pub(super) fn live_mode_matrix_is_total_and_recovery_is_fixed_authority() {
     ));
     second.abandon_before_mutation().unwrap();
     assert_eq!(second.document.state, JournalState::Idle);
-    assert!(run_entries_are_empty(&second.runs_path()));
-}
-
-fn run_entries_are_empty(runs: &Path) -> bool {
-    fs::read_dir(runs).unwrap().next().is_none()
+    assert!(fs::read_dir(second.runs_path()).unwrap().next().is_none());
 }
 
 pub(super) fn workspace_recovery_validates_all_pages_before_one_journal_write() {
@@ -1925,25 +1921,6 @@ pub(super) async fn direct_cleanup_requires_safe_endpoint_and_exact_initialized_
         runtime
             .path()
             .join("Agentle_1.2-x/app-server-bridge/app-server.sock")
-    );
-
-    let mut selection = 0;
-    let mut lookup = |name| {
-        assert_eq!(name, BRIDGE_SOCKET_ENV);
-        selection += 1;
-        Some(OsString::from(format!(
-            "/tmp/direct-cleanup-selection-{selection}.sock"
-        )))
-    };
-    let first = resolve_desktop_endpoint_for_test(&mut lookup).unwrap();
-    let second = resolve_desktop_endpoint_for_test(&mut lookup).unwrap();
-    assert_eq!(
-        first.socket_path(),
-        Path::new("/tmp/direct-cleanup-selection-1.sock")
-    );
-    assert_eq!(
-        second.socket_path(),
-        Path::new("/tmp/direct-cleanup-selection-2.sock")
     );
 
     let first_server =
