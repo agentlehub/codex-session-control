@@ -213,32 +213,43 @@ cleanup_owned_test_inner() {
 }
 
 cleanup_owned_test() {
-  cleanup_owned_test_inner >>"$private_wait_capture" 2>&1
+  {
+    cleanup_owned_test_inner >>"$private_wait_capture" 2>&1
+  } 2>/dev/null
 }
 
 kill_owned_group_and_wait() {
   {
-    signal_group KILL "$test_pgid" || return 1
-    wait_until_leader_is_waitable \
-      "$test_leader" "$((SECONDS + reap_grace_seconds))" || return 1
-    private_wait_for_leader "$test_leader" || return 1
-    confirm_group_absent \
-      "$test_pgid" "$((SECONDS + reap_grace_seconds))" || return 1
-    release_owned_test || return 1
-  } >>"$private_wait_capture" 2>&1
+    {
+      signal_group KILL "$test_pgid" || return 1
+      wait_until_leader_is_waitable \
+        "$test_leader" "$((SECONDS + reap_grace_seconds))" || return 1
+      private_wait_for_leader "$test_leader" || return 1
+      confirm_group_absent \
+        "$test_pgid" "$((SECONDS + reap_grace_seconds))" || return 1
+      release_owned_test || return 1
+    } >>"$private_wait_capture" 2>&1
+  } 2>/dev/null
 }
 
 cleanup_capture() {
+  local capture_cleanup_failed=0
   if ! cleanup_owned_test; then
     ownership_failure=1
   fi
   if [[ -n "$capture_root" ]] &&
     [[ "$capture_root" == "${TMPDIR:-/tmp}"/codex-session-control-live-proof.* ]] &&
     [[ -d "$capture_root" ]]; then
-    rm -rf -- "$capture_root"
+    if ! rm -rf -- "$capture_root" 2>/dev/null; then
+      capture_cleanup_failed=1
+    fi
   fi
   capture_root=
   private_wait_capture=/dev/null
+  if [[ "$capture_cleanup_failed" -ne 0 ]]; then
+    printf '%s\n' cleanup_failed >&2
+    return 1
+  fi
 }
 
 handle_signal() {
@@ -253,21 +264,69 @@ trap 'handle_signal 129' HUP
 trap 'handle_signal 130' INT
 trap 'handle_signal 143' TERM
 
+capture_setup_failed() {
+  if ! cleanup_capture; then
+    return 1
+  fi
+  printf '%s\n' tool_failed >&2
+  return 1
+}
+
 new_capture_root() {
-  capture_root="$(
-    mktemp -d "${TMPDIR:-/tmp}/codex-session-control-live-proof.XXXXXX"
-  )"
-  chmod 0700 "$capture_root"
-  [[ "$(stat --format=%a "$capture_root")" == 700 ]]
+  local mode
+  if ! capture_root="$(
+    mktemp -d "${TMPDIR:-/tmp}/codex-session-control-live-proof.XXXXXX" 2>/dev/null
+  )"; then
+    capture_setup_failed
+    return 1
+  fi
+  if ! chmod 0700 "$capture_root" 2>/dev/null; then
+    capture_setup_failed
+    return 1
+  fi
+  if ! mode="$(stat --format=%a "$capture_root" 2>/dev/null)" || [[ "$mode" != 700 ]]; then
+    capture_setup_failed
+    return 1
+  fi
   private_wait_capture="$capture_root/private-wait"
   new_capture_file "$private_wait_capture"
 }
 
 new_capture_file() {
   local path="$1"
-  : >"$path"
-  chmod 0600 "$path"
-  [[ "$(stat --format=%a "$path")" == 600 ]]
+  local mode
+  if ! : 2>/dev/null >"$path"; then
+    capture_setup_failed
+    return 1
+  fi
+  if ! chmod 0600 "$path" 2>/dev/null; then
+    capture_setup_failed
+    return 1
+  fi
+  if ! mode="$(stat --format=%a "$path" 2>/dev/null)" || [[ "$mode" != 600 ]]; then
+    capture_setup_failed
+    return 1
+  fi
+}
+
+live_test_environment() {
+  local mode="$1"
+  local -n result="$2"
+  result=(
+    --unset=CODEX_SESSION_CONTROL_LIVE_HARD_KILL
+    --unset=CODEX_SESSION_CONTROL_LIVE_RECOVER
+    CODEX_SESSION_CONTROL_LIVE_ALL_TOOLS=1
+  )
+  case "$mode" in
+    normal) ;;
+    hard-kill)
+      result+=(CODEX_SESSION_CONTROL_LIVE_HARD_KILL=1)
+      ;;
+    recovery)
+      result+=(CODEX_SESSION_CONTROL_LIVE_RECOVER=1)
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 assert_private_wait_and_group_cleanup_for_self_test() {
@@ -396,6 +455,112 @@ assert_hard_kill_helper_fail_fast_for_self_test() {
   [[ ! -s "$public_capture" ]]
 }
 
+assert_live_mode_environment_for_self_test() {
+  local self_root="$1"
+  local capture="$self_root/live-mode-environment"
+  local mode expected
+  local -a environment
+  new_capture_file "$capture"
+
+  for mode in normal hard-kill recovery; do
+    environment=()
+    live_test_environment "$mode" environment
+    # The observed shell must expand its own environment.
+    # shellcheck disable=SC2016
+    CODEX_SESSION_CONTROL_LIVE_HARD_KILL=hostile \
+      CODEX_SESSION_CONTROL_LIVE_RECOVER=hostile \
+      env "${environment[@]}" /bin/sh -c '
+      printf "all_tools=%s\nhard_kill=%s\nrecovery=%s\n" \
+        "${CODEX_SESSION_CONTROL_LIVE_ALL_TOOLS-absent}" \
+        "${CODEX_SESSION_CONTROL_LIVE_HARD_KILL-absent}" \
+        "${CODEX_SESSION_CONTROL_LIVE_RECOVER-absent}"
+    ' >"$capture" 2>&1
+    case "$mode" in
+      normal) expected=$'all_tools=1\nhard_kill=absent\nrecovery=absent' ;;
+      hard-kill) expected=$'all_tools=1\nhard_kill=1\nrecovery=absent' ;;
+      recovery) expected=$'all_tools=1\nhard_kill=absent\nrecovery=1' ;;
+    esac
+    [[ "$(<"$capture")" == "$expected" ]]
+  done
+}
+
+probe_capture_setup_failure_for_self_test() {
+  local missing_tmpdir="$1"
+  local saved_capture_root="$capture_root"
+  local saved_private_wait_capture="$private_wait_capture"
+  local status
+  capture_root=
+  private_wait_capture=/dev/null
+  if TMPDIR="$missing_tmpdir" new_capture_root; then
+    status=0
+  else
+    status=$?
+  fi
+  capture_root="$saved_capture_root"
+  private_wait_capture="$saved_private_wait_capture"
+  return "$status"
+}
+
+probe_capture_cleanup_failure_for_self_test() {
+  local cleanup_target="$1"
+  local saved_capture_root="$capture_root"
+  local saved_private_wait_capture="$private_wait_capture"
+  local status
+  capture_root="$cleanup_target"
+  private_wait_capture=/dev/null
+  rm() {
+    printf 'raw rm diagnostic for %s\n' "$*" >&2
+    return 1
+  }
+  if cleanup_capture; then
+    status=0
+  else
+    status=$?
+  fi
+  unset -f rm
+  capture_root="$saved_capture_root"
+  private_wait_capture="$saved_private_wait_capture"
+  return "$status"
+}
+
+assert_capture_failure_boundaries_for_self_test() {
+  local self_root="$1"
+  local setup_stdout="$self_root/setup.stdout"
+  local setup_stderr="$self_root/setup.stderr"
+  local cleanup_stdout="$self_root/cleanup.stdout"
+  local cleanup_stderr="$self_root/cleanup.stderr"
+  local cleanup_target="$self_root/cleanup-target"
+  local status
+  new_capture_file "$setup_stdout"
+  new_capture_file "$setup_stderr"
+  new_capture_file "$cleanup_stdout"
+  new_capture_file "$cleanup_stderr"
+
+  if probe_capture_setup_failure_for_self_test \
+    "$self_root/absent" >"$setup_stdout" 2>"$setup_stderr"; then
+    status=0
+  else
+    status=$?
+  fi
+  [[ "$status" -ne 0 ]]
+  [[ ! -s "$setup_stdout" ]]
+  [[ "$(<"$setup_stderr")" == tool_failed ]]
+
+  if ! mkdir -m 0700 "$cleanup_target" 2>/dev/null; then
+    printf '%s\n' tool_failed >&2
+    return 1
+  fi
+  if probe_capture_cleanup_failure_for_self_test \
+    "$cleanup_target" >"$cleanup_stdout" 2>"$cleanup_stderr"; then
+    status=0
+  else
+    status=$?
+  fi
+  [[ "$status" -ne 0 ]]
+  [[ ! -s "$cleanup_stdout" ]]
+  [[ "$(<"$cleanup_stderr")" == cleanup_failed ]]
+}
+
 run_self_test() {
   local self_root capture
   new_capture_root
@@ -406,6 +571,8 @@ run_self_test() {
   [[ "$(stat --format=%a "$self_root")" == 700 ]]
   printf '%s\n%s\n' hard_kill_ready hard_kill_ready_suffix >"$capture"
   [[ "$(grep -Fxc hard_kill_ready "$capture")" -eq 1 ]]
+  assert_live_mode_environment_for_self_test "$self_root"
+  assert_capture_failure_boundaries_for_self_test "$self_root"
   assert_hard_kill_helper_fail_fast_for_self_test "$self_root"
   assert_private_wait_and_group_cleanup_for_self_test "$self_root"
   cleanup_capture
@@ -487,22 +654,11 @@ spawn_live_test() {
   local stderr_path="$3"
   new_capture_file "$stdout_path"
   new_capture_file "$stderr_path"
-  local -a environment=(
-    "CODEX_SESSION_CONTROL_LIVE_ALL_TOOLS=1"
-  )
-  case "$mode" in
-    normal) ;;
-    hard-kill)
-      environment+=("CODEX_SESSION_CONTROL_LIVE_HARD_KILL=1")
-      ;;
-    recovery)
-      environment+=("CODEX_SESSION_CONTROL_LIVE_RECOVER=1")
-      ;;
-    *)
-      printf '%s\n' opt_in_rejected >&2
-      exit 1
-      ;;
-  esac
+  local -a environment
+  if ! live_test_environment "$mode" environment; then
+    printf '%s\n' opt_in_rejected >&2
+    exit 1
+  fi
   setsid env "${environment[@]}" \
     "$harness" "$live_test_name" \
     --exact --ignored --nocapture --test-threads=1 \
@@ -539,7 +695,9 @@ wait_for_test_inner() {
 }
 
 wait_for_test() {
-  wait_for_test_inner >>"$private_wait_capture" 2>&1
+  {
+    wait_for_test_inner >>"$private_wait_capture" 2>&1
+  } 2>/dev/null
 }
 
 emit_captured_failure() {
