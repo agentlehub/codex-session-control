@@ -29,6 +29,7 @@ cleanup_failure_code=
 cleanup_failure_reported=0
 pending_failure_code=
 production_failure_boundary=0
+rendered_failure_code=
 
 readonly term_grace_seconds=2
 readonly reap_grace_seconds=3
@@ -242,6 +243,7 @@ record_failure() {
     pending_failure_code="$code"
   else
     printf '%s\n' "$code" >&2
+    rendered_failure_code="$code"
   fi
 }
 
@@ -254,7 +256,7 @@ cleanup_capture() {
     cleanup_failure_code=child_reap_failed
     if [[ "$production_failure_boundary" -eq 0 ]] &&
       [[ "$cleanup_failure_reported" -eq 0 ]]; then
-      printf '%s\n' "$cleanup_failure_code" >&2
+      record_failure "$cleanup_failure_code"
       cleanup_failure_reported=1
     fi
     return 1
@@ -266,7 +268,7 @@ cleanup_capture() {
       cleanup_failure_code=cleanup_failed
       if [[ "$production_failure_boundary" -eq 0 ]] &&
         [[ "$cleanup_failure_reported" -eq 0 ]]; then
-        printf '%s\n' "$cleanup_failure_code" >&2
+        record_failure "$cleanup_failure_code"
         cleanup_failure_reported=1
       fi
       return 1
@@ -285,11 +287,14 @@ finalize() {
     winning_code="$cleanup_failure_code"
   elif [[ -n "$pending_failure_code" ]]; then
     winning_code="$pending_failure_code"
-  elif [[ "$source" == exit && "$status" -ne 0 ]]; then
+  elif [[ "$source" == exit && "$status" -ne 0 ]] &&
+    [[ -z "$rendered_failure_code" ]]; then
     winning_code=tool_failed
   fi
   if [[ -n "$winning_code" ]]; then
-    printf '%s\n' "$winning_code" >&2
+    if [[ "$winning_code" != "$rendered_failure_code" ]]; then
+      printf '%s\n' "$winning_code" >&2
+    fi
     exit 1
   fi
   exit "$status"
@@ -556,9 +561,11 @@ probe_capture_setup_failure_for_self_test() {
   local missing_tmpdir="$1"
   local saved_capture_root="$capture_root"
   local saved_private_wait_capture="$private_wait_capture"
+  local saved_rendered_failure_code="$rendered_failure_code"
   local status
   capture_root=
   private_wait_capture=/dev/null
+  rendered_failure_code=
   if TMPDIR="$missing_tmpdir" new_capture_root; then
     status=0
   else
@@ -566,34 +573,36 @@ probe_capture_setup_failure_for_self_test() {
   fi
   capture_root="$saved_capture_root"
   private_wait_capture="$saved_private_wait_capture"
+  rendered_failure_code="$saved_rendered_failure_code"
   return "$status"
 }
 
 probe_capture_cleanup_failure_for_self_test() {
   local cleanup_target="$1"
-  local saved_capture_root="$capture_root"
-  local saved_private_wait_capture="$private_wait_capture"
-  local saved_cleanup_failure_code="$cleanup_failure_code"
-  local saved_cleanup_failure_reported="$cleanup_failure_reported"
   local status
-  capture_root="$cleanup_target"
-  private_wait_capture=/dev/null
-  cleanup_failure_code=
-  cleanup_failure_reported=0
-  rm() {
-    printf 'raw rm diagnostic for %s\n' "$*" >&2
-    return 1
-  }
-  if cleanup_capture; then
+  if (
+    capture_root="$cleanup_target"
+    private_wait_capture=/dev/null
+    cleanup_failure_code=
+    cleanup_failure_reported=0
+    production_failure_boundary=0
+    # shellcheck disable=SC2317
+    rm() {
+      printf 'raw rm diagnostic for %s\n' "$*" >&2
+      return 1
+    }
+    trap 'finalize "$?" exit' EXIT
+    if cleanup_capture; then
+      status=0
+    else
+      status=$?
+    fi
+    exit "$status"
+  ); then
     status=0
   else
     status=$?
   fi
-  unset -f rm
-  capture_root="$saved_capture_root"
-  private_wait_capture="$saved_private_wait_capture"
-  cleanup_failure_code="$saved_cleanup_failure_code"
-  cleanup_failure_reported="$saved_cleanup_failure_reported"
   return "$status"
 }
 
@@ -604,6 +613,8 @@ assert_capture_failure_boundaries_for_self_test() {
   local cleanup_stdout="$self_root/cleanup.stdout"
   local cleanup_stderr="$self_root/cleanup.stderr"
   local cleanup_target="$self_root/cleanup-target"
+  local cleanup_evidence="$cleanup_target/private-evidence"
+  local runner="${BASH_SOURCE[0]}"
   local status
   new_capture_file "$setup_stdout"
   new_capture_file "$setup_stderr"
@@ -624,6 +635,9 @@ assert_capture_failure_boundaries_for_self_test() {
     printf '%s\n' tool_failed >&2
     return 1
   fi
+  new_capture_file "$cleanup_evidence"
+  printf 'private path=%s pid=%s command=%s\n' \
+    "$cleanup_target" 424242 'sleep 30' >"$cleanup_evidence"
   if probe_capture_cleanup_failure_for_self_test \
     "$cleanup_target" >"$cleanup_stdout" 2>"$cleanup_stderr"; then
     status=0
@@ -633,6 +647,29 @@ assert_capture_failure_boundaries_for_self_test() {
   [[ "$status" -ne 0 ]]
   [[ ! -s "$cleanup_stdout" ]]
   [[ "$(<"$cleanup_stderr")" == cleanup_failed ]]
+  [[ -d "$cleanup_target" ]]
+  [[ -s "$cleanup_evidence" ]]
+  if grep -Fq "$cleanup_target" "$cleanup_stderr" ||
+    grep -Fq 424242 "$cleanup_stderr" ||
+    grep -Fq 'sleep 30' "$cleanup_stderr" ||
+    grep -Fq 'raw rm diagnostic' "$cleanup_stderr"; then
+    return 1
+  fi
+  if ! rm -rf -- "$cleanup_target" 2>/dev/null; then
+    printf '%s\n' cleanup_failed >&2
+    return 1
+  fi
+  [[ ! -e "$cleanup_target" ]]
+
+  if TMPDIR="$self_root/absent" timeout 5s "$runner" --self-test \
+    >"$setup_stdout" 2>"$setup_stderr"; then
+    status=0
+  else
+    status=$?
+  fi
+  [[ "$status" -eq 1 ]]
+  [[ ! -s "$setup_stdout" ]]
+  [[ "$(<"$setup_stderr")" == tool_failed ]]
 }
 
 assert_runtime_journal_preflight_for_self_test() {
@@ -640,6 +677,8 @@ assert_runtime_journal_preflight_for_self_test() {
   local stdout_capture="$self_root/runtime-preflight.stdout"
   local stderr_capture="$self_root/runtime-preflight.stderr"
   local candidate journal_path status
+  local saved_rendered_failure_code="$rendered_failure_code"
+  rendered_failure_code=
   new_capture_file "$stdout_capture"
   new_capture_file "$stderr_capture"
 
@@ -663,6 +702,7 @@ assert_runtime_journal_preflight_for_self_test() {
   [[ "$journal_path" == /run/user/1000/codex-session-control/live-test/current.json ]]
   [[ ! -s "$stdout_capture" ]]
   [[ ! -s "$stderr_capture" ]]
+  rendered_failure_code="$saved_rendered_failure_code"
 }
 
 run_finalizer_context_for_self_test() {
@@ -671,7 +711,8 @@ run_finalizer_context_for_self_test() {
   capture_root="$2"
   private_wait_capture="$3"
   pending_failure_code="$4"
-  production_failure_boundary=1
+  production_failure_boundary="$6"
+  rendered_failure_code=
   test_leader=424242
   test_pgid=424242
   leader_reaped=0
@@ -703,19 +744,19 @@ run_finalizer_context_for_self_test() {
 
 assert_final_emission_for_self_test() {
   local self_root="$1"
-  local definition scenario context pending cleanup_outcome expected expected_status retained
+  local definition scenario context pending cleanup_outcome expected expected_status retained boundary
   local retained_root private_evidence stdout_capture stderr_capture status
 
   for definition in \
-    'bare-exit|exit|none|failure|child_reap_failed|1|1' \
-    'signal-cleanup-failure|signal|none|failure|child_reap_failed|1|1' \
-    'prior-deadline-cleanup-failure|exit|deadline_exceeded|failure|child_reap_failed|1|1' \
-    'prior-child-reap-cleanup-failure|exit|child_reap_failed|failure|child_reap_failed|1|1' \
-    'pending-deadline-cleanup-success|exit|deadline_exceeded|success|deadline_exceeded|1|0' \
-    'unexpected-nonzero-cleanup-success|exit|none|success|tool_failed|1|0' \
-    'signal-cleanup-success|signal|none|success|none|143|0'; do
+    'bare-exit|exit|none|failure|child_reap_failed|1|1|1' \
+    'signal-cleanup-failure|signal|none|failure|child_reap_failed|1|1|1' \
+    'prior-deadline-cleanup-failure|exit|deadline_exceeded|failure|child_reap_failed|1|1|1' \
+    'prior-child-reap-cleanup-failure|exit|child_reap_failed|failure|child_reap_failed|1|1|1' \
+    'pending-deadline-cleanup-success|exit|deadline_exceeded|success|deadline_exceeded|1|0|1' \
+    'unexpected-nonzero-cleanup-success|exit|none|success|tool_failed|1|0|0' \
+    'signal-cleanup-success|signal|none|success|none|143|0|1'; do
     IFS='|' read -r \
-      scenario context pending cleanup_outcome expected expected_status retained \
+      scenario context pending cleanup_outcome expected expected_status retained boundary \
       <<<"$definition"
     if [[ "$pending" == none ]]; then
       pending=
@@ -738,7 +779,7 @@ assert_final_emission_for_self_test() {
     if (
       run_finalizer_context_for_self_test \
         "$context" "$retained_root" "$private_evidence" \
-        "$pending" "$cleanup_outcome"
+        "$pending" "$cleanup_outcome" "$boundary"
     ) >"$stdout_capture" 2>"$stderr_capture"; then
       status=0
     else
