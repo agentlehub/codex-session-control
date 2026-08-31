@@ -1,11 +1,11 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     error::Error,
-    ffi::OsString,
     fmt, fs, io,
     os::unix::fs::{FileTypeExt, MetadataExt},
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -21,7 +21,9 @@ use tokio_tungstenite::{WebSocketStream, client_async, tungstenite::Message};
 
 use crate::cases::OwnedThreadId;
 use crate::endpoint_policy::{
-    InitializedIdentity, is_normalized_absolute_path, owned_private_directory, owned_private_socket,
+    BRIDGE_SOCKET_ENV, EndpointMetadata, EndpointResolutionError, InitializedIdentity,
+    ResolvedEndpoint, endpoint_metadata_is_safe, is_normalized_absolute_path,
+    resolve_endpoint_with,
 };
 
 const EXPECTED_CODEX_VERSION: &str = env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION");
@@ -59,76 +61,102 @@ const SESSION_CONTROL_TOOLS: [&str; 13] = [
 ];
 
 #[derive(Debug)]
-struct NativeEndpoint {
-    socket_path: PathBuf,
-    kind: NativeEndpointKind,
-}
-
-#[derive(Debug)]
-enum NativeEndpointKind {
-    Explicit,
-    Derived {
-        runtime_dir: PathBuf,
-        app_dir: PathBuf,
-        bridge_dir: PathBuf,
+enum EndpointSource {
+    Desktop {
+        deterministic_sockets: Option<Arc<Mutex<VecDeque<PathBuf>>>>,
     },
+    Fixed(PathBuf),
 }
 
-impl NativeEndpoint {
-    fn explicit(socket_path: PathBuf) -> Self {
-        Self {
-            socket_path,
-            kind: NativeEndpointKind::Explicit,
+impl EndpointSource {
+    fn resolve(&self) -> io::Result<ResolvedEndpoint> {
+        match self {
+            Self::Desktop {
+                deterministic_sockets: Some(sockets),
+            } => {
+                let socket = sockets
+                    .lock()
+                    .map_err(|_| socket_validation_error())?
+                    .pop_front()
+                    .ok_or_else(socket_validation_error)?;
+                self.resolve_with(|name| {
+                    (name == BRIDGE_SOCKET_ENV).then(|| socket.as_os_str().to_owned())
+                })
+            }
+            Self::Desktop {
+                deterministic_sockets: None,
+            } => self.resolve_with(std::env::var_os::<&'static str>),
+            Self::Fixed(socket_path) => Ok(ResolvedEndpoint::explicit(socket_path.clone())),
         }
     }
 
-    fn validate(&self) -> io::Result<()> {
-        if !is_normalized_absolute_path(&self.socket_path) {
-            return Err(socket_validation_error());
+    fn resolve_with(
+        &self,
+        lookup: impl FnMut(&'static str) -> Option<std::ffi::OsString>,
+    ) -> io::Result<ResolvedEndpoint> {
+        match self {
+            Self::Desktop { .. } => resolve_endpoint_with(lookup).map_err(|error| match error {
+                EndpointResolutionError::TargetUnavailable | EndpointResolutionError::Rejected => {
+                    socket_validation_error()
+                }
+            }),
+            Self::Fixed(socket_path) => Ok(ResolvedEndpoint::explicit(socket_path.clone())),
         }
-        if let NativeEndpointKind::Derived {
-            runtime_dir,
-            app_dir,
-            bridge_dir,
-        } = &self.kind
-        {
-            validate_private_directory(runtime_dir)?;
-            validate_private_directory(app_dir)?;
-            validate_private_directory(bridge_dir)?;
-        }
-        let parent = self
-            .socket_path
-            .parent()
-            .ok_or_else(socket_validation_error)?;
-        validate_private_directory(parent)?;
-        if fs::canonicalize(parent)
-            .map_err(|_| socket_validation_error())?
-            .as_os_str()
-            != parent.as_os_str()
-        {
-            return Err(socket_validation_error());
-        }
-        let metadata =
-            fs::symlink_metadata(&self.socket_path).map_err(|_| socket_validation_error())?;
-        if !owned_private_socket(
-            metadata.uid(),
-            metadata.mode(),
-            rustix::process::geteuid().as_raw(),
-            metadata.file_type().is_socket(),
-        ) {
-            return Err(socket_validation_error());
-        }
-        Ok(())
     }
 }
 
-fn validate_private_directory(path: &Path) -> io::Result<()> {
+pub(super) fn resolve_desktop_endpoint_for_test(
+    lookup: impl FnMut(&'static str) -> Option<std::ffi::OsString>,
+) -> io::Result<ResolvedEndpoint> {
+    EndpointSource::Desktop {
+        deterministic_sockets: None,
+    }
+    .resolve_with(lookup)
+}
+
+fn selected_directory_metadata(path: &Path) -> io::Result<EndpointMetadata> {
     let metadata = fs::symlink_metadata(path).map_err(|_| socket_validation_error())?;
-    if owned_private_directory(
-        metadata.uid(),
-        metadata.mode(),
+    Ok(EndpointMetadata {
+        owner: metadata.uid(),
+        mode: metadata.mode(),
+        expected_type: metadata.file_type().is_dir(),
+    })
+}
+
+fn validate_native_endpoint(endpoint: &ResolvedEndpoint) -> io::Result<()> {
+    if !is_normalized_absolute_path(endpoint.socket_path()) {
+        return Err(socket_validation_error());
+    }
+    let derived = match endpoint.derived_directories() {
+        Some([runtime, app, bridge]) => Some([
+            selected_directory_metadata(runtime)?,
+            selected_directory_metadata(app)?,
+            selected_directory_metadata(bridge)?,
+        ]),
+        None => None,
+    };
+    let parent = endpoint
+        .socket_path()
+        .parent()
+        .ok_or_else(socket_validation_error)?;
+    let parent_metadata = selected_directory_metadata(parent)?;
+    let parent_is_canonical = fs::canonicalize(parent)
+        .map_err(|_| socket_validation_error())?
+        .as_os_str()
+        == parent.as_os_str();
+    let socket =
+        fs::symlink_metadata(endpoint.socket_path()).map_err(|_| socket_validation_error())?;
+    if endpoint_metadata_is_safe(
+        endpoint,
         rustix::process::geteuid().as_raw(),
-        metadata.file_type().is_dir(),
+        derived,
+        parent_metadata,
+        parent_is_canonical,
+        EndpointMetadata {
+            owner: socket.uid(),
+            mode: socket.mode(),
+            expected_type: socket.file_type().is_socket(),
+        },
     ) {
         Ok(())
     } else {
@@ -142,7 +170,7 @@ fn socket_validation_error() -> io::Error {
 
 pub(super) struct LiveHarness {
     workspace: PathBuf,
-    endpoint: NativeEndpoint,
+    endpoint_source: EndpointSource,
     mcp: Option<McpClient>,
 }
 
@@ -150,7 +178,25 @@ impl LiveHarness {
     pub(super) fn from_ledger(workspace: &Path) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             workspace: workspace.to_path_buf(),
-            endpoint: desktop_endpoint()?,
+            endpoint_source: EndpointSource::Desktop {
+                deterministic_sockets: None,
+            },
+            mcp: None,
+        })
+    }
+
+    pub(super) fn for_test_desktop_sockets(
+        workspace: PathBuf,
+        sockets: Vec<PathBuf>,
+    ) -> io::Result<Self> {
+        if sockets.is_empty() {
+            return Err(socket_validation_error());
+        }
+        Ok(Self {
+            workspace,
+            endpoint_source: EndpointSource::Desktop {
+                deterministic_sockets: Some(Arc::new(Mutex::new(sockets.into()))),
+            },
             mcp: None,
         })
     }
@@ -158,7 +204,7 @@ impl LiveHarness {
     pub(super) fn for_test_native_socket(workspace: PathBuf, socket: PathBuf) -> io::Result<Self> {
         Ok(Self {
             workspace,
-            endpoint: NativeEndpoint::explicit(socket),
+            endpoint_source: EndpointSource::Fixed(socket),
             mcp: None,
         })
     }
@@ -223,7 +269,8 @@ impl LiveHarness {
     }
 
     pub(super) async fn connect_native(&self) -> Result<NativeConnection, Box<dyn Error>> {
-        NativeConnection::connect(&self.endpoint).await
+        let endpoint = self.endpoint_source.resolve()?;
+        NativeConnection::connect(&endpoint).await
     }
 
     pub(super) async fn workspace_thread_ids(
@@ -254,15 +301,25 @@ impl LiveHarness {
             return Ok(());
         };
         mcp.stdin.take();
-        if tokio::time::timeout(Duration::from_secs(10), mcp.child.wait())
-            .await
-            .is_err()
-        {
-            mcp.child.start_kill()?;
-            mcp.child.wait().await?;
+        match tokio::time::timeout(Duration::from_secs(10), mcp.child.wait()).await {
+            Ok(wait_result) => require_successful_child_wait(wait_result)?,
+            Err(_) => {
+                mcp.child.start_kill()?;
+                require_successful_child_wait(mcp.child.wait().await)?;
+            }
         }
         Ok(())
     }
+}
+
+fn require_successful_child_wait(
+    wait_result: io::Result<std::process::ExitStatus>,
+) -> io::Result<()> {
+    wait_result.map(|_| ())
+}
+
+pub(super) fn child_wait_error_is_rejected_for_test() -> bool {
+    require_successful_child_wait(Err(io::Error::other("injected child wait failure"))).is_err()
 }
 
 struct WorkspacePages<'a> {
@@ -298,8 +355,26 @@ impl<'a> WorkspacePages<'a> {
         let data = page
             .get("data")
             .and_then(Value::as_array)
-            .filter(|data| !data.is_empty())
-            .ok_or_else(|| io::Error::other("thread/list emitted an empty or malformed page"))?;
+            .ok_or_else(|| io::Error::other("thread/list emitted a malformed page"))?;
+        let next = match page.get("nextCursor") {
+            None | Some(Value::Null) => None,
+            Some(cursor) => Some(
+                cursor
+                    .as_str()
+                    .filter(|cursor| !cursor.is_empty() && cursor.len() <= 512)
+                    .filter(|cursor| !cursor.bytes().any(|byte| byte.is_ascii_control()))
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| io::Error::other("thread/list emitted an invalid cursor"))?,
+            ),
+        };
+        if data.is_empty() {
+            if self.pages != 1 || next.is_some() {
+                return Err(io::Error::other(
+                    "thread/list emitted an empty continuation page",
+                ));
+            }
+            return Ok(None);
+        }
         self.rows += data.len();
         if self.rows > MAX_WORKSPACE_ROWS {
             return Err(io::Error::other("thread/list exhausted the live row limit"));
@@ -318,17 +393,6 @@ impl<'a> WorkspacePages<'a> {
                 return Err(io::Error::other("thread/list returned a duplicate ID"));
             }
         }
-        let next = page
-            .get("nextCursor")
-            .map(|cursor| {
-                cursor
-                    .as_str()
-                    .filter(|cursor| !cursor.is_empty() && cursor.len() <= 512)
-                    .filter(|cursor| !cursor.bytes().any(|byte| byte.is_ascii_control()))
-                    .map(ToOwned::to_owned)
-                    .ok_or_else(|| io::Error::other("thread/list emitted an invalid cursor"))
-            })
-            .transpose()?;
         if let Some(cursor) = &next
             && !self.cursors.insert(cursor.clone())
         {
@@ -387,9 +451,9 @@ pub(super) struct NativeConnection {
 }
 
 impl NativeConnection {
-    async fn connect(endpoint: &NativeEndpoint) -> Result<Self, Box<dyn Error>> {
-        endpoint.validate()?;
-        let stream = UnixStream::connect(&endpoint.socket_path).await?;
+    async fn connect(endpoint: &ResolvedEndpoint) -> Result<Self, Box<dyn Error>> {
+        validate_native_endpoint(endpoint)?;
+        let stream = UnixStream::connect(endpoint.socket_path()).await?;
         let (websocket, _) = client_async("ws://localhost/rpc", stream).await?;
         Ok(Self {
             websocket,
@@ -1079,28 +1143,4 @@ impl McpClient {
         stdin.flush().await?;
         Ok(())
     }
-}
-
-fn desktop_endpoint() -> Result<NativeEndpoint, Box<dyn Error>> {
-    let explicit = std::env::var_os("CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET");
-    if let Some(path) = explicit.filter(|path| !path.is_empty()) {
-        return Ok(NativeEndpoint::explicit(PathBuf::from(path)));
-    }
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .ok_or_else(|| io::Error::other("Desktop runtime directory is unavailable"))?;
-    let app_id = std::env::var_os("CODEX_LINUX_APP_ID")
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| OsString::from("codex-desktop"));
-    let app_dir = runtime.join(app_id);
-    let bridge_dir = app_dir.join("app-server-bridge");
-    Ok(NativeEndpoint {
-        socket_path: bridge_dir.join("app-server.sock"),
-        kind: NativeEndpointKind::Derived {
-            runtime_dir: runtime,
-            app_dir,
-            bridge_dir,
-        },
-    })
 }

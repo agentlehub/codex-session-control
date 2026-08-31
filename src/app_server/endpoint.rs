@@ -1,6 +1,6 @@
 use std::{
     env,
-    ffi::{OsStr, OsString},
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
 };
@@ -9,30 +9,22 @@ use rustix::fs::{FileType, Stat};
 
 use crate::error::{ToolErrorCategory, ToolErrorData};
 
+#[cfg(test)]
 use super::endpoint_policy::{
+    APP_ID_ENV as CODEX_LINUX_APP_ID, BRIDGE_SOCKET_ENV as CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET,
+    RUNTIME_DIR_ENV as XDG_RUNTIME_DIR,
+};
+use super::endpoint_policy::{
+    EndpointMetadata, EndpointResolutionError, ResolvedEndpoint, endpoint_metadata_is_safe,
     is_normalized_absolute_path, owned_private_directory, owned_private_socket,
+    resolve_endpoint_with,
 };
 
-const CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET: &str = "CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET";
-const XDG_RUNTIME_DIR: &str = "XDG_RUNTIME_DIR";
-const CODEX_LINUX_APP_ID: &str = "CODEX_LINUX_APP_ID";
-const DEFAULT_CODEX_LINUX_APP_ID: &str = "codex-desktop";
 const SOCKET_VALIDATION_STAGE: &str = "socket_validation";
 
 #[derive(Debug)]
 pub(crate) struct DesktopEndpoint {
-    socket_path: PathBuf,
-    kind: EndpointKind,
-}
-
-#[derive(Debug)]
-enum EndpointKind {
-    Explicit,
-    Derived {
-        runtime_dir: PathBuf,
-        app_dir: PathBuf,
-        bridge_dir: PathBuf,
-    },
+    resolved: ResolvedEndpoint,
 }
 
 impl DesktopEndpoint {
@@ -41,81 +33,58 @@ impl DesktopEndpoint {
     }
 
     fn resolve_with(
-        mut lookup: impl FnMut(&'static str) -> Option<OsString>,
+        lookup: impl FnMut(&'static str) -> Option<OsString>,
     ) -> Result<Self, ToolErrorData> {
-        if let Some(explicit) = lookup(CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET)
-            && !explicit.is_empty()
-        {
-            let socket_path = PathBuf::from(explicit);
-            require_normalized_absolute_path(&socket_path)?;
-            return Ok(Self::explicit(socket_path));
-        }
-
-        let runtime_dir = lookup(XDG_RUNTIME_DIR)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .ok_or_else(target_unavailable)?;
-        require_normalized_absolute_path(&runtime_dir)?;
-
-        let app_id = match lookup(CODEX_LINUX_APP_ID) {
-            Some(value) if !value.is_empty() => {
-                require_valid_app_id(&value)?;
-                value
-            }
-            _ => OsString::from(DEFAULT_CODEX_LINUX_APP_ID),
-        };
-        let app_dir = runtime_dir.join(app_id);
-        let bridge_dir = app_dir.join("app-server-bridge");
-        let socket_path = bridge_dir.join("app-server.sock");
-
-        Ok(Self {
-            socket_path,
-            kind: EndpointKind::Derived {
-                runtime_dir,
-                app_dir,
-                bridge_dir,
-            },
-        })
+        resolve_endpoint_with(lookup)
+            .map(|resolved| Self { resolved })
+            .map_err(|error| match error {
+                EndpointResolutionError::TargetUnavailable => target_unavailable(),
+                EndpointResolutionError::Rejected => socket_validation_failure(),
+            })
     }
 
     pub(super) fn explicit(socket_path: PathBuf) -> Self {
         Self {
-            socket_path,
-            kind: EndpointKind::Explicit,
+            resolved: ResolvedEndpoint::explicit(socket_path),
         }
     }
 
     pub(crate) fn socket_path(&self) -> &Path {
-        &self.socket_path
+        self.resolved.socket_path()
     }
 
     pub(crate) fn validate(&self) -> Result<(), ToolErrorData> {
-        require_normalized_absolute_path(&self.socket_path)?;
-
-        if let EndpointKind::Derived {
-            runtime_dir,
-            app_dir,
-            bridge_dir,
-        } = &self.kind
-        {
-            validate_directory(runtime_dir)?;
-            validate_directory(app_dir)?;
-            validate_directory(bridge_dir)?;
-        }
-
-        let parent = self
-            .socket_path
-            .parent()
-            .ok_or_else(socket_validation_failure)?;
-        validate_directory(parent)?;
-        let canonical_parent = fs::canonicalize(parent).map_err(|_| socket_validation_failure())?;
-        if canonical_parent.as_os_str() != parent.as_os_str() {
+        if !is_normalized_absolute_path(self.socket_path()) {
             return Err(socket_validation_failure());
         }
-
-        let stat = selected_lstat(&self.socket_path)?;
+        let derived = match self.resolved.derived_directories() {
+            Some([runtime, app, bridge]) => Some([
+                selected_directory_metadata(runtime)?,
+                selected_directory_metadata(app)?,
+                selected_directory_metadata(bridge)?,
+            ]),
+            None => None,
+        };
+        let parent = self
+            .socket_path()
+            .parent()
+            .ok_or_else(socket_validation_failure)?;
+        let parent_metadata = selected_directory_metadata(parent)?;
+        let canonical_parent = fs::canonicalize(parent).map_err(|_| socket_validation_failure())?;
+        let socket = selected_lstat(self.socket_path())?;
         let euid = rustix::process::geteuid().as_raw();
-        if !owned_socket_is_private(stat.st_uid, stat.st_mode, euid) {
+        if !endpoint_metadata_is_safe(
+            &self.resolved,
+            euid,
+            derived,
+            parent_metadata,
+            canonical_parent.as_os_str() == parent.as_os_str(),
+            EndpointMetadata {
+                owner: socket.st_uid,
+                mode: socket.st_mode,
+                expected_type: FileType::from_raw_mode(socket.st_mode) == FileType::Socket,
+            },
+        ) {
             return Err(socket_validation_failure());
         }
 
@@ -123,32 +92,13 @@ impl DesktopEndpoint {
     }
 }
 
-fn require_valid_app_id(value: &OsStr) -> Result<(), ToolErrorData> {
-    let value = value.to_str().ok_or_else(socket_validation_failure)?;
-    if matches!(value, "." | "..")
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-    {
-        return Err(socket_validation_failure());
-    }
-    Ok(())
-}
-
-fn require_normalized_absolute_path(path: &Path) -> Result<(), ToolErrorData> {
-    if !is_normalized_absolute_path(path) {
-        return Err(socket_validation_failure());
-    }
-    Ok(())
-}
-
-fn validate_directory(path: &Path) -> Result<(), ToolErrorData> {
+fn selected_directory_metadata(path: &Path) -> Result<EndpointMetadata, ToolErrorData> {
     let stat = selected_lstat(path)?;
-    let euid = rustix::process::geteuid().as_raw();
-    if !owned_directory_is_private(stat.st_uid, stat.st_mode, euid) {
-        return Err(socket_validation_failure());
-    }
-    Ok(())
+    Ok(EndpointMetadata {
+        owner: stat.st_uid,
+        mode: stat.st_mode,
+        expected_type: FileType::from_raw_mode(stat.st_mode) == FileType::Directory,
+    })
 }
 
 fn selected_lstat(path: &Path) -> Result<Stat, ToolErrorData> {

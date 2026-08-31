@@ -1,4 +1,114 @@
-use std::path::{Component, Path, PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Component, Path, PathBuf},
+};
+
+pub(crate) const BRIDGE_SOCKET_ENV: &str = "CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET";
+pub(crate) const RUNTIME_DIR_ENV: &str = "XDG_RUNTIME_DIR";
+pub(crate) const APP_ID_ENV: &str = "CODEX_LINUX_APP_ID";
+pub(crate) const DEFAULT_APP_ID: &str = "codex-desktop";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EndpointResolutionError {
+    TargetUnavailable,
+    Rejected,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedEndpoint {
+    socket_path: PathBuf,
+    derived_directories: Option<[PathBuf; 3]>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EndpointMetadata {
+    pub(crate) owner: u32,
+    pub(crate) mode: u32,
+    pub(crate) expected_type: bool,
+}
+
+impl ResolvedEndpoint {
+    pub(crate) fn explicit(socket_path: PathBuf) -> Self {
+        Self {
+            socket_path,
+            derived_directories: None,
+        }
+    }
+
+    pub(crate) fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
+    pub(crate) fn derived_directories(&self) -> Option<[&Path; 3]> {
+        self.derived_directories
+            .as_ref()
+            .map(|paths| [&*paths[0], &*paths[1], &*paths[2]])
+    }
+}
+
+pub(crate) fn resolve_endpoint_with(
+    mut lookup: impl FnMut(&'static str) -> Option<OsString>,
+) -> Result<ResolvedEndpoint, EndpointResolutionError> {
+    if let Some(explicit) = lookup(BRIDGE_SOCKET_ENV)
+        && !explicit.is_empty()
+    {
+        let socket_path = PathBuf::from(explicit);
+        if !is_normalized_absolute_path(&socket_path) {
+            return Err(EndpointResolutionError::Rejected);
+        }
+        return Ok(ResolvedEndpoint::explicit(socket_path));
+    }
+
+    let runtime_dir = lookup(RUNTIME_DIR_ENV)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or(EndpointResolutionError::TargetUnavailable)?;
+    if !is_normalized_absolute_path(&runtime_dir) {
+        return Err(EndpointResolutionError::Rejected);
+    }
+    let app_id = match lookup(APP_ID_ENV) {
+        Some(value) if !value.is_empty() => {
+            let text = value.to_str().ok_or(EndpointResolutionError::Rejected)?;
+            if matches!(text, "." | "..")
+                || !text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            {
+                return Err(EndpointResolutionError::Rejected);
+            }
+            value
+        }
+        _ => OsString::from(DEFAULT_APP_ID),
+    };
+    let app_dir = runtime_dir.join(app_id);
+    let bridge_dir = app_dir.join("app-server-bridge");
+    let socket_path = bridge_dir.join("app-server.sock");
+    Ok(ResolvedEndpoint {
+        socket_path,
+        derived_directories: Some([runtime_dir, app_dir, bridge_dir]),
+    })
+}
+
+pub(crate) fn endpoint_metadata_is_safe(
+    endpoint: &ResolvedEndpoint,
+    euid: u32,
+    derived: Option<[EndpointMetadata; 3]>,
+    parent: EndpointMetadata,
+    parent_is_canonical: bool,
+    socket: EndpointMetadata,
+) -> bool {
+    let derived_is_safe = match (endpoint.derived_directories(), derived) {
+        (None, None) => true,
+        (Some(_), Some(metadata)) => metadata.into_iter().all(|metadata| {
+            owned_private_directory(metadata.owner, metadata.mode, euid, metadata.expected_type)
+        }),
+        _ => false,
+    };
+    derived_is_safe
+        && owned_private_directory(parent.owner, parent.mode, euid, parent.expected_type)
+        && parent_is_canonical
+        && owned_private_socket(socket.owner, socket.mode, euid, socket.expected_type)
+}
 
 #[derive(Debug)]
 pub(crate) struct InitializedIdentity {

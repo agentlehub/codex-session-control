@@ -63,7 +63,7 @@ pub struct AppServerClient {
 enum EndpointSource {
     Desktop,
     #[cfg(test)]
-    Fixed(DesktopEndpoint),
+    Fixed(PathBuf),
 }
 
 impl EndpointSource {
@@ -71,9 +71,7 @@ impl EndpointSource {
         match self {
             Self::Desktop => DesktopEndpoint::resolve(),
             #[cfg(test)]
-            Self::Fixed(endpoint) => Ok(DesktopEndpoint::explicit(
-                endpoint.socket_path().to_path_buf(),
-            )),
+            Self::Fixed(socket_path) => Ok(DesktopEndpoint::explicit(socket_path.clone())),
         }
     }
 }
@@ -133,7 +131,7 @@ impl AppServerClient {
     #[cfg(test)]
     pub(crate) fn for_test(socket_path: PathBuf, tested_codex_version: &str) -> Self {
         Self::new(
-            EndpointSource::Fixed(DesktopEndpoint::explicit(socket_path)),
+            EndpointSource::Fixed(socket_path),
             env!("CARGO_PKG_VERSION"),
             tested_codex_version,
         )
