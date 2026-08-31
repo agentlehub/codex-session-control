@@ -29,4 +29,4 @@ The `approved` status marker was applied after this content-identical reviewed s
 ## M4 R0 Plan-Readiness Review
 
 **Status:** passed
-**Baseline:** `918c21773f26aa2e1cb74f193fb95ccccf87de7c`; **Reviewed artifact:** plan SHA-256 `14dab96beac689a63089420599c06c5a18022c4369d5568c6ebeba7ca11b2afa`; **Checklist:** final-plan review passed; **R6:** passed; **Simplicity R1:** passed; **Quality R2:** passed; **Findings:** none; **Approval:** approved.
+**Baseline:** `918c21773f26aa2e1cb74f193fb95ccccf87de7c`; **Reviewed artifact:** plan SHA-256 `7f6a6a664da5d6df5acaf3e17a20361d9f39b2a622e9e2dd1d959983523b27ec`; **Checklist:** final-plan review passed; **R6:** passed; **Simplicity R1:** passed; **Quality R2:** passed; **Empty-view amendment R1:** passed; **Findings:** none; **Approval:** approved.

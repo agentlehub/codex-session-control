@@ -78,4 +78,4 @@ passed
 ## M4 R0 Design Review
 
 **Status:** passed
-**Baseline:** `918c21773f26aa2e1cb74f193fb95ccccf87de7c`; **Reviewed artifact:** specification SHA-256 `b88c4073561fad20db6fdcaa4620a5b6fdce236d67a2cbd36dc727bba5b1fb18`; **Review type:** specification compliance; **R6:** passed; **Simplicity R1:** passed; **Quality R2:** passed; **Findings:** none; **Approval:** approved.
+**Baseline:** `918c21773f26aa2e1cb74f193fb95ccccf87de7c`; **Reviewed artifact:** specification SHA-256 `12a50111c8f5954348913d2f9a383bcba7eff58e76f3b93c95c72fce16120ab3`; **Review type:** specification compliance; **R6:** passed; **Simplicity R1:** passed; **Quality R2:** passed; **Empty-view amendment R1:** passed; **Findings:** none; **Approval:** approved.

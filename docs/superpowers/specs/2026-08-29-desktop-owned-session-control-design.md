@@ -461,7 +461,7 @@ Unexpected entries, nonempty workspace, metadata drift, or reused inode retains 
 
 #### Exact-workspace recovery
 
-Collect every workspace page into one private prospective set before any journal change or archive authority. Require nonempty unique IDs, byte-for-byte stored absolute `cwd`, unique valid cursors, finite page/row/memory limits, and rejection of empty, malformed, repeated, or cyclic pages. Any invalid later page discards the whole result; only the complete set may enter one durable update.
+Collect every active and archived workspace view into one private prospective set before any journal change or archive authority. Either view may be one terminal zero-result response; otherwise require nonempty unique IDs, byte-for-byte stored absolute `cwd`, unique valid cursors, finite page/row/memory limits, and rejection of empty continuation, malformed, repeated, or cyclic pages. The combined set must be nonempty; any invalid later page discards the whole result, and only the complete set may enter one durable update.
 
 This closes the mutation-success/journal-failure window without title, time, or global-state inference. Recovery never reruns a public tool.
 
