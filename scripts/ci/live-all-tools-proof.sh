@@ -445,6 +445,27 @@ arm_finalizer_signal_traps() {
   trap 'finalize 143 signal' TERM
 }
 
+continue_owned_leader() {
+  local status
+  arm_finalizer_signal_traps
+  if [[ -n "${deferred_signal-}" ]]; then
+    finalize "$deferred_signal" signal
+  fi
+  # Keep finalizer output outside the command-local diagnostic capture.
+  exec 9>&2 || return 1
+  trap 'finalize 129 signal 2>&9' HUP
+  trap 'finalize 130 signal 2>&9' INT
+  trap 'finalize 143 signal 2>&9' TERM
+  if kill -CONT "$test_leader" 2>>"$private_wait_capture"; then
+    status=0
+  else
+    status=$?
+  fi
+  arm_finalizer_signal_traps
+  exec 9>&- || return 1
+  return "$status"
+}
+
 spawn_owned_anchor() {
   local stdout_path="$1"
   local stderr_path="$2"
@@ -457,6 +478,7 @@ spawn_owned_anchor() {
     exec setsid "$BASH" --noprofile --norc -c '
       status_path=$1
       shift
+      kill -STOP "$BASHPID"
       trap "" TERM
       if (
         trap - TERM
@@ -480,31 +502,34 @@ spawn_owned_anchor() {
   wait_until_leader_is_stopped \
     "$test_leader" "$((SECONDS + 1))" || return "$?"
   confirm_group_absent "$test_pgid" "$SECONDS" || return "$?"
-  arm_finalizer_signal_traps
-  if [[ -n "${deferred_signal-}" ]]; then
-    finalize "$deferred_signal" signal
-  fi
-  kill -CONT "$test_leader" 2>/dev/null || return "$?"
+  continue_owned_leader || return "$?"
   wait_until_group_exists "$test_pgid" "$((SECONDS + 1))" || return "$?"
+  wait_until_leader_is_stopped \
+    "$test_leader" "$((SECONDS + 1))" || return "$?"
   leader_has_owned_identity "$test_leader" || return "$?"
+  continue_owned_leader || return "$?"
 }
 
 assert_deferred_launch_signals_for_self_test() {
   local self_root="$1"
   local public_capture="$self_root/deferred-signal.public"
   local leader_record="$self_root/deferred-signal.leader"
-  local row signal expected marker leader status
+  local row signal expected continue_target cleanup_uncertain marker leader root status
   new_capture_file "$public_capture"
   new_capture_file "$leader_record"
-  for row in HUP:129 INT:130 TERM:143; do
-    IFS=: read -r signal expected <<<"$row"
-    marker="$self_root/deferred-$signal-ran"
+  for row in \
+    'TERM:1:1:1' \
+    'HUP:129:2:0' \
+    'INT:130:2:0' \
+    'TERM:143:2:0'; do
+    IFS=: read -r signal expected continue_target cleanup_uncertain <<<"$row"
+    marker="$self_root/deferred-$continue_target-$signal-ran"
     : >"$public_capture"
     : >"$leader_record"
     # The globals are intentionally isolated inside each finalizer boundary.
     # shellcheck disable=SC2030,SC2031
     if (
-      local deferred_signal='' launch_status
+      local continue_count=0 deadline deferred_signal=''
       local TMPDIR="$self_root"
       capture_root=
       private_wait_capture=/dev/null
@@ -515,45 +540,77 @@ assert_deferred_launch_signals_for_self_test() {
       trap 'deferred_signal=129' HUP
       trap 'deferred_signal=130' INT
       trap 'deferred_signal=143' TERM
-      # Inject at the production helper's actual CONT boundary.
+      if [[ "$cleanup_uncertain" -eq 1 ]]; then
+        # Reap the child but retain cleanup uncertainty for precedence proof.
+        # shellcheck disable=SC2317
+        private_wait_for_leader() {
+          if wait "$1" >"$private_wait_capture" 2>&1; then
+            test_status=0
+          else
+            test_status=$?
+          fi
+          return 1
+        }
+      fi
+      # Keep boundary rows fast while still requiring real group disappearance.
+      # shellcheck disable=SC2317
+      signal_group() {
+        builtin kill -KILL -- "-$2" || return 2
+      }
+      # Inject at the selected production authorization boundary.
       # shellcheck disable=SC2317
       kill() {
         if [[ "${1-}" == -CONT ]]; then
+          ((continue_count += 1))
+          if [[ "$continue_count" -ne "$continue_target" ]]; then
+            builtin kill "$@"
+            return
+          fi
+          if [[ "$continue_target" -eq 1 ]]; then
+            builtin kill "$@"
+            deadline=$((SECONDS + 1))
+            wait_until_group_exists "${2-}" "$deadline" || return 1
+            wait_until_leader_is_stopped "${2-}" "$deadline" || return 1
+            leader_has_owned_identity "${2-}" || return 1
+          fi
           printf '%s\n' "${2-}" >"$leader_record"
           builtin kill "-$signal" "$BASHPID"
+          return 0
         fi
         builtin kill "$@"
       }
       # The marker path is expanded by the inner shell.
       # shellcheck disable=SC2016
-      if spawn_owned_anchor \
+      spawn_owned_anchor \
         "$capture_root/anchor.stdout" \
         "$capture_root/anchor.stderr" \
         "$capture_root/anchor.status" \
-        /bin/sh -c 'printf "ran\n" >"$1"' marker "$marker"; then
-        launch_status=0
-      else
-        launch_status=$?
-      fi
-      arm_finalizer_signal_traps
-      if [[ -n "$deferred_signal" ]]; then
-        finalize "$deferred_signal" signal
-      fi
-      [[ "$launch_status" -eq 0 ]]
+        /bin/sh -c 'printf "ran\n" >"$1"; exec sleep 30' marker "$marker"
+      exit 1
     ) >"$public_capture" 2>&1; then
       status=0
     else
       status=$?
     fi
     [[ "$status" -eq "$expected" ]]
-    [[ ! -s "$public_capture" ]]
+    if [[ "$cleanup_uncertain" -eq 1 ]]; then
+      [[ "$(<"$public_capture")" == child_reap_failed ]]
+    else
+      [[ ! -s "$public_capture" ]]
+    fi
     [[ ! -e "$marker" ]]
     leader="$(<"$leader_record")"
-    if compgen -G "$self_root/codex-session-control-live-proof.*" >/dev/null; then
-      return 1
-    fi
     [[ -n "$leader" && ! -e "/proc/$leader" ]]
     if ps -e -o pgid= 2>/dev/null | awk -v pgid="$leader" '$1 == pgid { found=1 } END { exit !found }'; then
+      return 1
+    fi
+    if [[ "$cleanup_uncertain" -eq 1 ]]; then
+      root="$(compgen -G "$self_root/codex-session-control-live-proof.*")"
+      [[ -d "$root" ]]
+      if ! rm -rf -- "$root" 2>/dev/null; then
+        return 1
+      fi
+    elif compgen -G "$self_root/codex-session-control-live-proof.*" >/dev/null; then
       return 1
     fi
   done
