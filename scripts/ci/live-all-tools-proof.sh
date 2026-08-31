@@ -845,7 +845,7 @@ assert_hard_kill_early_failure_for_self_test() {
   local stdout_path="$self_root/early-hard-kill.stdout"
   local stderr_path="$self_root/early-hard-kill.stderr"
   local status_path="$stdout_path.status"
-  local deadline helper_status leader
+  local deadline leader
   local test_leader='' test_pgid='' test_status='' test_status_path=''
   local ownership_failure=0 pending_failure_code=''
   local hard_kill_stdout="$stdout_path" hard_kill_stderr="$stderr_path"
@@ -860,14 +860,12 @@ assert_hard_kill_early_failure_for_self_test() {
   hard_kill_leader="$leader"
   deadline=$((SECONDS + 1))
   if wait_for_hard_kill_ready "$deadline"; then
-    helper_status=0
-  else
-    helper_status=$?
+    return 1
   fi
   if [[ -n "$test_leader" ]]; then
     cleanup_owned_test || return 1
   fi
-  [[ "$helper_status" -eq 1 && "$pending_failure_code" == tool_failed &&
+  [[ "$pending_failure_code" == tool_failed &&
     "$ownership_failure" -eq 0 &&
     -z "$test_leader" && -z "$test_pgid" ]]
   [[ -n "$leader" && ! -e "/proc/$leader" ]]
