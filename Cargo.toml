@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 futures-util = "0.3.33"
-rmcp = { version = "2.2.0", default-features = false, features = ["server", "macros", "schemars", "transport-io"] }
+rmcp = { version = "2.2.0", default-features = false, features = ["server", "transport-io"] }
 rustix = { version = "1.1.4", features = ["fs", "process"] }
 schemars = "1.2.2"
 semver = "1.0.28"
