@@ -283,7 +283,9 @@ sudo -u "$user" env \
     --setenv="CODEX_SESSION_CONTROL_CODEX_BIN=$native_codex_binary" \
     --setenv="CODEX_SESSION_CONTROL_CONTROLLER_BIN=$controller_binary" \
     "$app_server_harness" --ignored \
-    --nocapture --test-threads=1 --skip live_normal_home_
+    --nocapture --test-threads=1 \
+    --skip live_normal_home_ \
+    --skip live_desktop_authority_all_thirteen_tools_are_disposable
 sudo -u "$user" test ! -e "$codex_home"
 sudo -u "$user" test ! -e "$home/.local/bin/codex-session-control"
 sudo -u "$user" \

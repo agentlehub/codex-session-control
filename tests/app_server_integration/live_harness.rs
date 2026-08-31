@@ -1,7 +1,9 @@
 use std::{
     collections::{BTreeSet, VecDeque},
     error::Error,
-    fmt, fs, io,
+    fmt, fs,
+    future::Future,
+    io,
     os::unix::fs::{FileTypeExt, MetadataExt},
     path::{Path, PathBuf},
     process::Stdio,
@@ -13,9 +15,10 @@ use assert_cmd::cargo::cargo_bin;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
     process::{Child, ChildStdin, ChildStdout, Command},
+    time::Instant,
 };
 use tokio_tungstenite::{WebSocketStream, client_async, tungstenite::Message};
 
@@ -42,8 +45,15 @@ const ALL_THREAD_SOURCE_KINDS: [&str; 10] = [
 const THREAD_LIST_PAGE_SIZE: u32 = 100;
 const MAX_WORKSPACE_PAGES: usize = 64;
 const MAX_WORKSPACE_ROWS: usize = 6_400;
+const MAX_MCP_FRAME_BYTES: usize = 64 * 1024;
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const WAIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(125);
+const WAIT_NATIVE_RESERVE: Duration = Duration::from_secs(5);
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(60);
+const REAP_RESERVE: Duration = Duration::from_secs(2);
+const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const TOOLS_CALL_METHOD: &str = "tools/call";
-const UNKNOWN_ERROR_CATEGORY: &str = "unknown";
 const SESSION_CONTROL_TOOLS: [&str; 13] = [
     "thread_create",
     "thread_fork",
@@ -59,6 +69,467 @@ const SESSION_CONTROL_TOOLS: [&str; 13] = [
     "thread_goal_clear",
     "thread_interrupt",
 ];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum LiveCode {
+    HardKillReady,
+    OptInRejected,
+    JournalRejected,
+    EndpointRejected,
+    IdentityUnverified,
+    VersionUnsupported,
+    ChildSpawnFailed,
+    ChildReapFailed,
+    ToolFailed,
+    DeadlineExceeded,
+    ArchiveProofFailed,
+    CleanupFailed,
+}
+
+impl LiveCode {
+    pub(super) const ALL: [Self; 12] = [
+        Self::HardKillReady,
+        Self::OptInRejected,
+        Self::JournalRejected,
+        Self::EndpointRejected,
+        Self::IdentityUnverified,
+        Self::VersionUnsupported,
+        Self::ChildSpawnFailed,
+        Self::ChildReapFailed,
+        Self::ToolFailed,
+        Self::DeadlineExceeded,
+        Self::ArchiveProofFailed,
+        Self::CleanupFailed,
+    ];
+}
+
+impl fmt::Display for LiveCode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::HardKillReady => "hard_kill_ready",
+            Self::OptInRejected => "opt_in_rejected",
+            Self::JournalRejected => "journal_rejected",
+            Self::EndpointRejected => "endpoint_rejected",
+            Self::IdentityUnverified => "identity_unverified",
+            Self::VersionUnsupported => "version_unsupported",
+            Self::ChildSpawnFailed => "child_spawn_failed",
+            Self::ChildReapFailed => "child_reap_failed",
+            Self::ToolFailed => "tool_failed",
+            Self::DeadlineExceeded => "deadline_exceeded",
+            Self::ArchiveProofFailed => "archive_proof_failed",
+            Self::CleanupFailed => "cleanup_failed",
+        })
+    }
+}
+
+impl Error for LiveCode {}
+
+#[derive(Clone, Copy, Debug)]
+struct Deadline {
+    at: Instant,
+}
+
+impl Deadline {
+    fn after(duration: Duration) -> Self {
+        Self {
+            at: Instant::now() + duration,
+        }
+    }
+
+    fn check(self) -> Result<(), LiveCode> {
+        if Instant::now() < self.at {
+            Ok(())
+        } else {
+            Err(LiveCode::DeadlineExceeded)
+        }
+    }
+
+    fn remaining(self) -> Result<Duration, LiveCode> {
+        let remaining = self.at.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            Err(LiveCode::DeadlineExceeded)
+        } else {
+            Ok(remaining)
+        }
+    }
+
+    async fn run<T>(
+        self,
+        future: impl Future<Output = Result<T, LiveCode>>,
+    ) -> Result<T, LiveCode> {
+        self.check()?;
+        tokio::time::timeout_at(self.at, future)
+            .await
+            .map_err(|_| LiveCode::DeadlineExceeded)?
+    }
+
+    async fn run_io<T>(
+        self,
+        future: impl Future<Output = io::Result<T>>,
+        failure: LiveCode,
+    ) -> Result<T, LiveCode> {
+        self.run(async { future.await.map_err(|_| failure) }).await
+    }
+
+    fn native_wait_timeout_ms(self) -> Result<u64, LiveCode> {
+        let remaining = self.remaining()?;
+        let native = remaining
+            .checked_sub(WAIT_NATIVE_RESERVE)
+            .ok_or(LiveCode::DeadlineExceeded)?;
+        u64::try_from(native.as_millis()).map_err(|_| LiveCode::DeadlineExceeded)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct CleanupBudget {
+    deadline: Deadline,
+}
+
+impl CleanupBudget {
+    pub(super) fn new() -> Self {
+        Self {
+            deadline: Deadline::after(CLEANUP_TIMEOUT),
+        }
+    }
+
+    fn with_timeout(timeout: Duration) -> Self {
+        Self {
+            deadline: Deadline::after(timeout),
+        }
+    }
+
+    pub(super) fn check(self) -> Result<(), LiveCode> {
+        self.deadline.check()
+    }
+
+    pub(super) async fn sleep(self, duration: Duration) -> Result<(), LiveCode> {
+        self.deadline
+            .run(async {
+                tokio::time::sleep(duration).await;
+                Ok(())
+            })
+            .await
+    }
+}
+
+pub(super) struct OwnedMcpChild {
+    child: Option<Child>,
+    process_group: Option<u32>,
+    group_kill_sent: bool,
+}
+
+impl OwnedMcpChild {
+    fn spawn(command: &mut Command) -> Result<Self, LiveCode> {
+        command.process_group(0);
+        let child = command.spawn().map_err(|_| LiveCode::ChildSpawnFailed)?;
+        let owned = Self {
+            process_group: child.id(),
+            child: Some(child),
+            group_kill_sent: false,
+        };
+        if owned.process_group.is_none() {
+            return Err(LiveCode::ChildSpawnFailed);
+        }
+        Ok(owned)
+    }
+
+    fn id(&self) -> u32 {
+        self.child
+            .as_ref()
+            .and_then(Child::id)
+            .expect("owned child is present until confirmed reap")
+    }
+
+    fn take_stdin(&mut self) -> Option<ChildStdin> {
+        self.child.as_mut()?.stdin.take()
+    }
+
+    fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.child.as_mut()?.stdout.take()
+    }
+
+    fn close_owned_stdin(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            child.stdin.take();
+        }
+    }
+
+    fn process_group_exists(&self) -> Result<bool, LiveCode> {
+        let Some(raw) = self.process_group else {
+            return Ok(false);
+        };
+        let process_group =
+            rustix::process::Pid::from_raw(raw as i32).ok_or(LiveCode::ChildReapFailed)?;
+        match rustix::process::test_kill_process_group(process_group) {
+            Ok(()) => Ok(true),
+            Err(rustix::io::Errno::SRCH) => Ok(false),
+            Err(_) => Err(LiveCode::ChildReapFailed),
+        }
+    }
+
+    fn kill_process_group_once(&mut self) -> Result<bool, LiveCode> {
+        if self.group_kill_sent {
+            return Ok(false);
+        }
+        self.group_kill_sent = true;
+        let Some(raw) = self.process_group else {
+            return Ok(false);
+        };
+        let process_group =
+            rustix::process::Pid::from_raw(raw as i32).ok_or(LiveCode::ChildReapFailed)?;
+        match rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL) {
+            Ok(()) => Ok(true),
+            Err(rustix::io::Errno::SRCH) => Ok(false),
+            Err(_) => Err(LiveCode::ChildReapFailed),
+        }
+    }
+
+    async fn shutdown_and_reap(&mut self, budget: CleanupBudget) -> Result<bool, LiveCode> {
+        self.close_owned_stdin();
+        let remaining = budget.deadline.remaining()?;
+        let reserve = REAP_RESERVE.min(remaining / 2);
+        let graceful_deadline = budget.deadline.at - reserve;
+        let mut killed_group = false;
+
+        if let Some(child) = self.child.as_mut() {
+            match tokio::time::timeout_at(graceful_deadline, child.wait()).await {
+                Ok(Ok(_)) => {
+                    self.child.take();
+                }
+                Ok(Err(_)) => return Err(LiveCode::ChildReapFailed),
+                Err(_) => {
+                    killed_group = self.kill_process_group_once()?;
+                }
+            }
+        }
+
+        if self.child.is_none() && self.process_group_exists()? {
+            killed_group |= self.kill_process_group_once()?;
+        }
+        if let Some(child) = self.child.as_mut() {
+            match tokio::time::timeout_at(budget.deadline.at, child.wait()).await {
+                Ok(Ok(_)) => {
+                    self.child.take();
+                }
+                Ok(Err(_)) | Err(_) => return Err(LiveCode::ChildReapFailed),
+            }
+        }
+
+        loop {
+            if !self.process_group_exists()? {
+                self.process_group.take();
+                return Ok(killed_group);
+            }
+            budget.check().map_err(|_| LiveCode::ChildReapFailed)?;
+            budget
+                .sleep(CHILD_POLL_INTERVAL)
+                .await
+                .map_err(|_| LiveCode::ChildReapFailed)?;
+        }
+    }
+}
+
+impl Drop for OwnedMcpChild {
+    fn drop(&mut self) {
+        if self.child.is_none() && self.process_group.is_none() {
+            return;
+        }
+        self.close_owned_stdin();
+        let _ = self.kill_process_group_once();
+        let deadline = std::time::Instant::now() + REAP_RESERVE;
+        loop {
+            let leader_reaped = match self.child.as_mut().map(Child::try_wait) {
+                None => true,
+                Some(Ok(Some(_))) => {
+                    self.child.take();
+                    true
+                }
+                Some(Ok(None)) => false,
+                Some(Err(_)) => false,
+            };
+            let group_absent = matches!(self.process_group_exists(), Ok(false));
+            if leader_reaped && group_absent {
+                self.process_group.take();
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(CHILD_POLL_INTERVAL);
+        }
+    }
+}
+
+async fn read_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    deadline: Deadline,
+    limit: usize,
+) -> Result<Vec<u8>, LiveCode> {
+    let mut retained = Vec::with_capacity(limit.min(4096));
+    let mut overflow = false;
+    loop {
+        deadline.check()?;
+        let (consumed, line_ended) = {
+            let available = deadline
+                .run_io(reader.fill_buf(), LiveCode::ToolFailed)
+                .await?;
+            if available.is_empty() {
+                return Err(LiveCode::ToolFailed);
+            }
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let consumed = newline.map_or(available.len(), |index| index + 1);
+            let payload = &available[..newline.unwrap_or(available.len())];
+            if !overflow {
+                let remaining = limit.saturating_sub(retained.len());
+                retained.extend_from_slice(&payload[..payload.len().min(remaining)]);
+                overflow = payload.len() > remaining;
+            }
+            (consumed, newline.is_some())
+        };
+        reader.consume(consumed);
+        if line_ended {
+            if overflow {
+                return Err(LiveCode::ToolFailed);
+            }
+            if retained.last() == Some(&b'\r') {
+                retained.pop();
+            }
+            return Ok(retained);
+        }
+    }
+}
+
+fn process_group_is_absent(raw: u32) -> bool {
+    let Some(process_group) = rustix::process::Pid::from_raw(raw as i32) else {
+        return false;
+    };
+    matches!(
+        rustix::process::test_kill_process_group(process_group),
+        Err(rustix::io::Errno::SRCH)
+    )
+}
+
+fn assert_process_and_group_absent(pid: u32) {
+    assert!(
+        !Path::new(&format!("/proc/{pid}")).exists(),
+        "owned child leader was not reaped"
+    );
+    assert!(
+        process_group_is_absent(pid),
+        "owned child process group survived cleanup"
+    );
+}
+
+fn sleeping_child_command() -> Command {
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg("sleep 30 & wait")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
+}
+
+pub(super) async fn assert_owned_child_exit_paths_for_test() {
+    let mut extraction_failure = sleeping_child_command();
+    extraction_failure.stdout(Stdio::null());
+    let mut owned = OwnedMcpChild::spawn(&mut extraction_failure).unwrap();
+    let pid = owned.id();
+    assert!(owned.take_stdout().is_none());
+    drop(owned);
+    assert_process_and_group_absent(pid);
+
+    let mut normal = Command::new("/bin/sh");
+    normal
+        .arg("-c")
+        .arg("exit 0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut owned = OwnedMcpChild::spawn(&mut normal).unwrap();
+    let pid = owned.id();
+    assert!(
+        !owned
+            .shutdown_and_reap(CleanupBudget::with_timeout(Duration::from_secs(1)))
+            .await
+            .unwrap()
+    );
+    assert_process_and_group_absent(pid);
+
+    let mut panic_pid = None;
+    let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut command = sleeping_child_command();
+        let owned = OwnedMcpChild::spawn(&mut command).unwrap();
+        panic_pid = Some(owned.id());
+        let _owned = owned;
+        std::panic::resume_unwind(Box::new("intentional owned-child panic-path probe"));
+    }));
+    assert!(panic_result.is_err());
+    assert_process_and_group_absent(panic_pid.unwrap());
+
+    let mut command = sleeping_child_command();
+    let owned = OwnedMcpChild::spawn(&mut command).unwrap();
+    let pid = owned.id();
+    let task = tokio::spawn(async move {
+        let _owned = owned;
+        std::future::pending::<()>().await;
+    });
+    tokio::task::yield_now().await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert_process_and_group_absent(pid);
+}
+
+pub(super) async fn assert_owned_child_timeout_for_test() {
+    let mut command = sleeping_child_command();
+    let mut owned = OwnedMcpChild::spawn(&mut command).unwrap();
+    let pid = owned.id();
+    let killed = owned
+        .shutdown_and_reap(CleanupBudget::with_timeout(Duration::from_millis(400)))
+        .await
+        .unwrap();
+    assert!(
+        killed,
+        "timeout did not dispatch the one process-group kill"
+    );
+    assert_process_and_group_absent(pid);
+}
+
+pub(super) async fn assert_deadline_and_framing_contract_for_test() {
+    tokio::time::pause();
+    let cleanup = CleanupBudget::with_timeout(Duration::from_millis(100));
+    let original_deadline = cleanup.deadline.at;
+    tokio::time::advance(Duration::from_millis(80)).await;
+    assert_eq!(
+        cleanup.sleep(Duration::from_millis(30)).await,
+        Err(LiveCode::DeadlineExceeded)
+    );
+    assert_eq!(cleanup.deadline.at, original_deadline);
+    assert_eq!(cleanup.check(), Err(LiveCode::DeadlineExceeded));
+
+    let wait_request = Deadline::after(WAIT_REQUEST_TIMEOUT);
+    assert_eq!(wait_request.native_wait_timeout_ms().unwrap(), 120_000);
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(wait_request.native_wait_timeout_ms().unwrap(), 118_000);
+    assert_eq!(cleanup.deadline.at, original_deadline);
+
+    let (mut writer, reader) = tokio::io::duplex(64);
+    writer.write_all(b"123456789\n{\"id\":1}\n").await.unwrap();
+    drop(writer);
+    let mut reader = BufReader::new(reader);
+    let frame_deadline = Deadline::after(Duration::from_secs(1));
+    assert_eq!(
+        read_bounded_line(&mut reader, frame_deadline, 8).await,
+        Err(LiveCode::ToolFailed)
+    );
+    assert_eq!(
+        read_bounded_line(&mut reader, frame_deadline, 8)
+            .await
+            .unwrap(),
+        b"{\"id\":1}"
+    );
+}
 
 #[derive(Debug)]
 enum EndpointSource {
@@ -175,7 +646,7 @@ pub(super) struct LiveHarness {
 }
 
 impl LiveHarness {
-    pub(super) fn from_ledger(workspace: &Path) -> Result<Self, Box<dyn Error>> {
+    pub(super) fn from_ledger(workspace: &Path) -> Result<Self, LiveCode> {
         Ok(Self {
             workspace: workspace.to_path_buf(),
             endpoint_source: EndpointSource::Desktop {
@@ -209,105 +680,111 @@ impl LiveHarness {
         })
     }
 
-    pub(super) async fn start_mcp(&mut self) -> Result<(), Box<dyn Error>> {
+    pub(super) async fn start_mcp(&mut self) -> Result<(), LiveCode> {
         self.mcp = Some(McpClient::start().await?);
         Ok(())
     }
 
-    pub(super) fn mcp_mut(&mut self) -> Result<&mut McpClient, Box<dyn Error>> {
-        self.mcp
-            .as_mut()
-            .ok_or_else(|| io::Error::other("MCP child is not running").into())
+    pub(super) fn mcp_mut(&mut self) -> Result<&mut McpClient, LiveCode> {
+        self.mcp.as_mut().ok_or(LiveCode::ToolFailed)
     }
 
-    pub(super) async fn assert_exact_catalog(&mut self) -> Result<(), Box<dyn Error>> {
+    pub(super) async fn assert_exact_catalog(&mut self) -> Result<(), LiveCode> {
         let listed = self.mcp_mut()?.list_tools().await?;
         let names = listed
             .get("tools")
             .and_then(Value::as_array)
-            .ok_or_else(|| io::Error::other("tools/list omitted tools"))?
+            .ok_or(LiveCode::ToolFailed)?
             .iter()
             .map(|tool| {
                 tool.get("name")
                     .and_then(Value::as_str)
                     .map(ToOwned::to_owned)
-                    .ok_or_else(|| io::Error::other("tools/list emitted unnamed tool"))
+                    .ok_or(LiveCode::ToolFailed)
             })
-            .collect::<io::Result<Vec<_>>>()?;
-        assert_eq!(
-            names,
-            SESSION_CONTROL_TOOLS
+            .collect::<Result<Vec<_>, _>>()?;
+        if names
+            != SESSION_CONTROL_TOOLS
                 .into_iter()
                 .map(ToOwned::to_owned)
                 .collect::<Vec<_>>()
-        );
+        {
+            return Err(LiveCode::ToolFailed);
+        }
         Ok(())
     }
 
-    pub(super) async fn assert_empty_workspace_before_mutation(
-        &mut self,
-    ) -> Result<(), Box<dyn Error>> {
+    pub(super) async fn assert_empty_workspace_before_mutation(&mut self) -> Result<(), LiveCode> {
         let workspace = self.workspace.clone();
         for archived in [false, true] {
             let listed = self.mcp_mut()?.list_threads(&workspace, archived).await?;
             let threads = listed
                 .get("threads")
                 .and_then(Value::as_array)
-                .ok_or_else(|| io::Error::other("threads_list omitted threads"))?;
+                .ok_or(LiveCode::ToolFailed)?;
             if !threads.is_empty() {
-                return Err(io::Error::other("unique live workspace was not empty").into());
+                return Err(LiveCode::ToolFailed);
             }
         }
         Ok(())
     }
 
-    pub(super) async fn assert_supported_native_version(&self) -> Result<(), Box<dyn Error>> {
-        let mut native = self.connect_native().await?;
-        native.initialize().await?;
+    pub(super) async fn assert_supported_native_version(&self) -> Result<(), LiveCode> {
+        let budget = CleanupBudget::with_timeout(STARTUP_TIMEOUT);
+        let mut native = self.connect_native(budget).await?;
+        native.initialize(budget).await?;
         native.recovery_home()?;
-        native.finish_initialization().await
+        native.finish_initialization(budget).await?;
+        native.shutdown(budget).await
     }
 
-    pub(super) async fn connect_native(&self) -> Result<NativeConnection, Box<dyn Error>> {
-        let endpoint = self.endpoint_source.resolve()?;
-        NativeConnection::connect(&endpoint).await
+    pub(super) async fn connect_native(
+        &self,
+        budget: CleanupBudget,
+    ) -> Result<NativeConnection, LiveCode> {
+        budget.check()?;
+        let endpoint = self
+            .endpoint_source
+            .resolve()
+            .map_err(|_| LiveCode::EndpointRejected)?;
+        NativeConnection::connect(&endpoint, budget).await
     }
 
     pub(super) async fn workspace_thread_ids(
         &self,
         native: &mut NativeConnection,
         archived: bool,
-    ) -> Result<Vec<String>, Box<dyn Error>> {
-        let mut pages = WorkspacePages::new(&self.workspace)?;
+        budget: CleanupBudget,
+    ) -> Result<Vec<String>, LiveCode> {
+        let mut pages =
+            WorkspacePages::new(&self.workspace).map_err(|_| LiveCode::ArchiveProofFailed)?;
         let mut cursor = None;
         loop {
             let page = native
                 .request(
                     "thread/list",
                     exact_workspace_list_params(&self.workspace, archived, cursor.as_deref()),
+                    budget,
                 )
                 .await?;
-            let next = pages.add(&page)?;
+            let next = pages.add(&page).map_err(|_| LiveCode::ArchiveProofFailed)?;
             match next {
                 Some(next) if cursor.as_deref() != Some(next.as_str()) => cursor = Some(next),
-                Some(_) => return Err(io::Error::other("thread/list repeated a cursor").into()),
+                Some(_) => return Err(LiveCode::ArchiveProofFailed),
                 None => return Ok(pages.into_ids()),
             }
         }
     }
 
-    pub(super) async fn stop_and_reap_mcp_child(&mut self) -> Result<(), Box<dyn Error>> {
-        let Some(mut mcp) = self.mcp.take() else {
+    pub(super) async fn stop_and_reap_mcp_child(
+        &mut self,
+        budget: CleanupBudget,
+    ) -> Result<(), LiveCode> {
+        let Some(mcp) = self.mcp.as_mut() else {
             return Ok(());
         };
-        mcp.stdin.take();
-        match tokio::time::timeout(Duration::from_secs(10), mcp.child.wait()).await {
-            Ok(wait_result) => require_successful_child_wait(wait_result)?,
-            Err(_) => {
-                mcp.child.start_kill()?;
-                require_successful_child_wait(mcp.child.wait().await)?;
-            }
-        }
+        mcp.shutdown(budget).await?;
+        self.mcp.take();
         Ok(())
     }
 }
@@ -451,10 +928,24 @@ pub(super) struct NativeConnection {
 }
 
 impl NativeConnection {
-    async fn connect(endpoint: &ResolvedEndpoint) -> Result<Self, Box<dyn Error>> {
-        validate_native_endpoint(endpoint)?;
-        let stream = UnixStream::connect(endpoint.socket_path()).await?;
-        let (websocket, _) = client_async("ws://localhost/rpc", stream).await?;
+    async fn connect(endpoint: &ResolvedEndpoint, budget: CleanupBudget) -> Result<Self, LiveCode> {
+        budget.check()?;
+        validate_native_endpoint(endpoint).map_err(|_| LiveCode::EndpointRejected)?;
+        let stream = budget
+            .deadline
+            .run_io(
+                UnixStream::connect(endpoint.socket_path()),
+                LiveCode::EndpointRejected,
+            )
+            .await?;
+        let (websocket, _) = budget
+            .deadline
+            .run(async {
+                client_async("ws://localhost/rpc", stream)
+                    .await
+                    .map_err(|_| LiveCode::EndpointRejected)
+            })
+            .await?;
         Ok(Self {
             websocket,
             next_id: 1,
@@ -462,7 +953,7 @@ impl NativeConnection {
         })
     }
 
-    pub(super) async fn initialize(&mut self) -> Result<(), Box<dyn Error>> {
+    pub(super) async fn initialize(&mut self, budget: CleanupBudget) -> Result<(), LiveCode> {
         let initialized = self
             .request(
                 "initialize",
@@ -479,6 +970,7 @@ impl NativeConnection {
                         "optOutNotificationMethods": [],
                     },
                 }),
+                budget,
             )
             .await?;
         let identity = InitializedIdentity::from_initialize(
@@ -489,183 +981,117 @@ impl NativeConnection {
         Ok(())
     }
 
-    pub(super) fn recovery_home(&self) -> Result<&Path, io::Error> {
+    pub(super) fn recovery_home(&self) -> Result<&Path, LiveCode> {
         self.identity
             .as_ref()
-            .ok_or_else(|| io::Error::other("identity_unverified"))?
+            .ok_or(LiveCode::IdentityUnverified)?
             .recovery_home(EXPECTED_CODEX_VERSION)
-            .map_err(io::Error::other)
+            .map_err(|code| match code {
+                "version_unsupported" => LiveCode::VersionUnsupported,
+                _ => LiveCode::IdentityUnverified,
+            })
     }
 
-    pub(super) async fn finish_initialization(&mut self) -> Result<(), Box<dyn Error>> {
-        self.websocket
-            .send(Message::text(json!({"method": "initialized"}).to_string()))
+    pub(super) async fn finish_initialization(
+        &mut self,
+        budget: CleanupBudget,
+    ) -> Result<(), LiveCode> {
+        budget
+            .deadline
+            .run(async {
+                self.websocket
+                    .send(Message::text(json!({"method": "initialized"}).to_string()))
+                    .await
+                    .map_err(|_| LiveCode::ArchiveProofFailed)
+            })
             .await?;
         Ok(())
     }
 
     pub(super) async fn request(
         &mut self,
-        method: &str,
+        _method: &str,
         params: impl serde::Serialize,
-    ) -> Result<Value, Box<dyn Error>> {
+        budget: CleanupBudget,
+    ) -> Result<Value, LiveCode> {
+        budget.check()?;
         let id = self.next_id;
         self.next_id += 1;
-        self.websocket
-            .send(Message::text(
-                json!({"id": id, "method": method, "params": params}).to_string(),
-            ))
-            .await?;
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let frame = self
-                    .websocket
-                    .next()
+        let message = serde_json::to_string(&json!({
+            "id": id,
+            "method": _method,
+            "params": params
+        }))
+        .map_err(|_| LiveCode::ArchiveProofFailed)?;
+        budget.check()?;
+        budget
+            .deadline
+            .run(async {
+                self.websocket
+                    .send(Message::text(message))
                     .await
-                    .ok_or_else(|| io::Error::other("app-server disconnected"))?
-                    .map_err(io::Error::other)?;
-                let Message::Text(text) = frame else {
-                    continue;
-                };
-                let value: Value = serde_json::from_str(text.as_str())?;
-                if value.get("id").and_then(Value::as_u64) != Some(id) {
-                    continue;
+                    .map_err(|_| LiveCode::ArchiveProofFailed)
+            })
+            .await?;
+        budget
+            .deadline
+            .run(async {
+                loop {
+                    let frame = self
+                        .websocket
+                        .next()
+                        .await
+                        .ok_or(LiveCode::ArchiveProofFailed)?
+                        .map_err(|_| LiveCode::ArchiveProofFailed)?;
+                    let Message::Text(text) = frame else {
+                        continue;
+                    };
+                    let value: Value = serde_json::from_str(text.as_str())
+                        .map_err(|_| LiveCode::ArchiveProofFailed)?;
+                    budget.check()?;
+                    if value.get("id").and_then(Value::as_u64) != Some(id) {
+                        continue;
+                    }
+                    if value.get("error").is_some() {
+                        return Err(LiveCode::ArchiveProofFailed);
+                    }
+                    return value
+                        .get("result")
+                        .cloned()
+                        .ok_or(LiveCode::ArchiveProofFailed);
                 }
-                if let Some(error) = value.get("error") {
-                    return Err(io::Error::other(format!("{method} failed: {error}")));
-                }
-                return value
-                    .get("result")
-                    .cloned()
-                    .ok_or_else(|| io::Error::other(format!("{method} omitted result")));
-            }
-        })
-        .await
-        .map_err(|_| io::Error::other(format!("{method} timed out")))?
-        .map_err(Into::into)
+            })
+            .await
+    }
+
+    pub(super) async fn shutdown(&mut self, budget: CleanupBudget) -> Result<(), LiveCode> {
+        budget
+            .deadline
+            .run(async {
+                self.websocket
+                    .close(None)
+                    .await
+                    .map_err(|_| LiveCode::ArchiveProofFailed)
+            })
+            .await
     }
 }
 
 pub(super) struct McpClient {
-    child: Child,
     stdin: Option<ChildStdin>,
-    stdout: Lines<BufReader<ChildStdout>>,
+    stdout: BufReader<ChildStdout>,
+    child: OwnedMcpChild,
     next_id: u64,
 }
 
-#[derive(Debug)]
-struct McpRequestFailure {
-    method: String,
-    stage: String,
-    category: &'static str,
-}
-
-impl McpRequestFailure {
-    fn rpc(method: &str, error: &Value) -> Self {
-        Self::from_error_data(method, error.get("data").unwrap_or(&Value::Null))
-    }
-
-    fn tool_result(method: &str, result: &Value) -> Self {
-        Self::from_error_data(
-            method,
-            result.get("structuredContent").unwrap_or(&Value::Null),
-        )
-    }
-
-    fn from_error_data(method: &str, error_data: &Value) -> Self {
-        Self {
-            method: method.to_owned(),
-            stage: safe_error_stage(error_data).unwrap_or("mcp_rpc").to_owned(),
-            category: allowlisted_error_category(error_data),
-        }
-    }
-
-    fn transport(method: &str, stage: &'static str) -> Self {
-        Self {
-            method: method.to_owned(),
-            stage: stage.to_owned(),
-            category: UNKNOWN_ERROR_CATEGORY,
-        }
-    }
-
-    fn for_tool(&self, tool: &str) -> io::Error {
-        io::Error::other(format!("tool={tool}; {self}"))
-    }
-}
-
-impl fmt::Display for McpRequestFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "method={}; stage={}; category={}",
-            self.method, self.stage, self.category
-        )
-    }
-}
-
-impl Error for McpRequestFailure {}
-
-fn safe_error_stage(error: &Value) -> Option<&'static str> {
-    match error.get("stage").and_then(Value::as_str) {
-        Some("connect") => Some("connect"),
-        Some("initialize") => Some("initialize"),
-        Some("socket_validation") => Some("socket_validation"),
-        Some("observe") => Some("observe"),
-        Some("serialize") => Some("serialize"),
-        Some("input") => Some("input"),
-        Some("threadId") => Some("threadId"),
-        Some("threadIds") => Some("threadIds"),
-        Some("cursor") => Some("cursor"),
-        Some("limit") => Some("limit"),
-        Some("archived") => Some("archived"),
-        Some("cwd") => Some("cwd"),
-        Some("timeoutMs") => Some("timeoutMs"),
-        Some("reasoningEffort") => Some("reasoningEffort"),
-        Some("_meta.threadId") => Some("_meta.threadId"),
-        Some("tool") => Some("tool"),
-        Some("validation") => Some("validation"),
-        Some("self_target") => Some("self_target"),
-        Some("active_override") => Some("active_override"),
-        Some("active_turn") => Some("active_turn"),
-        Some("thread/list") => Some("thread/list"),
-        Some("thread/read") => Some("thread/read"),
-        Some("thread/turns/list") => Some("thread/turns/list"),
-        Some("thread/resume") => Some("thread/resume"),
-        Some("thread/start") => Some("thread/start"),
-        Some("thread/fork") => Some("thread/fork"),
-        Some("thread/name/set") => Some("thread/name/set"),
-        Some("thread/goal/get") => Some("thread/goal/get"),
-        Some("thread/goal/set") => Some("thread/goal/set"),
-        Some("thread/goal/clear") => Some("thread/goal/clear"),
-        Some("turn/start") => Some("turn/start"),
-        Some("turn/steer") => Some("turn/steer"),
-        Some("turn/interrupt") => Some("turn/interrupt"),
-        _ => None,
-    }
-}
-
-fn allowlisted_error_category(error: &Value) -> &'static str {
-    match error.get("category").and_then(Value::as_str) {
-        Some("invalid_request") => "invalid_request",
-        Some("policy_rejected") => "policy_rejected",
-        Some("target_unavailable") => "target_unavailable",
-        Some("authority_transport_failure") => "authority_transport_failure",
-        Some("stage_timeout") => "stage_timeout",
-        Some("native_conflict") => "native_conflict",
-        Some("native_error") => "native_error",
-        Some("outcome_unknown") => "outcome_unknown",
-        _ => UNKNOWN_ERROR_CATEGORY,
-    }
-}
-
-fn project_tool_call_result(tool: &str, result: &Value) -> Result<Value, io::Error> {
+fn project_tool_call_result(result: &Value) -> Result<Value, LiveCode> {
     if result.get("isError") == Some(&Value::Bool(true)) {
-        return Err(McpRequestFailure::tool_result(TOOLS_CALL_METHOD, result).for_tool(tool));
+        return Err(LiveCode::ToolFailed);
     }
     result
         .get("structuredContent")
         .cloned()
-        .ok_or_else(|| McpRequestFailure::transport(TOOLS_CALL_METHOD, "mcp_rpc").for_tool(tool))
+        .ok_or(LiveCode::ToolFailed)
 }
 
 fn tool_call_params(name: &str, arguments: Value, caller: Option<&str>) -> Value {
@@ -677,156 +1103,6 @@ fn tool_call_params(name: &str, arguments: Value, caller: Option<&str>) -> Value
             .insert("_meta".to_owned(), json!({"threadId": caller}));
     }
     params
-}
-
-pub(super) fn mcp_json_rpc_tool_error_preserves_allowlisted_context_without_sensitive_data() {
-    let error = McpRequestFailure::rpc(
-        TOOLS_CALL_METHOD,
-        &json!({
-            "message": "message-sentinel",
-            "data": {
-                "tool": "response-tool-sentinel",
-                "stage": "turn/start",
-                "category": "native_conflict",
-                "threadId": "thread-id-sentinel",
-                "turnId": "turn-id-sentinel",
-                "native": {"message": "native-message-sentinel"},
-                "observation": {"prompt": "prompt-sentinel"},
-                "reconciliationError": "reconciliation-sentinel"
-            }
-        }),
-    )
-    .for_tool("thread_message_send");
-
-    assert_eq!(
-        error.to_string(),
-        "tool=thread_message_send; method=tools/call; stage=turn/start; category=native_conflict"
-    );
-    for sentinel in [
-        "message-sentinel",
-        "response-tool-sentinel",
-        "thread-id-sentinel",
-        "turn-id-sentinel",
-        "native-message-sentinel",
-        "prompt-sentinel",
-        "reconciliation-sentinel",
-    ] {
-        assert!(!error.to_string().contains(sentinel));
-    }
-}
-
-pub(super) fn mcp_tool_result_error_preserves_allowlisted_context_and_fixed_fallbacks() {
-    assert_eq!(
-        project_tool_call_result(
-            "thread_read",
-            &json!({"structuredContent": {"threads": []}})
-        )
-        .unwrap(),
-        json!({"threads": []})
-    );
-
-    let error = project_tool_call_result(
-        "thread_message_send",
-        &json!({
-            "isError": true,
-            "content": [{"type": "text", "text": "content-sentinel"}],
-            "structuredContent": {
-                "tool": "response-tool-sentinel",
-                "stage": "turn/start",
-                "category": "native_conflict",
-                "message": "message-sentinel",
-                "threadId": "thread-id-sentinel",
-                "turnId": "turn-id-sentinel",
-                "native": {"message": "native-message-sentinel"},
-                "observation": {"prompt": "prompt-sentinel"},
-                "reconciliationError": "reconciliation-sentinel"
-            }
-        }),
-    )
-    .unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "tool=thread_message_send; method=tools/call; stage=turn/start; category=native_conflict"
-    );
-    for sentinel in [
-        "content-sentinel",
-        "response-tool-sentinel",
-        "message-sentinel",
-        "thread-id-sentinel",
-        "turn-id-sentinel",
-        "native-message-sentinel",
-        "prompt-sentinel",
-        "reconciliation-sentinel",
-    ] {
-        assert!(!error.to_string().contains(sentinel));
-    }
-
-    for result in [
-        json!({"isError": true, "content": [{"type": "text", "text": "missing-sentinel"}]}),
-        json!({
-            "isError": true,
-            "content": [{"type": "text", "text": "malformed-sentinel"}],
-            "structuredContent": {"stage": ["stage-sentinel"], "category": {"value": "native_error"}}
-        }),
-        json!({
-            "isError": true,
-            "content": [{"type": "text", "text": "unallowlisted-sentinel"}],
-            "structuredContent": {"stage": "unsafe stage sentinel", "category": "unallowlisted-sentinel"}
-        }),
-    ] {
-        let error = project_tool_call_result("thread_read", &result).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "tool=thread_read; method=tools/call; stage=mcp_rpc; category=unknown"
-        );
-        for sentinel in [
-            "missing-sentinel",
-            "malformed-sentinel",
-            "stage-sentinel",
-            "unallowlisted-sentinel",
-            "unsafe stage sentinel",
-        ] {
-            assert!(!error.to_string().contains(sentinel));
-        }
-    }
-
-    let sensitive_stages = [
-        "/tmp/path-sentinel",
-        "environment-sentinel",
-        "socket-path-sentinel",
-        "credential-sentinel",
-        "panic-payload-sentinel",
-    ];
-    for stage in sensitive_stages {
-        let error = project_tool_call_result(
-            "thread_read",
-            &json!({
-                "isError": true,
-                "content": [{"type": "text", "text": "content-sentinel"}],
-                "structuredContent": {
-                    "stage": stage,
-                    "category": "native_error",
-                    "message": "message-sentinel",
-                    "native": {"message": "native-message-sentinel"}
-                }
-            }),
-        )
-        .unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "tool=thread_read; method=tools/call; stage=mcp_rpc; category=native_error"
-        );
-        for sentinel in sensitive_stages {
-            assert!(!error.to_string().contains(sentinel));
-        }
-        for sentinel in [
-            "content-sentinel",
-            "message-sentinel",
-            "native-message-sentinel",
-        ] {
-            assert!(!error.to_string().contains(sentinel));
-        }
-    }
 }
 
 pub(super) fn caller_bound_tool_request_keeps_metadata_outside_public_arguments() {
@@ -848,56 +1124,52 @@ pub(super) fn caller_bound_tool_request_keeps_metadata_outside_public_arguments(
 }
 
 impl McpClient {
-    async fn start() -> Result<Self, Box<dyn Error>> {
+    async fn start() -> Result<Self, LiveCode> {
+        let startup = Deadline::after(STARTUP_TIMEOUT);
         let binary = cargo_bin("codex-session-control");
         if !binary.is_file() {
-            return Err(io::Error::other("the built CSC binary is unavailable").into());
+            return Err(LiveCode::ChildSpawnFailed);
         }
         let mut command = Command::new(binary);
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let mut child = command.spawn()?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| io::Error::other("CSC child stdin is unavailable"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| io::Error::other("CSC child stdout is unavailable"))?;
+        let mut child = OwnedMcpChild::spawn(&mut command)?;
+        let stdin = child.take_stdin().ok_or(LiveCode::ChildSpawnFailed)?;
+        let stdout = child.take_stdout().ok_or(LiveCode::ChildSpawnFailed)?;
         let mut client = Self {
-            child,
             stdin: Some(stdin),
-            stdout: BufReader::new(stdout).lines(),
+            stdout: BufReader::new(stdout),
+            child,
             next_id: 1,
         };
         client
-            .request(
+            .request_with_deadline(
                 "initialize",
                 json!({
                     "protocolVersion": "2025-11-25",
                     "capabilities": {},
                     "clientInfo": {"name": "live-all-tools", "version": "1.0.0"},
                 }),
+                startup,
             )
             .await?;
         client
-            .notification("notifications/initialized", json!({}))
+            .notification_with_deadline("notifications/initialized", json!({}), startup)
             .await?;
         Ok(client)
     }
 
-    pub(super) async fn list_tools(&mut self) -> Result<Value, Box<dyn Error>> {
-        Ok(self.request("tools/list", json!({})).await?)
+    pub(super) async fn list_tools(&mut self) -> Result<Value, LiveCode> {
+        self.request("tools/list", json!({})).await
     }
 
     pub(super) async fn list_threads(
         &mut self,
         workspace: &Path,
         archived: bool,
-    ) -> Result<Value, Box<dyn Error>> {
+    ) -> Result<Value, LiveCode> {
         self.call_tool(
             "threads_list",
             json!({"cwd": workspace, "archived": archived}),
@@ -905,10 +1177,7 @@ impl McpClient {
         .await
     }
 
-    pub(super) async fn create_thread(
-        &mut self,
-        workspace: &Path,
-    ) -> Result<Value, Box<dyn Error>> {
+    pub(super) async fn create_thread(&mut self, workspace: &Path) -> Result<Value, LiveCode> {
         self.call_tool(
             "thread_create",
             json!({
@@ -922,7 +1191,7 @@ impl McpClient {
     pub(super) async fn fork_thread(
         &mut self,
         owned_id: &OwnedThreadId,
-    ) -> Result<Value, Box<dyn Error>> {
+    ) -> Result<Value, LiveCode> {
         self.call_tool(
             "thread_fork",
             json!({"threadId": owned_id.as_str(), "deferGoalContinuation": false}),
@@ -933,7 +1202,7 @@ impl McpClient {
     pub(super) async fn read_thread(
         &mut self,
         owned_id: &OwnedThreadId,
-    ) -> Result<Value, Box<dyn Error>> {
+    ) -> Result<Value, LiveCode> {
         self.call_tool("thread_read", json!({"threadId": owned_id.as_str()}))
             .await
     }
@@ -942,11 +1211,16 @@ impl McpClient {
         &mut self,
         caller: &OwnedThreadId,
         owned_id: &OwnedThreadId,
-    ) -> Result<Value, Box<dyn Error>> {
-        self.call_tool_as(
-            caller,
-            "threads_wait",
-            json!({"threadIds": [owned_id.as_str()], "timeoutMs": 120_000}),
+    ) -> Result<Value, LiveCode> {
+        let deadline = Deadline::after(WAIT_REQUEST_TIMEOUT);
+        let timeout_ms = deadline.native_wait_timeout_ms()?;
+        self.call_tool_request(
+            tool_call_params(
+                "threads_wait",
+                json!({"threadIds": [owned_id.as_str()], "timeoutMs": timeout_ms}),
+                Some(caller.as_str()),
+            ),
+            deadline,
         )
         .await
     }
@@ -955,7 +1229,7 @@ impl McpClient {
         &mut self,
         caller: &OwnedThreadId,
         owned_id: &OwnedThreadId,
-    ) -> Result<Value, Box<dyn Error>> {
+    ) -> Result<Value, LiveCode> {
         self.call_tool_as(
             caller,
             "thread_message_send",
@@ -967,10 +1241,7 @@ impl McpClient {
         .await
     }
 
-    pub(super) async fn set_title(
-        &mut self,
-        owned_id: &OwnedThreadId,
-    ) -> Result<Value, Box<dyn Error>> {
+    pub(super) async fn set_title(&mut self, owned_id: &OwnedThreadId) -> Result<Value, LiveCode> {
         self.call_tool(
             "thread_title_set",
             json!({"threadId": owned_id.as_str(), "title": "Disposable live validation"}),
@@ -982,7 +1253,7 @@ impl McpClient {
         &mut self,
         caller: &OwnedThreadId,
         owned_id: &OwnedThreadId,
-    ) -> Result<Value, Box<dyn Error>> {
+    ) -> Result<Value, LiveCode> {
         self.call_tool_as(
             caller,
             "thread_goal_get",
@@ -995,7 +1266,7 @@ impl McpClient {
         &mut self,
         caller: &OwnedThreadId,
         owned_id: &OwnedThreadId,
-    ) -> Result<Value, Box<dyn Error>> {
+    ) -> Result<Value, LiveCode> {
         self.call_tool_as(
             caller,
             "thread_goal_set",
@@ -1008,7 +1279,7 @@ impl McpClient {
         &mut self,
         caller: &OwnedThreadId,
         owned_id: &OwnedThreadId,
-    ) -> Result<Value, Box<dyn Error>> {
+    ) -> Result<Value, LiveCode> {
         self.call_tool_as(
             caller,
             "thread_goal_pause",
@@ -1021,7 +1292,7 @@ impl McpClient {
         &mut self,
         caller: &OwnedThreadId,
         owned_id: &OwnedThreadId,
-    ) -> Result<Value, Box<dyn Error>> {
+    ) -> Result<Value, LiveCode> {
         self.call_tool_as(
             caller,
             "thread_goal_resume",
@@ -1034,7 +1305,7 @@ impl McpClient {
         &mut self,
         caller: &OwnedThreadId,
         owned_id: &OwnedThreadId,
-    ) -> Result<Value, Box<dyn Error>> {
+    ) -> Result<Value, LiveCode> {
         self.call_tool_as(
             caller,
             "thread_goal_clear",
@@ -1047,7 +1318,7 @@ impl McpClient {
         &mut self,
         caller: &OwnedThreadId,
         owned_id: &OwnedThreadId,
-    ) -> Result<Value, Box<dyn Error>> {
+    ) -> Result<Value, LiveCode> {
         self.call_tool_as(
             caller,
             "thread_interrupt",
@@ -1056,8 +1327,9 @@ impl McpClient {
         .await
     }
 
-    async fn call_tool(&mut self, name: &str, arguments: Value) -> Result<Value, Box<dyn Error>> {
-        self.call_tool_request(name, tool_call_params(name, arguments, None))
+    async fn call_tool(&mut self, name: &str, arguments: Value) -> Result<Value, LiveCode> {
+        let deadline = Deadline::after(REQUEST_TIMEOUT);
+        self.call_tool_request(tool_call_params(name, arguments, None), deadline)
             .await
     }
 
@@ -1066,81 +1338,91 @@ impl McpClient {
         caller: &OwnedThreadId,
         name: &str,
         arguments: Value,
-    ) -> Result<Value, Box<dyn Error>> {
+    ) -> Result<Value, LiveCode> {
+        let deadline = Deadline::after(REQUEST_TIMEOUT);
         self.call_tool_request(
-            name,
             tool_call_params(name, arguments, Some(caller.as_str())),
+            deadline,
         )
         .await
     }
 
     async fn call_tool_request(
         &mut self,
-        name: &str,
         params: Value,
-    ) -> Result<Value, Box<dyn Error>> {
+        deadline: Deadline,
+    ) -> Result<Value, LiveCode> {
         let response = self
-            .request(TOOLS_CALL_METHOD, params)
-            .await
-            .map_err(|failure| failure.for_tool(name))?;
-        project_tool_call_result(name, &response).map_err(Into::into)
+            .request_with_deadline(TOOLS_CALL_METHOD, params, deadline)
+            .await?;
+        project_tool_call_result(&response)
     }
 
-    async fn request(&mut self, method: &str, params: Value) -> Result<Value, McpRequestFailure> {
+    async fn request(&mut self, method: &str, params: Value) -> Result<Value, LiveCode> {
+        self.request_with_deadline(method, params, Deadline::after(REQUEST_TIMEOUT))
+            .await
+    }
+
+    async fn request_with_deadline(
+        &mut self,
+        method: &str,
+        params: Value,
+        deadline: Deadline,
+    ) -> Result<Value, LiveCode> {
+        deadline.check()?;
         let id = self.next_id;
         self.next_id += 1;
         let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| McpRequestFailure::transport(method, "mcp_rpc"))?;
-        stdin
-            .write_all(message.to_string().as_bytes())
-            .await
-            .map_err(|_| McpRequestFailure::transport(method, "mcp_write"))?;
-        stdin
-            .write_all(b"\n")
-            .await
-            .map_err(|_| McpRequestFailure::transport(method, "mcp_write"))?;
-        stdin
-            .flush()
-            .await
-            .map_err(|_| McpRequestFailure::transport(method, "mcp_write"))?;
-        tokio::time::timeout(Duration::from_secs(20), async {
-            loop {
-                let line = self
-                    .stdout
-                    .next_line()
-                    .await
-                    .map_err(|_| McpRequestFailure::transport(method, "mcp_read"))?
-                    .ok_or_else(|| McpRequestFailure::transport(method, "mcp_read"))?;
-                let value: Value = serde_json::from_str(&line)
-                    .map_err(|_| McpRequestFailure::transport(method, "mcp_decode"))?;
-                if value.get("id").and_then(Value::as_u64) != Some(id) {
-                    continue;
-                }
-                if let Some(error) = value.get("error") {
-                    return Err(McpRequestFailure::rpc(method, error));
-                }
-                return value
-                    .get("result")
-                    .cloned()
-                    .ok_or_else(|| McpRequestFailure::transport(method, "mcp_rpc"));
+        let mut encoded = serde_json::to_vec(&message).map_err(|_| LiveCode::ToolFailed)?;
+        deadline.check()?;
+        if encoded.len() >= MAX_MCP_FRAME_BYTES {
+            return Err(LiveCode::ToolFailed);
+        }
+        encoded.push(b'\n');
+        let stdin = self.stdin.as_mut().ok_or(LiveCode::ToolFailed)?;
+        deadline
+            .run_io(stdin.write_all(&encoded), LiveCode::ToolFailed)
+            .await?;
+        deadline.run_io(stdin.flush(), LiveCode::ToolFailed).await?;
+        loop {
+            let line = read_bounded_line(&mut self.stdout, deadline, MAX_MCP_FRAME_BYTES).await?;
+            deadline.check()?;
+            let value: Value = serde_json::from_slice(&line).map_err(|_| LiveCode::ToolFailed)?;
+            deadline.check()?;
+            if value.get("id").and_then(Value::as_u64) != Some(id) {
+                continue;
             }
-        })
-        .await
-        .map_err(|_| McpRequestFailure::transport(method, "mcp_timeout"))?
+            if value.get("error").is_some() {
+                return Err(LiveCode::ToolFailed);
+            }
+            return value.get("result").cloned().ok_or(LiveCode::ToolFailed);
+        }
     }
 
-    async fn notification(&mut self, method: &str, params: Value) -> Result<(), Box<dyn Error>> {
+    async fn notification_with_deadline(
+        &mut self,
+        method: &str,
+        params: Value,
+        deadline: Deadline,
+    ) -> Result<(), LiveCode> {
+        deadline.check()?;
         let message = json!({"jsonrpc": "2.0", "method": method, "params": params});
-        let stdin = self
-            .stdin
-            .as_mut()
-            .ok_or_else(|| io::Error::other("CSC child stdin is closed"))?;
-        stdin.write_all(message.to_string().as_bytes()).await?;
-        stdin.write_all(b"\n").await?;
-        stdin.flush().await?;
+        let mut encoded = serde_json::to_vec(&message).map_err(|_| LiveCode::ToolFailed)?;
+        deadline.check()?;
+        if encoded.len() >= MAX_MCP_FRAME_BYTES {
+            return Err(LiveCode::ToolFailed);
+        }
+        encoded.push(b'\n');
+        let stdin = self.stdin.as_mut().ok_or(LiveCode::ToolFailed)?;
+        deadline
+            .run_io(stdin.write_all(&encoded), LiveCode::ToolFailed)
+            .await?;
+        deadline.run_io(stdin.flush(), LiveCode::ToolFailed).await?;
         Ok(())
+    }
+
+    pub(super) async fn shutdown(&mut self, budget: CleanupBudget) -> Result<(), LiveCode> {
+        self.stdin.take();
+        self.child.shutdown_and_reap(budget).await.map(|_| ())
     }
 }

@@ -47,24 +47,24 @@ async fn direct_cleanup_requires_safe_endpoint_and_exact_initialized_identity() 
     cases::direct_cleanup_requires_safe_endpoint_and_exact_initialized_identity().await;
 }
 
-#[test]
-fn cleanup_failure_keeps_normal_tool_run_error() {
-    cases::cleanup_failure_keeps_normal_tool_run_error();
+#[tokio::test]
+async fn child_is_owned_immediately_and_every_exit_path_reaps() {
+    cases::child_is_owned_immediately_and_every_exit_path_reaps().await;
+}
+
+#[tokio::test]
+async fn child_timeout_kills_and_confirms_reap() {
+    cases::child_timeout_kills_and_confirms_reap().await;
+}
+
+#[tokio::test]
+async fn deadline_scopes_are_bounded_and_do_not_extend_each_other() {
+    cases::deadline_scopes_are_bounded_and_do_not_extend_each_other().await;
 }
 
 #[test]
-fn cleanup_failure_classifies_tool_run_panic_without_payload() {
-    cases::cleanup_failure_classifies_tool_run_panic_without_payload();
-}
-
-#[test]
-fn mcp_json_rpc_tool_error_preserves_allowlisted_context_without_sensitive_data() {
-    live_harness::mcp_json_rpc_tool_error_preserves_allowlisted_context_without_sensitive_data();
-}
-
-#[test]
-fn mcp_tool_result_error_preserves_allowlisted_context_and_fixed_fallbacks() {
-    live_harness::mcp_tool_result_error_preserves_allowlisted_context_and_fixed_fallbacks();
+fn live_codes_are_the_only_output_and_cleanup_has_precedence() {
+    cases::live_codes_are_the_only_output_and_cleanup_has_precedence();
 }
 
 #[test]

@@ -2,7 +2,6 @@ use std::{
     collections::BTreeSet,
     error::Error,
     ffi::{OsStr, OsString},
-    fmt::Display,
     fs::{self, File},
     io::{self, Read, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
@@ -19,7 +18,7 @@ use tokio::{net::UnixListener, sync::Mutex};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 use crate::endpoint_policy::{ThreadStorage, classify_thread_storage, is_normalized_absolute_path};
-use crate::live_harness::LiveHarness;
+use crate::live_harness::{CleanupBudget, LiveCode, LiveHarness};
 
 const LIVE_OPT_IN: &str = "CODEX_SESSION_CONTROL_LIVE_ALL_TOOLS";
 const LIVE_HARD_KILL: &str = "CODEX_SESSION_CONTROL_LIVE_HARD_KILL";
@@ -31,7 +30,8 @@ const STAGING_NAME: &str = "current.next";
 const LOCK_NAME: &str = "lock";
 const RUNS_NAME: &str = "runs";
 const MAX_JOURNAL_BYTES: usize = 4 * 1024 * 1024;
-type LiveRunResult = Result<Result<(), Box<dyn Error>>, Box<dyn std::any::Any + Send>>;
+static PROCESS_INHERITANCE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+type LiveRunResult = Result<Result<(), LiveCode>, Box<dyn std::any::Any + Send>>;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
@@ -383,16 +383,6 @@ impl FixedJournal {
             return Err(io::Error::other("live journal is not active"));
         };
         Ok(owned_thread_ids.clone())
-    }
-
-    fn cleanup_failure(&self, error: impl Display) -> io::Error {
-        let owned = match &self.document.state {
-            JournalState::Active {
-                owned_thread_ids, ..
-            } => owned_thread_ids.len(),
-            JournalState::Idle | JournalState::CleanupComplete { .. } => 0,
-        };
-        io::Error::other(format!("live cleanup failed: {error}; owned={owned}"))
     }
 
     fn record_recovered_ids(&mut self, ids: Vec<String>) -> io::Result<()> {
@@ -987,6 +977,9 @@ fn select_live_mode(
 }
 
 pub(super) fn journal_grants_authority_only_after_durable_replace() {
+    let _process_inheritance_guard = PROCESS_INHERITANCE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temporary = private_tempdir();
     let root = temporary.path().join(LIVE_ROOT_NAME);
     let mut journal = FixedJournal::begin(root, "00000000000000000000000000000001").unwrap();
@@ -1175,6 +1168,9 @@ pub(super) fn journal_grants_authority_only_after_durable_replace() {
 }
 
 pub(super) fn journal_rejects_unsafe_or_mismatched_authority() {
+    let _process_inheritance_guard = PROCESS_INHERITANCE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let temporary = private_tempdir();
     assert!(fixed_live_authority_from(temporary.path().join("."), false).is_err());
 
@@ -1328,6 +1324,9 @@ pub(super) fn journal_rejects_unsafe_or_mismatched_authority() {
 }
 
 pub(super) fn live_mode_matrix_is_total_and_recovery_is_fixed_authority() {
+    let _process_inheritance_guard = PROCESS_INHERITANCE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
         select_live_mode(Some(OsStr::new("1")), None, None).unwrap(),
         LiveMode::Normal
@@ -1783,7 +1782,7 @@ pub(super) async fn archive_reconciliation_dispatches_at_most_once_after_exact_a
             .unwrap();
     let writes = ledger.writes;
 
-    let result = reconcile_direct_cleanup(&harness, &mut ledger).await;
+    let result = reconcile_direct_cleanup(&harness, &mut ledger, CleanupBudget::new()).await;
     let methods = server.method_names().await;
 
     assert!(
@@ -1840,9 +1839,13 @@ pub(super) async fn archive_reconciliation_dispatches_at_most_once_after_exact_a
     )
     .unwrap();
 
-    reconcile_direct_cleanup(&archived_harness, &mut archived_ledger)
-        .await
-        .unwrap();
+    reconcile_direct_cleanup(
+        &archived_harness,
+        &mut archived_ledger,
+        CleanupBudget::new(),
+    )
+    .await
+    .unwrap();
     assert_eq!(archived_server.connection_count().await, 1);
     assert_eq!(archived_server.method_call_count("thread/list").await, 2);
     assert_eq!(archived_server.method_call_count("thread/read").await, 1);
@@ -1876,9 +1879,13 @@ pub(super) async fn archive_reconciliation_dispatches_at_most_once_after_exact_a
     .unwrap();
     let writes = duplicate_ledger.writes;
     assert!(
-        reconcile_direct_cleanup(&duplicate_harness, &mut duplicate_ledger)
-            .await
-            .is_err()
+        reconcile_direct_cleanup(
+            &duplicate_harness,
+            &mut duplicate_ledger,
+            CleanupBudget::new(),
+        )
+        .await
+        .is_err()
     );
     assert_eq!(duplicate_ledger.writes, writes);
     assert_eq!(duplicate_server.method_call_count("thread/read").await, 0);
@@ -1934,8 +1941,12 @@ pub(super) async fn direct_cleanup_requires_safe_endpoint_and_exact_initialized_
         vec![first_server.socket.clone(), second_server.socket.clone()],
     )
     .unwrap();
-    drop(desktop_harness.connect_native().await.unwrap());
-    drop(desktop_harness.connect_native().await.unwrap());
+    let first_budget = CleanupBudget::new();
+    let mut first_connection = desktop_harness.connect_native(first_budget).await.unwrap();
+    first_connection.shutdown(first_budget).await.unwrap();
+    let second_budget = CleanupBudget::new();
+    let mut second_connection = desktop_harness.connect_native(second_budget).await.unwrap();
+    second_connection.shutdown(second_budget).await.unwrap();
     assert_eq!(first_server.connection_count().await, 1);
     assert_eq!(second_server.connection_count().await, 1);
 
@@ -1943,7 +1954,7 @@ pub(super) async fn direct_cleanup_requires_safe_endpoint_and_exact_initialized_
         ArchiveReconciliationServer::start(exact_initialized_identity(), Vec::new(), Vec::new())
             .await;
     unsafe_server.set_socket_mode(0o644);
-    assert_rejected_direct_cleanup(&unsafe_server, "socket_validation").await;
+    assert_rejected_direct_cleanup(&unsafe_server, "endpoint_rejected").await;
 
     for (initialized, expected) in [
         (
@@ -1979,7 +1990,7 @@ async fn assert_rejected_direct_cleanup(server: &ArchiveReconciliationServer, ex
         LiveHarness::for_test_native_socket(ledger.workspace().unwrap(), server.socket.clone())
             .unwrap();
 
-    let error = reconcile_direct_cleanup(&harness, &mut ledger)
+    let error = reconcile_direct_cleanup(&harness, &mut ledger, CleanupBudget::new())
         .await
         .unwrap_err();
     assert_eq!(error.to_string(), expected);
@@ -2128,27 +2139,90 @@ impl ArchiveReconciliationServer {
     }
 }
 
-pub(super) fn cleanup_failure_keeps_normal_tool_run_error() {
-    let run_result: LiveRunResult = Ok(Err(io::Error::other(
-        "pre-teardown discoverability failed",
-    )
-    .into()));
-
-    assert_eq!(
-        cleanup_failure_with_run_result("archive proof failed", &run_result).to_string(),
-        "archive proof failed; tool run also failed: pre-teardown discoverability failed"
-    );
+pub(super) async fn child_is_owned_immediately_and_every_exit_path_reaps() {
+    if std::env::var_os("CODEX_SESSION_CONTROL_OWNED_CHILD_PROBE").as_deref()
+        != Some(OsStr::new("exit-paths"))
+    {
+        run_isolated_child_probe(
+            "child_is_owned_immediately_and_every_exit_path_reaps",
+            "exit-paths",
+        );
+        return;
+    }
+    crate::live_harness::assert_owned_child_exit_paths_for_test().await;
 }
 
-pub(super) fn cleanup_failure_classifies_tool_run_panic_without_payload() {
-    let run_result: LiveRunResult = Err(Box::new("sensitive panic payload"));
-    let error = cleanup_failure_with_run_result("archive proof failed", &run_result);
+pub(super) async fn child_timeout_kills_and_confirms_reap() {
+    if std::env::var_os("CODEX_SESSION_CONTROL_OWNED_CHILD_PROBE").as_deref()
+        != Some(OsStr::new("timeout"))
+    {
+        run_isolated_child_probe("child_timeout_kills_and_confirms_reap", "timeout");
+        return;
+    }
+    crate::live_harness::assert_owned_child_timeout_for_test().await;
+}
 
+fn run_isolated_child_probe(test_name: &str, probe: &str) {
+    let _process_inheritance_guard = PROCESS_INHERITANCE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .env("CODEX_SESSION_CONTROL_OWNED_CHILD_PROBE", probe)
+        .arg(test_name)
+        .arg("--exact")
+        .arg("--test-threads=1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "isolated owned-child probe failed");
+}
+
+pub(super) async fn deadline_scopes_are_bounded_and_do_not_extend_each_other() {
+    crate::live_harness::assert_deadline_and_framing_contract_for_test().await;
+}
+
+pub(super) fn live_codes_are_the_only_output_and_cleanup_has_precedence() {
     assert_eq!(
-        error.to_string(),
-        "archive proof failed; tool run also panicked"
+        LiveCode::ALL.map(|code| code.to_string()),
+        [
+            "hard_kill_ready",
+            "opt_in_rejected",
+            "journal_rejected",
+            "endpoint_rejected",
+            "identity_unverified",
+            "version_unsupported",
+            "child_spawn_failed",
+            "child_reap_failed",
+            "tool_failed",
+            "deadline_exceeded",
+            "archive_proof_failed",
+            "cleanup_failed",
+        ]
     );
-    assert!(!error.to_string().contains("sensitive"));
+    assert_eq!(
+        finish_live_result(Err(LiveCode::ArchiveProofFailed), Ok(Ok(()))),
+        Err(LiveCode::ArchiveProofFailed)
+    );
+    assert_eq!(
+        finish_live_result(
+            Err(LiveCode::ChildReapFailed),
+            Ok(Err(LiveCode::ToolFailed))
+        ),
+        Err(LiveCode::ChildReapFailed)
+    );
+    assert_eq!(
+        finish_live_result(
+            Err(LiveCode::ChildReapFailed),
+            Err(Box::new("sensitive panic payload")),
+        ),
+        Err(LiveCode::ChildReapFailed)
+    );
+    assert_eq!(
+        finish_live_result(Ok(()), Ok(Err(LiveCode::ToolFailed))),
+        Err(LiveCode::ToolFailed)
+    );
 }
 
 pub(super) async fn live_desktop_authority_all_thirteen_tools_are_disposable()
@@ -2156,21 +2230,30 @@ pub(super) async fn live_desktop_authority_all_thirteen_tools_are_disposable()
     let opt_in = std::env::var_os(LIVE_OPT_IN);
     let hard_kill = std::env::var_os(LIVE_HARD_KILL);
     let recovery = std::env::var_os(LIVE_RECOVERY);
-    match select_live_mode(opt_in.as_deref(), hard_kill.as_deref(), recovery.as_deref())? {
-        LiveMode::Recovery => {
-            let ledger = recovery_ledger(opt_in.as_deref(), None)?;
-            return recover_hard_kill_ledger(ledger).await;
-        }
-        LiveMode::HardKill => {
-            return Err(
-                io::Error::other("hard-kill orchestration is not available in Slice 1").into(),
-            );
-        }
-        LiveMode::Normal => {}
+    let mode = select_live_mode(opt_in.as_deref(), hard_kill.as_deref(), recovery.as_deref())
+        .map_err(|_| LiveCode::OptInRejected)?;
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = AssertUnwindSafe(execute_live_mode(mode, opt_in.as_deref()))
+        .catch_unwind()
+        .await;
+    std::panic::set_hook(previous_hook);
+    match result {
+        Ok(result) => result.map_err(Into::into),
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+async fn execute_live_mode(mode: LiveMode, opt_in: Option<&OsStr>) -> Result<(), LiveCode> {
+    if mode == LiveMode::Recovery {
+        let budget = CleanupBudget::new();
+        budget.check()?;
+        let ledger = recovery_ledger(opt_in, None).map_err(|_| LiveCode::JournalRejected)?;
+        return recover_hard_kill_ledger(ledger, budget).await;
     }
 
-    let mut ledger = start_normal_journal()?;
-    let workspace = ledger.workspace()?;
+    let mut ledger = start_normal_journal().map_err(|_| LiveCode::JournalRejected)?;
+    let workspace = ledger.workspace().map_err(|_| LiveCode::JournalRejected)?;
     let mut harness = LiveHarness::from_ledger(&workspace)?;
     let preflight_result = AssertUnwindSafe(async {
         harness.start_mcp().await?;
@@ -2182,86 +2265,102 @@ pub(super) async fn live_desktop_authority_all_thirteen_tools_are_disposable()
     .catch_unwind()
     .await;
     if !matches!(preflight_result, Ok(Ok(()))) {
-        let cleanup_result: Result<(), Box<dyn Error>> = async {
-            harness.stop_and_reap_mcp_child().await?;
-            ledger.abandon_before_mutation()?;
+        let budget = CleanupBudget::new();
+        let cleanup_result = async {
+            harness.stop_and_reap_mcp_child(budget).await?;
+            budget.check()?;
+            ledger
+                .abandon_before_mutation()
+                .map_err(|_| LiveCode::CleanupFailed)?;
             Ok(())
         }
         .await;
-        return finish_live_result(&ledger, cleanup_result, preflight_result);
+        return finish_live_result(cleanup_result, preflight_result);
     }
 
     let run_result = AssertUnwindSafe(run_all_thirteen_tools(&mut harness, &mut ledger))
         .catch_unwind()
         .await;
-    let cleanup_result: Result<(), Box<dyn Error>> = async {
-        harness.stop_and_reap_mcp_child().await?;
-        reconcile_direct_cleanup(&harness, &mut ledger).await?;
-        ledger.cleanup_complete()?;
-        ledger.delete_local_idempotently()?;
+    if mode == LiveMode::HardKill && matches!(run_result, Ok(Ok(()))) {
+        println!("{}", LiveCode::HardKillReady);
+        std::io::stdout()
+            .flush()
+            .map_err(|_| LiveCode::ToolFailed)?;
+        std::future::pending::<()>().await;
+        unreachable!("hard-kill mode is terminated only by its private runner")
+    }
+
+    let budget = CleanupBudget::new();
+    let cleanup_result = async {
+        harness.stop_and_reap_mcp_child(budget).await?;
+        reconcile_direct_cleanup(&harness, &mut ledger, budget).await?;
+        budget.check()?;
+        ledger
+            .cleanup_complete()
+            .map_err(|_| LiveCode::CleanupFailed)?;
+        budget.check()?;
+        ledger
+            .delete_local_idempotently()
+            .map_err(|_| LiveCode::CleanupFailed)?;
         Ok(())
     }
     .await;
 
-    finish_live_result(&ledger, cleanup_result, run_result)
+    finish_live_result(cleanup_result, run_result)
 }
 
 fn finish_live_result(
-    ledger: &FixedJournal,
-    cleanup_result: Result<(), Box<dyn Error>>,
+    cleanup_result: Result<(), LiveCode>,
     run_result: LiveRunResult,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), LiveCode> {
     match (cleanup_result, run_result) {
-        (Err(cleanup_error), run_result) => Err(ledger
-            .cleanup_failure(cleanup_failure_with_run_result(cleanup_error, &run_result))
-            .into()),
+        (Err(cleanup_error), _) => Err(cleanup_error),
         (Ok(()), Ok(result)) => result,
         (Ok(()), Err(payload)) => std::panic::resume_unwind(payload),
     }
 }
 
-fn cleanup_failure_with_run_result(cleanup: impl Display, run_result: &LiveRunResult) -> io::Error {
-    let mut message = cleanup.to_string();
-    match run_result {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => message.push_str(&format!("; tool run also failed: {error}")),
-        Err(_) => message.push_str("; tool run also panicked"),
-    }
-    io::Error::other(message)
-}
-
-async fn recover_hard_kill_ledger(mut ledger: FixedJournal) -> Result<(), Box<dyn Error>> {
+async fn recover_hard_kill_ledger(
+    mut ledger: FixedJournal,
+    budget: CleanupBudget,
+) -> Result<(), LiveCode> {
+    budget.check()?;
     if matches!(ledger.document.state, JournalState::CleanupComplete { .. }) {
-        ledger.delete_local_idempotently()?;
+        ledger
+            .delete_local_idempotently()
+            .map_err(|_| LiveCode::CleanupFailed)?;
         return Ok(());
     }
-    let workspace = ledger.workspace()?;
+    let workspace = ledger.workspace().map_err(|_| LiveCode::JournalRejected)?;
     let harness = LiveHarness::from_ledger(&workspace)?;
-    let cleanup_result = reconcile_direct_cleanup(&harness, &mut ledger).await;
-    if let Err(error) = cleanup_result {
-        return Err(ledger.cleanup_failure(error).into());
-    }
-    if let Err(error) = ledger
+    reconcile_direct_cleanup(&harness, &mut ledger, budget).await?;
+    budget.check()?;
+    ledger
         .cleanup_complete()
-        .and_then(|()| ledger.delete_local_idempotently())
-    {
-        return Err(ledger.cleanup_failure(error).into());
-    }
+        .map_err(|_| LiveCode::CleanupFailed)?;
+    budget.check()?;
+    ledger
+        .delete_local_idempotently()
+        .map_err(|_| LiveCode::CleanupFailed)?;
     Ok(())
 }
 
 async fn run_all_thirteen_tools(
     harness: &mut LiveHarness,
     ledger: &mut FixedJournal,
-) -> Result<(), Box<dyn Error>> {
-    let workspace = ledger.workspace()?;
+) -> Result<(), LiveCode> {
+    let workspace = ledger.workspace().map_err(|_| LiveCode::JournalRejected)?;
     let created = {
         let response = harness.mcp_mut()?.create_thread(&workspace).await?;
-        ledger.record_created_response(&response)?
+        ledger
+            .record_created_response(&response)
+            .map_err(|_| LiveCode::JournalRejected)?
     };
     let forked = {
         let response = harness.mcp_mut()?.fork_thread(&created).await?;
-        ledger.record_forked_response(&response)?
+        ledger
+            .record_forked_response(&response)
+            .map_err(|_| LiveCode::JournalRejected)?
     };
     let mcp = harness.mcp_mut()?;
     mcp.list_threads(&workspace, false).await?;
@@ -2285,140 +2384,126 @@ async fn run_all_thirteen_tools(
 async fn reconcile_direct_cleanup(
     harness: &LiveHarness,
     ledger: &mut FixedJournal,
-) -> Result<(), Box<dyn Error>> {
-    let mut native = harness.connect_native().await?;
-    native.initialize().await?;
-    native.recovery_home()?;
-    native.finish_initialization().await?;
-    let active = harness.workspace_thread_ids(&mut native, false).await?;
-    let archived = harness.workspace_thread_ids(&mut native, true).await?;
-    let mut unique = BTreeSet::new();
-    let mut prospective = Vec::with_capacity(active.len() + archived.len());
-    for id in active.into_iter().chain(archived) {
-        if !unique.insert(id.clone()) {
-            return Err(io::Error::other("live recovery discovered a duplicate ID").into());
+    budget: CleanupBudget,
+) -> Result<(), LiveCode> {
+    budget.check()?;
+    let mut native = harness.connect_native(budget).await?;
+    let result = async {
+        native.initialize(budget).await?;
+        native.recovery_home()?;
+        native.finish_initialization(budget).await?;
+        let active = harness
+            .workspace_thread_ids(&mut native, false, budget)
+            .await?;
+        let archived = harness
+            .workspace_thread_ids(&mut native, true, budget)
+            .await?;
+        let mut unique = BTreeSet::new();
+        let mut prospective = Vec::with_capacity(active.len() + archived.len());
+        for id in active.into_iter().chain(archived) {
+            if !unique.insert(id.clone()) {
+                return Err(LiveCode::ArchiveProofFailed);
+            }
+            prospective.push(id);
         }
-        prospective.push(id);
+        if prospective.is_empty() {
+            return Err(LiveCode::ArchiveProofFailed);
+        }
+        budget.check()?;
+        ledger
+            .record_recovered_ids(prospective)
+            .map_err(|_| LiveCode::JournalRejected)?;
+        archive_and_verify(&mut native, ledger, budget).await
     }
-    if prospective.is_empty() {
-        return Err(io::Error::other("live recovery discovered no workspace IDs").into());
+    .await;
+    let shutdown = native.shutdown(budget).await;
+    match (result, shutdown) {
+        (_, Err(error)) => Err(error),
+        (result, Ok(())) => result,
     }
-    ledger.record_recovered_ids(prospective)?;
-    archive_and_verify(&mut native, ledger).await
 }
 
 async fn archive_and_verify(
     native: &mut crate::live_harness::NativeConnection,
     ledger: &FixedJournal,
-) -> Result<(), Box<dyn Error>> {
-    let owned_thread_ids = ledger.owned_thread_ids()?;
+    budget: CleanupBudget,
+) -> Result<(), LiveCode> {
+    budget.check()?;
+    let owned_thread_ids = ledger
+        .owned_thread_ids()
+        .map_err(|_| LiveCode::JournalRejected)?;
     let mut archive_dispatched = vec![false; owned_thread_ids.len()];
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
 
     loop {
-        let mut counts = ExactArchiveCounts::new(owned_thread_ids.len());
+        budget.check()?;
+        let mut archived = 0;
         let mut active = Vec::new();
         for (index, owned_id) in owned_thread_ids.iter().enumerate() {
-            match exact_thread_storage(native, owned_id).await {
-                Ok(ThreadStorage::Archived) => counts.archived += 1,
-                Ok(ThreadStorage::Active) => {
-                    counts.active += 1;
+            match exact_thread_storage(native, owned_id, budget).await? {
+                ThreadStorage::Archived => archived += 1,
+                ThreadStorage::Active => {
                     if !archive_dispatched[index] {
                         active.push((index, owned_id));
                     }
                 }
-                Err(category) => {
-                    return Err(exact_archive_failure("thread/read", category, counts).into());
-                }
             }
         }
-        if counts.is_complete() {
+        if archived == owned_thread_ids.len() {
             return Ok(());
         }
         for (index, owned_id) in active {
             archive_dispatched[index] = true;
-            if archive_owned_thread(native, owned_id).await.is_err() {
-                return Err(exact_archive_failure("thread/archive", "native_error", counts).into());
-            }
+            archive_owned_thread(native, owned_id, budget).await?;
         }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(exact_archive_failure("thread/read", "not_archived", counts).into());
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-}
-
-#[derive(Default)]
-struct ExactArchiveCounts {
-    total: usize,
-    active: usize,
-    archived: usize,
-}
-
-impl ExactArchiveCounts {
-    fn new(total: usize) -> Self {
-        Self {
-            total,
-            ..Self::default()
-        }
-    }
-
-    fn unresolved(&self) -> usize {
-        self.total - self.active - self.archived
-    }
-
-    fn is_complete(&self) -> bool {
-        self.archived == self.total
+        budget.sleep(std::time::Duration::from_millis(100)).await?;
     }
 }
 
 async fn exact_thread_storage(
     native: &mut crate::live_harness::NativeConnection,
     owned_id: &OwnedThreadId,
-) -> Result<ThreadStorage, &'static str> {
+    budget: CleanupBudget,
+) -> Result<ThreadStorage, LiveCode> {
     let codex_home = native
         .recovery_home()
         .map(Path::to_path_buf)
-        .map_err(|_| "unclassifiable_storage")?;
+        .map_err(|_| LiveCode::ArchiveProofFailed)?;
     let response = native
         .request(
             "thread/read",
             json!({"threadId": owned_id.as_str(), "includeTurns": false}),
+            budget,
         )
-        .await
-        .map_err(|_| "missing")?;
+        .await?;
     let thread = response
         .get("thread")
         .and_then(Value::as_object)
-        .ok_or("unclassifiable_storage")?;
+        .ok_or(LiveCode::ArchiveProofFailed)?;
     let path = thread
         .get("path")
         .and_then(Value::as_str)
         .map(Path::new)
-        .ok_or("unclassifiable_storage")?;
+        .ok_or(LiveCode::ArchiveProofFailed)?;
     classify_thread_storage(
         &codex_home,
         owned_id.as_str(),
         thread.get("id").and_then(Value::as_str),
         path,
     )
-}
-
-fn exact_archive_failure(stage: &str, category: &str, counts: ExactArchiveCounts) -> io::Error {
-    io::Error::other(format!(
-        "native archive reconciliation failed: stage={stage}, category={category}, active={}, archived={}, unresolved={}",
-        counts.active,
-        counts.archived,
-        counts.unresolved()
-    ))
+    .map_err(|_| LiveCode::ArchiveProofFailed)
 }
 
 async fn archive_owned_thread(
     native: &mut crate::live_harness::NativeConnection,
     owned_id: &OwnedThreadId,
-) -> Result<(), Box<dyn Error>> {
+    budget: CleanupBudget,
+) -> Result<(), LiveCode> {
     native
-        .request("thread/archive", json!({"threadId": owned_id.as_str()}))
+        .request(
+            "thread/archive",
+            json!({"threadId": owned_id.as_str()}),
+            budget,
+        )
         .await?;
     Ok(())
 }
