@@ -439,8 +439,10 @@ runtime_journal_preflight() {
     "$runtime/codex-session-control/live-test/current.json"
 }
 
-before_owned_anchor_continue() {
-  :
+arm_finalizer_signal_traps() {
+  trap 'finalize 129 signal' HUP
+  trap 'finalize 130 signal' INT
+  trap 'finalize 143 signal' TERM
 }
 
 spawn_owned_anchor() {
@@ -478,9 +480,9 @@ spawn_owned_anchor() {
   wait_until_leader_is_stopped \
     "$test_leader" "$((SECONDS + 1))" || return "$?"
   confirm_group_absent "$test_pgid" "$SECONDS" || return "$?"
-  before_owned_anchor_continue || return "$?"
+  arm_finalizer_signal_traps
   if [[ -n "${deferred_signal-}" ]]; then
-    return 125
+    finalize "$deferred_signal" signal
   fi
   kill -CONT "$test_leader" 2>/dev/null || return "$?"
   wait_until_group_exists "$test_pgid" "$((SECONDS + 1))" || return "$?"
@@ -513,9 +515,14 @@ assert_deferred_launch_signals_for_self_test() {
       trap 'deferred_signal=129' HUP
       trap 'deferred_signal=130' INT
       trap 'deferred_signal=143' TERM
+      # Inject at the production helper's actual CONT boundary.
       # shellcheck disable=SC2317
-      before_owned_anchor_continue() {
-        kill "-$signal" "$BASHPID"
+      kill() {
+        if [[ "${1-}" == -CONT ]]; then
+          printf '%s\n' "${2-}" >"$leader_record"
+          builtin kill "-$signal" "$BASHPID"
+        fi
+        builtin kill "$@"
       }
       # The marker path is expanded by the inner shell.
       # shellcheck disable=SC2016
@@ -528,10 +535,7 @@ assert_deferred_launch_signals_for_self_test() {
       else
         launch_status=$?
       fi
-      printf '%s\n' "$test_leader" >"$leader_record"
-      trap 'finalize 129 signal' HUP
-      trap 'finalize 130 signal' INT
-      trap 'finalize 143 signal' TERM
+      arm_finalizer_signal_traps
       if [[ -n "$deferred_signal" ]]; then
         finalize "$deferred_signal" signal
       fi
@@ -1118,9 +1122,7 @@ spawn_live_test() {
   else
     launch_status=$?
   fi
-  trap 'finalize 129 signal' HUP
-  trap 'finalize 130 signal' INT
-  trap 'finalize 143 signal' TERM
+  arm_finalizer_signal_traps
   if [[ -n "$deferred_signal" ]]; then
     finalize "$deferred_signal" signal
   fi
