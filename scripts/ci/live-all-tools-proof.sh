@@ -27,6 +27,8 @@ test_status=
 ownership_failure=0
 cleanup_failure_code=
 cleanup_failure_reported=0
+pending_failure_code=
+production_failure_boundary=0
 
 readonly term_grace_seconds=2
 readonly reap_grace_seconds=3
@@ -234,6 +236,15 @@ kill_owned_group_and_wait() {
   } 2>/dev/null
 }
 
+record_failure() {
+  local code="$1"
+  if [[ "$production_failure_boundary" -eq 1 ]]; then
+    pending_failure_code="$code"
+  else
+    printf '%s\n' "$code" >&2
+  fi
+}
+
 cleanup_capture() {
   if [[ -n "$cleanup_failure_code" ]]; then
     return 1
@@ -241,7 +252,8 @@ cleanup_capture() {
   if ! cleanup_owned_test; then
     ownership_failure=1
     cleanup_failure_code=child_reap_failed
-    if [[ "$cleanup_failure_reported" -eq 0 ]]; then
+    if [[ "$production_failure_boundary" -eq 0 ]] &&
+      [[ "$cleanup_failure_reported" -eq 0 ]]; then
       printf '%s\n' "$cleanup_failure_code" >&2
       cleanup_failure_reported=1
     fi
@@ -252,7 +264,8 @@ cleanup_capture() {
     [[ -d "$capture_root" ]]; then
     if ! rm -rf -- "$capture_root" 2>/dev/null; then
       cleanup_failure_code=cleanup_failed
-      if [[ "$cleanup_failure_reported" -eq 0 ]]; then
+      if [[ "$production_failure_boundary" -eq 0 ]] &&
+        [[ "$cleanup_failure_reported" -eq 0 ]]; then
         printf '%s\n' "$cleanup_failure_code" >&2
         cleanup_failure_reported=1
       fi
@@ -265,23 +278,37 @@ cleanup_capture() {
 
 finalize() {
   local status="$1"
+  local source="$2"
+  local winning_code=
   trap - EXIT HUP INT TERM
   if ! cleanup_capture; then
+    winning_code="$cleanup_failure_code"
+  elif [[ -n "$pending_failure_code" ]]; then
+    winning_code="$pending_failure_code"
+  elif [[ "$source" == exit && "$status" -ne 0 ]]; then
+    winning_code=tool_failed
+  fi
+  if [[ -n "$winning_code" ]]; then
+    printf '%s\n' "$winning_code" >&2
     exit 1
   fi
   exit "$status"
 }
 
-trap 'finalize "$?"' EXIT
-trap 'finalize 129' HUP
-trap 'finalize 130' INT
-trap 'finalize 143' TERM
+trap 'finalize "$?" exit' EXIT
+trap 'finalize 129 signal' HUP
+trap 'finalize 130 signal' INT
+trap 'finalize 143 signal' TERM
 
 capture_setup_failed() {
+  if [[ "$production_failure_boundary" -eq 1 ]]; then
+    record_failure tool_failed
+    return 1
+  fi
   if ! cleanup_capture; then
     return 1
   fi
-  printf '%s\n' tool_failed >&2
+  record_failure tool_failed
   return 1
 }
 
@@ -348,7 +375,7 @@ runtime_journal_preflight() {
   local remainder component
   printf -v "$result_name" '%s' ''
   if [[ -z "$runtime" || "$runtime" != /* ]]; then
-    printf '%s\n' journal_rejected >&2
+    record_failure journal_rejected
     return 1
   fi
 
@@ -356,13 +383,13 @@ runtime_journal_preflight() {
   while [[ "$remainder" == */* ]]; do
     component="${remainder%%/*}"
     if [[ -z "$component" || "$component" == . || "$component" == .. ]]; then
-      printf '%s\n' journal_rejected >&2
+      record_failure journal_rejected
       return 1
     fi
     remainder="${remainder#*/}"
   done
   if [[ -z "$remainder" || "$remainder" == . || "$remainder" == .. ]]; then
-    printf '%s\n' journal_rejected >&2
+    record_failure journal_rejected
     return 1
   fi
 
@@ -638,10 +665,13 @@ assert_runtime_journal_preflight_for_self_test() {
   [[ ! -s "$stderr_capture" ]]
 }
 
-run_failed_finalizer_context_for_self_test() {
+run_finalizer_context_for_self_test() {
   local context="$1"
+  local cleanup_outcome="$5"
   capture_root="$2"
   private_wait_capture="$3"
+  pending_failure_code="$4"
+  production_failure_boundary=1
   test_leader=424242
   test_pgid=424242
   leader_reaped=0
@@ -650,12 +680,18 @@ run_failed_finalizer_context_for_self_test() {
   cleanup_failure_reported=0
   # shellcheck disable=SC2317
   cleanup_owned_test() {
+    if [[ "$cleanup_outcome" == success ]]; then
+      test_leader=
+      test_pgid=
+      leader_reaped=0
+      return 0
+    fi
     printf 'private path=%s pid=%s command=%s\n' \
       "$capture_root" "$test_leader" 'sleep 30' >>"$private_wait_capture"
     return 1
   }
-  trap 'finalize "$?"' EXIT
-  trap 'finalize 143' TERM
+  trap 'finalize "$?" exit' EXIT
+  trap 'finalize 143 signal' TERM
   case "$context" in
     exit) exit 23 ;;
     signal)
@@ -665,15 +701,32 @@ run_failed_finalizer_context_for_self_test() {
   esac
 }
 
-assert_trap_finalizer_failure_for_self_test() {
+assert_final_emission_for_self_test() {
   local self_root="$1"
-  local context retained_root private_evidence stdout_capture stderr_capture status
+  local definition scenario context pending cleanup_outcome expected expected_status retained
+  local retained_root private_evidence stdout_capture stderr_capture status
 
-  for context in exit signal; do
-    retained_root="$self_root/finalizer-$context"
+  for definition in \
+    'bare-exit|exit|none|failure|child_reap_failed|1|1' \
+    'signal-cleanup-failure|signal|none|failure|child_reap_failed|1|1' \
+    'prior-deadline-cleanup-failure|exit|deadline_exceeded|failure|child_reap_failed|1|1' \
+    'prior-child-reap-cleanup-failure|exit|child_reap_failed|failure|child_reap_failed|1|1' \
+    'pending-deadline-cleanup-success|exit|deadline_exceeded|success|deadline_exceeded|1|0' \
+    'unexpected-nonzero-cleanup-success|exit|none|success|tool_failed|1|0' \
+    'signal-cleanup-success|signal|none|success|none|143|0'; do
+    IFS='|' read -r \
+      scenario context pending cleanup_outcome expected expected_status retained \
+      <<<"$definition"
+    if [[ "$pending" == none ]]; then
+      pending=
+    fi
+    if [[ "$expected" == none ]]; then
+      expected=
+    fi
+    retained_root="$self_root/finalizer-$scenario"
     private_evidence="$retained_root/private-wait"
-    stdout_capture="$self_root/finalizer-$context.stdout"
-    stderr_capture="$self_root/finalizer-$context.stderr"
+    stdout_capture="$self_root/finalizer-$scenario.stdout"
+    stderr_capture="$self_root/finalizer-$scenario.stderr"
     if ! mkdir -m 0700 "$retained_root" 2>/dev/null; then
       printf '%s\n' tool_failed >&2
       return 1
@@ -683,27 +736,34 @@ assert_trap_finalizer_failure_for_self_test() {
     new_capture_file "$stderr_capture"
 
     if (
-      run_failed_finalizer_context_for_self_test \
-        "$context" "$retained_root" "$private_evidence"
+      run_finalizer_context_for_self_test \
+        "$context" "$retained_root" "$private_evidence" \
+        "$pending" "$cleanup_outcome"
     ) >"$stdout_capture" 2>"$stderr_capture"; then
       status=0
     else
       status=$?
     fi
 
-    [[ "$status" -eq 1 ]]
+    [[ "$status" -eq "$expected_status" ]]
     [[ ! -s "$stdout_capture" ]]
-    [[ "$(<"$stderr_capture")" == child_reap_failed ]]
-    [[ -d "$retained_root" ]]
-    [[ -s "$private_evidence" ]]
+    if [[ -n "$expected" ]]; then
+      [[ "$(<"$stderr_capture")" == "$expected" ]]
+    else
+      [[ ! -s "$stderr_capture" ]]
+    fi
     if grep -Fq "$retained_root" "$stderr_capture" ||
       grep -Fq 424242 "$stderr_capture" ||
       grep -Fq 'sleep 30' "$stderr_capture"; then
       return 1
     fi
-    if ! rm -rf -- "$retained_root" 2>/dev/null; then
-      printf '%s\n' cleanup_failed >&2
-      return 1
+    if [[ "$retained" -eq 1 ]]; then
+      [[ -d "$retained_root" ]]
+      [[ -s "$private_evidence" ]]
+      if ! rm -rf -- "$retained_root" 2>/dev/null; then
+        printf '%s\n' cleanup_failed >&2
+        return 1
+      fi
     fi
     [[ ! -e "$retained_root" ]]
   done
@@ -722,7 +782,7 @@ run_self_test() {
   assert_live_mode_environment_for_self_test "$self_root"
   assert_capture_failure_boundaries_for_self_test "$self_root"
   assert_runtime_journal_preflight_for_self_test "$self_root"
-  assert_trap_finalizer_failure_for_self_test "$self_root"
+  assert_final_emission_for_self_test "$self_root"
   assert_hard_kill_helper_fail_fast_for_self_test "$self_root"
   assert_private_wait_and_group_cleanup_for_self_test "$self_root"
   cleanup_capture
@@ -734,8 +794,9 @@ if [[ "${1-}" == --self-test ]] && [[ "$#" -eq 1 ]]; then
   run_self_test
   exit 0
 fi
+production_failure_boundary=1
 if [[ "$#" -ne 0 ]]; then
-  printf '%s\n' opt_in_rejected >&2
+  record_failure opt_in_rejected
   exit 1
 fi
 
@@ -762,7 +823,7 @@ if ! (
   cargo test --locked --test app_server_integration --no-run \
     --message-format=json >"$cargo_messages" 2>"$cargo_stderr"
 ); then
-  printf '%s\n' tool_failed >&2
+  record_failure tool_failed
   exit 1
 fi
 if ! jq --slurp '
@@ -778,26 +839,26 @@ if ! jq --slurp '
     .executable
   ]
 ' "$cargo_messages" >"$harnesses" 2>/dev/null; then
-  printf '%s\n' tool_failed >&2
+  record_failure tool_failed
   exit 1
 fi
 match_count="$(jq --raw-output 'length' "$harnesses" 2>/dev/null)" ||
   {
-    printf '%s\n' tool_failed >&2
+    record_failure tool_failed
     exit 1
   }
 if [[ "$match_count" -ne 1 ]]; then
-  printf '%s\n' tool_failed >&2
+  record_failure tool_failed
   exit 1
 fi
 harness="$(jq --exit-status --raw-output '.[0]' "$harnesses" 2>/dev/null)" ||
   {
-    printf '%s\n' tool_failed >&2
+    record_failure tool_failed
     exit 1
   }
 readonly harness
 if [[ ! -x "$harness" ]]; then
-  printf '%s\n' tool_failed >&2
+  record_failure tool_failed
   exit 1
 fi
 
@@ -809,7 +870,7 @@ spawn_live_test() {
   new_capture_file "$stderr_path"
   local -a environment
   if ! live_test_environment "$mode" environment; then
-    printf '%s\n' opt_in_rejected >&2
+    record_failure opt_in_rejected
     exit 1
   fi
   setsid env "${environment[@]}" \
@@ -821,7 +882,7 @@ spawn_live_test() {
   leader_reaped=0
   ownership_failure=0
   wait_until_group_exists "$test_pgid" "$((SECONDS + 1))" || {
-    printf '%s\n' child_reap_failed >&2
+    record_failure child_reap_failed
     exit 1
   }
 }
@@ -853,17 +914,17 @@ wait_for_test() {
   } 2>/dev/null
 }
 
-emit_captured_failure() {
+record_captured_failure() {
   local stdout_path="$1"
   local stderr_path="$2"
   local code
   for code in "${fixed_codes[@]}"; do
-    if grep -Fxq "$code" "$stdout_path" "$stderr_path"; then
-      printf '%s\n' "$code" >&2
+    if grep -Fxq "$code" "$stdout_path" "$stderr_path" 2>/dev/null; then
+      record_failure "$code"
       return
     fi
   done
-  printf '%s\n' tool_failed >&2
+  record_failure tool_failed
 }
 
 readonly normal_stdout="$capture_root/normal.stdout"
@@ -872,17 +933,17 @@ spawn_live_test normal "$normal_stdout" "$normal_stderr"
 wait_for_test
 normal_status="$test_status"
 if [[ "$ownership_failure" -ne 0 ]]; then
-  printf '%s\n' child_reap_failed >&2
+  record_failure child_reap_failed
   exit 1
 fi
 if [[ "$normal_status" -ne 0 ]]; then
-  emit_captured_failure "$normal_stdout" "$normal_stderr"
+  record_captured_failure "$normal_stdout" "$normal_stderr"
   exit 1
 fi
 printf '%s\n' 'normal_status=0'
 jq --exit-status '. == {"state":{"kind":"idle"}}' "$journal" >/dev/null 2>&1 ||
   {
-    printf '%s\n' journal_rejected >&2
+    record_failure journal_rejected
     exit 1
   }
 
@@ -896,22 +957,22 @@ until grep -Fxq hard_kill_ready "$hard_kill_stdout"; do
   if ! kill -0 "$hard_kill_leader" 2>/dev/null; then
     wait_for_test
     hard_kill_status="$test_status"
-    emit_captured_failure "$hard_kill_stdout" "$hard_kill_stderr"
+    record_captured_failure "$hard_kill_stdout" "$hard_kill_stderr"
     exit 1
   fi
   if ((SECONDS >= handshake_deadline)); then
-    printf '%s\n' deadline_exceeded >&2
+    record_failure deadline_exceeded
     exit 1
   fi
   sleep 0.1
 done
 if ! kill_owned_group_and_wait; then
-  printf '%s\n' tool_failed >&2
+  record_failure tool_failed
   exit 1
 fi
 hard_kill_status="$test_status"
 if [[ "$hard_kill_status" -ne 137 ]]; then
-  printf '%s\n' tool_failed >&2
+  record_failure tool_failed
   exit 1
 fi
 if group_state "$hard_kill_pgid"; then
@@ -920,13 +981,13 @@ else
   hard_kill_group_state=$?
 fi
 if [[ "$hard_kill_group_state" -ne 1 ]]; then
-  printf '%s\n' child_reap_failed >&2
+  record_failure child_reap_failed
   exit 1
 fi
 printf '%s\n' 'hard_kill_status=137'
 jq --exit-status '.state.kind == "active"' "$journal" >/dev/null 2>&1 ||
   {
-    printf '%s\n' journal_rejected >&2
+    record_failure journal_rejected
     exit 1
   }
 
@@ -936,21 +997,21 @@ spawn_live_test recovery "$recovery_stdout" "$recovery_stderr"
 wait_for_test
 recovery_status="$test_status"
 if [[ "$ownership_failure" -ne 0 ]]; then
-  printf '%s\n' child_reap_failed >&2
+  record_failure child_reap_failed
   exit 1
 fi
 if [[ "$recovery_status" -ne 0 ]]; then
-  emit_captured_failure "$recovery_stdout" "$recovery_stderr"
+  record_captured_failure "$recovery_stdout" "$recovery_stderr"
   exit 1
 fi
 if grep -Fxq hard_kill_ready "$recovery_stdout" "$recovery_stderr"; then
-  printf '%s\n' tool_failed >&2
+  record_failure tool_failed
   exit 1
 fi
 printf '%s\n' 'recovery_status=0'
 jq --exit-status '. == {"state":{"kind":"idle"}}' "$journal" >/dev/null 2>&1 ||
   {
-    printf '%s\n' cleanup_failed >&2
+    record_failure cleanup_failed
     exit 1
   }
 printf '%s\n' 'journal_state=Idle'
