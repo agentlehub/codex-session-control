@@ -59,32 +59,24 @@ printf '%s\n' 'Checking Rust formatting...'
 cargo fmt --all -- --check
 
 printf '%s\n' 'Checking shell scripts...'
-shellcheck install.sh scripts/check.sh scripts/set-supported-codex-version.sh \
-  scripts/ci/disposable-systemd-user-contract.sh
+shellcheck scripts/check.sh scripts/set-supported-codex-version.sh \
+  scripts/install-local-plugin.sh
 
-printf '%s\n' 'Checking POSIX shell syntax...'
-sh -n install.sh
-
-printf '%s\n' 'Checking wrapper Bash syntax...'
-bash -n scripts/check.sh
-printf '%s\n' 'Checking supported-version setter Bash syntax...'
-bash -n scripts/set-supported-codex-version.sh
-printf '%s\n' 'Checking systemd-contract Bash syntax...'
-bash -n scripts/ci/disposable-systemd-user-contract.sh
+printf '%s\n' 'Checking shell syntax...'
+bash -n scripts/check.sh scripts/set-supported-codex-version.sh \
+  scripts/install-local-plugin.sh
 
 printf '%s\n' 'Checking workflow syntax...'
-actionlint .github/workflows/ci.yml \
-  .github/workflows/release.yml \
-  .github/workflows/publish.yml
+actionlint .github/workflows/ci.yml
 
 printf '%s\n' 'Checking marketplace manifest JSON...'
-jq empty assets/marketplace/.agents/plugins/marketplace.json
+jq empty .agents/plugins/marketplace.json
 
 printf '%s\n' 'Checking plugin manifest JSON...'
-jq empty assets/marketplace/plugins/codex-session-control/.codex-plugin/plugin.json
+jq empty plugins/codex-session-control/.codex-plugin/plugin.json
 
 printf '%s\n' 'Checking MCP manifest JSON...'
-jq empty assets/marketplace/plugins/codex-session-control/.mcp.json
+jq empty plugins/codex-session-control/.mcp.json
 
 printf '%s\n' 'Checking Rust lints...'
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
