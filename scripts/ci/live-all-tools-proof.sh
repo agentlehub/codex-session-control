@@ -855,7 +855,6 @@ assert_final_emission_for_self_test() {
 
 run_self_test() {
   local self_root capture
-  [[ $- != *m* ]]
   new_capture_root
   self_root="$capture_root"
   capture="$self_root/capture"
