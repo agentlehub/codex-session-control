@@ -632,7 +632,7 @@ assert_capture_failure_boundaries_for_self_test() {
   [[ "$(<"$setup_stderr")" == tool_failed ]]
 
   if ! mkdir -m 0700 "$cleanup_target" 2>/dev/null; then
-    printf '%s\n' tool_failed >&2
+    record_failure tool_failed
     return 1
   fi
   new_capture_file "$cleanup_evidence"
@@ -656,7 +656,7 @@ assert_capture_failure_boundaries_for_self_test() {
     return 1
   fi
   if ! rm -rf -- "$cleanup_target" 2>/dev/null; then
-    printf '%s\n' cleanup_failed >&2
+    record_failure cleanup_failed
     return 1
   fi
   [[ ! -e "$cleanup_target" ]]
@@ -769,7 +769,7 @@ assert_final_emission_for_self_test() {
     stdout_capture="$self_root/finalizer-$scenario.stdout"
     stderr_capture="$self_root/finalizer-$scenario.stderr"
     if ! mkdir -m 0700 "$retained_root" 2>/dev/null; then
-      printf '%s\n' tool_failed >&2
+      record_failure tool_failed
       return 1
     fi
     new_capture_file "$private_evidence"
@@ -802,7 +802,7 @@ assert_final_emission_for_self_test() {
       [[ -d "$retained_root" ]]
       [[ -s "$private_evidence" ]]
       if ! rm -rf -- "$retained_root" 2>/dev/null; then
-        printf '%s\n' cleanup_failed >&2
+        record_failure cleanup_failed
         return 1
       fi
     fi
@@ -811,15 +811,15 @@ assert_final_emission_for_self_test() {
 }
 
 run_self_test() {
-  local self_root capture
+  local self_root capture helper_root helper_stdout helper_stderr status
   new_capture_root
   self_root="$capture_root"
-
   capture="$self_root/capture"
   new_capture_file "$capture"
   [[ "$(stat --format=%a "$self_root")" == 700 ]]
   printf '%s\n%s\n' hard_kill_ready hard_kill_ready_suffix >"$capture"
   [[ "$(grep -Fxc hard_kill_ready "$capture")" -eq 1 ]]
+
   assert_live_mode_environment_for_self_test "$self_root"
   assert_capture_failure_boundaries_for_self_test "$self_root"
   assert_runtime_journal_preflight_for_self_test "$self_root"
@@ -828,6 +828,42 @@ run_self_test() {
   assert_private_wait_and_group_cleanup_for_self_test "$self_root"
   cleanup_capture
   [[ ! -e "$self_root" ]]
+
+  if ! helper_root="$(
+    mktemp -d "${TMPDIR:-/tmp}/codex-session-control-live-proof-helper.XXXXXX" \
+      2>/dev/null
+  )"; then
+    record_failure tool_failed
+    return 1
+  fi
+  helper_stdout="$helper_root/stdout"
+  helper_stderr="$helper_root/stderr"
+  [[ "$(stat --format=%a "$helper_root")" == 700 ]]
+  new_capture_file "$helper_root/cleanup-target"
+  new_capture_file "$helper_stdout"
+  new_capture_file "$helper_stderr"
+  if (
+    trap 'finalize "$?" exit' EXIT
+    if assert_capture_failure_boundaries_for_self_test "$helper_root"; then
+      status=0
+    else
+      status=$?
+    fi
+    exit "$status"
+  ) >"$helper_stdout" 2>"$helper_stderr"; then
+    status=0
+  else
+    status=$?
+  fi
+  [[ "$status" -eq 1 ]]
+  [[ ! -s "$helper_stdout" ]]
+  [[ "$(<"$helper_stderr")" == tool_failed ]]
+  if ! rm -rf -- "$helper_root" 2>/dev/null; then
+    record_failure cleanup_failed
+    return 1
+  fi
+  [[ ! -e "$helper_root" ]]
+
   printf '%s\n' 'self_test_status=0'
 }
 
