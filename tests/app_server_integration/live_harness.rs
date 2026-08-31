@@ -3,7 +3,6 @@ use std::{
     error::Error,
     ffi::OsString,
     fmt, io,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -21,7 +20,6 @@ use tokio_tungstenite::{WebSocketStream, client_async, tungstenite::Message};
 
 use crate::cases::OwnedThreadId;
 
-const LIVE_PREFIX: &str = "codex-session-control-live-";
 const EXPECTED_CODEX_VERSION: &str = env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION");
 const ALL_THREAD_SOURCE_KINDS: [&str; 10] = [
     "cli",
@@ -36,6 +34,8 @@ const ALL_THREAD_SOURCE_KINDS: [&str; 10] = [
     "unknown",
 ];
 const THREAD_LIST_PAGE_SIZE: u32 = 100;
+const MAX_WORKSPACE_PAGES: usize = 64;
+const MAX_WORKSPACE_ROWS: usize = 6_400;
 const TOOLS_CALL_METHOD: &str = "tools/call";
 const UNKNOWN_ERROR_CATEGORY: &str = "unknown";
 const SESSION_CONTROL_TOOLS: [&str; 13] = [
@@ -55,37 +55,14 @@ const SESSION_CONTROL_TOOLS: [&str; 13] = [
 ];
 
 pub(super) struct LiveHarness {
-    run_dir: PathBuf,
     workspace: PathBuf,
     socket: PathBuf,
     mcp: Option<McpClient>,
 }
 
 impl LiveHarness {
-    pub(super) fn prepare() -> Result<Self, Box<dyn Error>> {
-        let run_dir = tempfile::Builder::new()
-            .prefix(LIVE_PREFIX)
-            .tempdir_in("/tmp")?
-            .keep();
-        std::fs::set_permissions(&run_dir, std::fs::Permissions::from_mode(0o700))?;
-        let workspace = run_dir.join("workspace");
-        std::fs::create_dir(&workspace)?;
-        std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o700))?;
-        Ok(Self {
-            run_dir,
-            workspace,
-            socket: desktop_socket_path()?,
-            mcp: None,
-        })
-    }
-
     pub(super) fn from_ledger(workspace: &Path) -> Result<Self, Box<dyn Error>> {
-        let run_dir = workspace
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| io::Error::other("ledger workspace has no run directory"))?;
         Ok(Self {
-            run_dir,
             workspace: workspace.to_path_buf(),
             socket: desktop_socket_path()?,
             mcp: None,
@@ -93,24 +70,11 @@ impl LiveHarness {
     }
 
     pub(super) fn for_test_native_socket(workspace: PathBuf, socket: PathBuf) -> io::Result<Self> {
-        let run_dir = workspace
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| io::Error::other("test workspace has no run directory"))?;
         Ok(Self {
-            run_dir,
             workspace,
             socket,
             mcp: None,
         })
-    }
-
-    pub(super) fn run_dir(&self) -> &Path {
-        &self.run_dir
-    }
-
-    pub(super) fn workspace(&self) -> &Path {
-        &self.workspace
     }
 
     pub(super) async fn start_mcp(&mut self) -> Result<(), Box<dyn Error>> {
@@ -178,8 +142,8 @@ impl LiveHarness {
         &self,
         native: &mut NativeConnection,
         archived: bool,
-    ) -> Result<BTreeSet<String>, Box<dyn Error>> {
-        let mut ids = BTreeSet::new();
+    ) -> Result<Vec<String>, Box<dyn Error>> {
+        let mut pages = WorkspacePages::new(&self.workspace)?;
         let mut cursor = None;
         loop {
             let page = native
@@ -188,26 +152,11 @@ impl LiveHarness {
                     exact_workspace_list_params(&self.workspace, archived, cursor.as_deref()),
                 )
                 .await?;
-            let data = page
-                .get("data")
-                .and_then(Value::as_array)
-                .ok_or_else(|| io::Error::other("thread/list omitted data"))?;
-            for thread in data {
-                let id = thread
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .filter(|id| !id.is_empty())
-                    .ok_or_else(|| io::Error::other("thread/list emitted an invalid ID"))?;
-                ids.insert(id.to_owned());
-            }
-            let next = page
-                .get("nextCursor")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned);
+            let next = pages.add(&page)?;
             match next {
                 Some(next) if cursor.as_deref() != Some(next.as_str()) => cursor = Some(next),
                 Some(_) => return Err(io::Error::other("thread/list repeated a cursor").into()),
-                None => return Ok(ids),
+                None => return Ok(pages.into_ids()),
             }
         }
     }
@@ -226,6 +175,102 @@ impl LiveHarness {
         }
         Ok(())
     }
+}
+
+struct WorkspacePages<'a> {
+    workspace: &'a str,
+    ids: BTreeSet<String>,
+    cursors: BTreeSet<String>,
+    pages: usize,
+    rows: usize,
+}
+
+impl<'a> WorkspacePages<'a> {
+    fn new(workspace: &'a Path) -> io::Result<Self> {
+        let workspace = workspace
+            .to_str()
+            .filter(|workspace| Path::new(workspace).is_absolute())
+            .ok_or_else(|| io::Error::other("live workspace is not a UTF-8 absolute path"))?;
+        Ok(Self {
+            workspace,
+            ids: BTreeSet::new(),
+            cursors: BTreeSet::new(),
+            pages: 0,
+            rows: 0,
+        })
+    }
+
+    fn add(&mut self, page: &Value) -> io::Result<Option<String>> {
+        self.pages += 1;
+        if self.pages > MAX_WORKSPACE_PAGES {
+            return Err(io::Error::other(
+                "thread/list exhausted the live page limit",
+            ));
+        }
+        let data = page
+            .get("data")
+            .and_then(Value::as_array)
+            .filter(|data| !data.is_empty())
+            .ok_or_else(|| io::Error::other("thread/list emitted an empty or malformed page"))?;
+        self.rows += data.len();
+        if self.rows > MAX_WORKSPACE_ROWS {
+            return Err(io::Error::other("thread/list exhausted the live row limit"));
+        }
+        for thread in data {
+            let id = thread
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= 512)
+                .filter(|id| !id.bytes().any(|byte| byte.is_ascii_control()))
+                .ok_or_else(|| io::Error::other("thread/list emitted an invalid ID"))?;
+            if thread.get("cwd").and_then(Value::as_str) != Some(self.workspace) {
+                return Err(io::Error::other("thread/list returned a foreign workspace"));
+            }
+            if !self.ids.insert(id.to_owned()) {
+                return Err(io::Error::other("thread/list returned a duplicate ID"));
+            }
+        }
+        let next = page
+            .get("nextCursor")
+            .map(|cursor| {
+                cursor
+                    .as_str()
+                    .filter(|cursor| !cursor.is_empty() && cursor.len() <= 512)
+                    .filter(|cursor| !cursor.bytes().any(|byte| byte.is_ascii_control()))
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| io::Error::other("thread/list emitted an invalid cursor"))
+            })
+            .transpose()?;
+        if let Some(cursor) = &next {
+            if !self.cursors.insert(cursor.clone()) {
+                return Err(io::Error::other("thread/list repeated a cursor"));
+            }
+        }
+        Ok(next)
+    }
+
+    fn into_ids(self) -> Vec<String> {
+        self.ids.into_iter().collect()
+    }
+}
+
+pub(super) fn collect_workspace_page_ids(
+    workspace: &Path,
+    pages: &[Value],
+) -> io::Result<Vec<String>> {
+    let mut collected = WorkspacePages::new(workspace)?;
+    for (index, page) in pages.iter().enumerate() {
+        let next = collected.add(page)?;
+        if next.is_none() {
+            if index + 1 != pages.len() {
+                return Err(io::Error::other(
+                    "thread/list returned pages after completion",
+                ));
+            }
+            return Ok(collected.into_ids());
+        }
+    }
+    Err(io::Error::other("thread/list pagination was exhausted"))
 }
 
 pub(super) fn exact_workspace_list_params(

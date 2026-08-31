@@ -6,33 +6,28 @@ mod cases;
 mod live_harness;
 
 #[test]
-fn ledger_persists_each_owned_id_with_file_and_directory_fsync() {
-    cases::ledger_persists_each_owned_id_with_file_and_directory_fsync();
+fn journal_grants_authority_only_after_durable_replace() {
+    cases::journal_grants_authority_only_after_durable_replace();
 }
 
 #[test]
-fn ledger_persists_workspace_before_first_creation() {
-    cases::ledger_persists_workspace_before_first_creation();
+fn journal_rejects_unsafe_or_mismatched_authority() {
+    cases::journal_rejects_unsafe_or_mismatched_authority();
 }
 
 #[test]
-fn live_gate_requires_exact_opt_in_before_mutation() {
-    cases::live_gate_requires_exact_opt_in_before_mutation();
+fn live_mode_matrix_is_total_and_recovery_is_fixed_authority() {
+    cases::live_mode_matrix_is_total_and_recovery_is_fixed_authority();
 }
 
 #[test]
-fn recovery_requires_exact_opt_in_and_absolute_ledger() {
-    cases::recovery_requires_exact_opt_in_and_absolute_ledger();
+fn workspace_recovery_validates_all_pages_before_one_journal_write() {
+    cases::workspace_recovery_validates_all_pages_before_one_journal_write();
 }
 
 #[test]
-fn cleanup_retains_ledger_until_archive_proof() {
-    cases::cleanup_retains_ledger_until_archive_proof();
-}
-
-#[test]
-fn exact_workspace_list_is_source_complete_and_provider_unfiltered() {
-    cases::exact_workspace_list_is_source_complete_and_provider_unfiltered();
+fn workspace_pagination_rejects_cycles_and_exhaustion() {
+    cases::workspace_pagination_rejects_cycles_and_exhaustion();
 }
 
 #[tokio::test]

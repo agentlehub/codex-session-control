@@ -1,16 +1,18 @@
 use std::{
+    collections::BTreeSet,
     error::Error,
     ffi::OsStr,
     fmt::Display,
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{self, Write},
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     panic::AssertUnwindSafe,
     path::{Component, Path, PathBuf},
     sync::Arc,
 };
 
 use futures_util::{FutureExt, SinkExt, StreamExt};
+use rustix::fs::{FlockOperation, flock};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{net::UnixListener, sync::Mutex};
@@ -19,65 +21,168 @@ use tokio_tungstenite::{accept_async, tungstenite::Message};
 use crate::live_harness::LiveHarness;
 
 const LIVE_OPT_IN: &str = "CODEX_SESSION_CONTROL_LIVE_ALL_TOOLS";
-const RECOVERY_LEDGER: &str = "CODEX_SESSION_CONTROL_LIVE_RECOVER_LEDGER";
-const LEDGER_FILE_NAME: &str = "owned-thread-ids.json";
+const LIVE_HARD_KILL: &str = "CODEX_SESSION_CONTROL_LIVE_HARD_KILL";
+const LIVE_RECOVERY: &str = "CODEX_SESSION_CONTROL_LIVE_RECOVER";
+const LIVE_ROOT_NAME: &str = "live-test";
+const JOURNAL_NAME: &str = "current.json";
+const STAGING_NAME: &str = "current.next";
+const LOCK_NAME: &str = "lock";
+const RUNS_NAME: &str = "runs";
 type LiveRunResult = Result<Result<(), Box<dyn Error>>, Box<dyn std::any::Any + Send>>;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(transparent)]
-pub(super) struct OwnedThreadId(String);
-
-impl OwnedThreadId {
-    pub(super) fn as_str(&self) -> &str {
-        &self.0
-    }
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+enum JournalState {
+    Idle,
+    Active {
+        generation: String,
+        run_device: u64,
+        run_inode: u64,
+        workspace_device: u64,
+        workspace_inode: u64,
+        owned_thread_ids: Vec<OwnedThreadId>,
+    },
+    CleanupComplete {
+        generation: String,
+        run_device: u64,
+        run_inode: u64,
+        workspace_device: u64,
+        workspace_inode: u64,
+    },
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LedgerDocument {
-    workspace: PathBuf,
-    owned_thread_ids: Vec<OwnedThreadId>,
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct JournalDocument {
+    state: JournalState,
 }
 
-struct OwnedThreadLedger {
-    run_dir: PathBuf,
+struct FixedJournal {
+    root: PathBuf,
+    runs: PathBuf,
     path: PathBuf,
-    document: LedgerDocument,
+    staging: PathBuf,
+    _lock: File,
+    document: JournalDocument,
+    writes: usize,
 }
 
-impl OwnedThreadLedger {
-    fn create(run_dir: PathBuf, workspace: PathBuf) -> io::Result<Self> {
-        let path = run_dir.join(LEDGER_FILE_NAME);
-        let ledger = Self {
-            run_dir,
+impl FixedJournal {
+    fn begin(root: PathBuf, generation: &str) -> io::Result<Self> {
+        if root.exists() || !valid_generation(generation) {
+            return Err(io::Error::other("live authority is not wholly absent"));
+        }
+        fs::create_dir(&root)?;
+        set_mode(&root, 0o700)?;
+        let runs = root.join(RUNS_NAME);
+        fs::create_dir(&runs)?;
+        set_mode(&runs, 0o700)?;
+        let lock_path = root.join(LOCK_NAME);
+        let lock = create_private_file(&lock_path)?;
+        flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(io::Error::other)?;
+        let path = root.join(JOURNAL_NAME);
+        let staging = root.join(STAGING_NAME);
+        let mut journal = Self {
+            root,
+            runs,
             path,
-            document: LedgerDocument {
-                workspace,
+            staging,
+            _lock: lock,
+            document: JournalDocument {
+                state: JournalState::Idle,
+            },
+            writes: 0,
+        };
+        journal.persist()?;
+        journal.activate(generation)?;
+        Ok(journal)
+    }
+
+    fn open(root: PathBuf) -> io::Result<Self> {
+        validate_private_dir(&root)?;
+        let runs = root.join(RUNS_NAME);
+        validate_private_dir(&runs)?;
+        let lock_path = root.join(LOCK_NAME);
+        validate_private_file(&lock_path)?;
+        let lock = OpenOptions::new().read(true).write(true).open(&lock_path)?;
+        flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(io::Error::other)?;
+        let path = root.join(JOURNAL_NAME);
+        validate_private_file(&path)?;
+        let staging = root.join(STAGING_NAME);
+        if staging.exists() {
+            return Err(io::Error::other("live journal staging file is present"));
+        }
+        let document = serde_json::from_slice(&fs::read(&path)?).map_err(io::Error::other)?;
+        let journal = Self {
+            root,
+            runs,
+            path,
+            staging,
+            _lock: lock,
+            document,
+            writes: 0,
+        };
+        journal.validate_layout()?;
+        journal.validate_state()?;
+        Ok(journal)
+    }
+
+    fn recover(root: PathBuf) -> io::Result<Self> {
+        let mut journal = Self::open(root)?;
+        if !matches!(journal.document.state, JournalState::Active { .. }) {
+            return Err(io::Error::other("live recovery requires an active journal"));
+        }
+        journal.persist()?;
+        Ok(journal)
+    }
+
+    fn activate(&mut self, generation: &str) -> io::Result<()> {
+        let JournalState::Idle = self.document.state else {
+            return Err(io::Error::other(
+                "normal live mode requires an idle journal",
+            ));
+        };
+        let run_dir = self.runs.join(generation);
+        fs::create_dir(&run_dir)?;
+        set_mode(&run_dir, 0o700)?;
+        let workspace = run_dir.join("workspace");
+        fs::create_dir(&workspace)?;
+        set_mode(&workspace, 0o700)?;
+        let run = private_dir_identity(&run_dir)?;
+        let workspace = private_dir_identity(&workspace)?;
+        self.persist_document(JournalDocument {
+            state: JournalState::Active {
+                generation: generation.to_owned(),
+                run_device: run.0,
+                run_inode: run.1,
+                workspace_device: workspace.0,
+                workspace_inode: workspace.1,
                 owned_thread_ids: Vec::new(),
             },
-        };
-        ledger.persist()?;
-        Ok(ledger)
+        })
     }
 
-    fn open(path: PathBuf) -> io::Result<Self> {
-        let bytes = fs::read(&path)?;
-        let document: LedgerDocument = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-        if !document.workspace.is_absolute() {
-            return Err(io::Error::other(
-                "recovery ledger workspace must be absolute",
-            ));
+    fn record_id(&mut self, id: String) -> io::Result<OwnedThreadId> {
+        let owned = valid_owned_id(&id)?;
+        let JournalState::Active {
+            owned_thread_ids, ..
+        } = &self.document.state
+        else {
+            return Err(io::Error::other("live journal is not active"));
+        };
+        if let Some(existing) = owned_thread_ids.iter().find(|existing| *existing == &owned) {
+            return Ok(existing.clone());
         }
-        let run_dir = path
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| io::Error::other("recovery ledger has no run directory"))?;
-        Ok(Self {
-            run_dir,
-            path,
-            document,
-        })
+        let mut next = self.document.clone();
+        let JournalState::Active {
+            owned_thread_ids, ..
+        } = &mut next.state
+        else {
+            unreachable!("checked active journal state")
+        };
+        owned_thread_ids.push(owned.clone());
+        self.persist_document(next)?;
+        Ok(owned)
     }
 
     fn record_created_response(&mut self, response: &Value) -> io::Result<OwnedThreadId> {
@@ -88,80 +193,483 @@ impl OwnedThreadLedger {
         self.record_response_id(response.pointer("/thread/id"))
     }
 
-    fn record_recovered_id(&mut self, id: String) -> io::Result<OwnedThreadId> {
-        self.record_id(id)
-    }
-
     fn record_response_id(&mut self, id: Option<&Value>) -> io::Result<OwnedThreadId> {
         let id = id
             .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
             .ok_or_else(|| io::Error::other("MCP response omitted a thread ID"))?;
         self.record_id(id.to_owned())
     }
 
-    fn record_id(&mut self, id: String) -> io::Result<OwnedThreadId> {
-        if let Some(existing) = self
-            .document
-            .owned_thread_ids
-            .iter()
-            .find(|owned| owned.as_str() == id)
-        {
-            return Ok(existing.clone());
-        }
-        let owned = OwnedThreadId(id);
-        self.document.owned_thread_ids.push(owned.clone());
-        self.persist()?;
-        Ok(owned)
-    }
-
-    fn persist(&self) -> io::Result<()> {
-        let bytes = serde_json::to_vec(&self.document).map_err(io::Error::other)?;
-        atomic_write_fsync(&self.path, bytes)
+    fn owned_thread_ids(&self) -> io::Result<Vec<OwnedThreadId>> {
+        let JournalState::Active {
+            owned_thread_ids, ..
+        } = &self.document.state
+        else {
+            return Err(io::Error::other("live journal is not active"));
+        };
+        Ok(owned_thread_ids.clone())
     }
 
     fn cleanup_failure(&self, error: impl Display) -> io::Error {
-        io::Error::other(format!(
-            "live cleanup failed: {error}; owned={}",
-            self.document.owned_thread_ids.len()
-        ))
+        let owned = match &self.document.state {
+            JournalState::Active {
+                owned_thread_ids, ..
+            } => owned_thread_ids.len(),
+            JournalState::Idle | JournalState::CleanupComplete { .. } => 0,
+        };
+        io::Error::other(format!("live cleanup failed: {error}; owned={owned}"))
     }
 
-    fn remove_proven_clean_run_dir(&self) -> io::Result<()> {
-        let mut entries = fs::read_dir(&self.run_dir)?
-            .map(|entry| entry.map(|entry| entry.path()))
+    fn record_recovered_ids(&mut self, ids: Vec<String>) -> io::Result<()> {
+        let mut next = self.document.clone();
+        let JournalState::Active {
+            owned_thread_ids, ..
+        } = &mut next.state
+        else {
+            return Err(io::Error::other("live journal is not active"));
+        };
+        let mut all = owned_thread_ids
+            .iter()
+            .map(|id| id.as_str().to_owned())
+            .collect::<BTreeSet<_>>();
+        let mut recovered = BTreeSet::new();
+        for id in ids {
+            let owned = valid_owned_id(&id)?;
+            if !recovered.insert(id.clone()) {
+                return Err(io::Error::other("live recovery discovered a duplicate ID"));
+            }
+            if all.insert(id) {
+                owned_thread_ids.push(owned);
+            }
+        }
+        self.persist_document(next)
+    }
+
+    fn cleanup_complete(&mut self) -> io::Result<()> {
+        let JournalState::Active {
+            generation,
+            run_device,
+            run_inode,
+            workspace_device,
+            workspace_inode,
+            ..
+        } = &self.document.state
+        else {
+            return Err(io::Error::other("live journal is not active"));
+        };
+        self.persist_document(JournalDocument {
+            state: JournalState::CleanupComplete {
+                generation: generation.clone(),
+                run_device: *run_device,
+                run_inode: *run_inode,
+                workspace_device: *workspace_device,
+                workspace_inode: *workspace_inode,
+            },
+        })
+    }
+
+    fn delete_local_idempotently(&mut self) -> io::Result<()> {
+        let JournalState::CleanupComplete {
+            generation,
+            run_device,
+            run_inode,
+            workspace_device,
+            workspace_inode,
+        } = &self.document.state
+        else {
+            return Err(io::Error::other("live journal cleanup is not authorized"));
+        };
+        let run_dir = self.runs.join(generation);
+        let workspace = run_dir.join("workspace");
+        if !run_dir.exists() {
+            if fs::read_dir(&self.runs)?.next().is_some() {
+                return Err(io::Error::other("live journal cleanup authority drifted"));
+            }
+            return self.persist_document(JournalDocument {
+                state: JournalState::Idle,
+            });
+        }
+        if private_dir_identity(&run_dir)? != (*run_device, *run_inode) {
+            return Err(io::Error::other("live journal cleanup authority drifted"));
+        }
+        if workspace.exists() {
+            if private_dir_identity(&workspace)? != (*workspace_device, *workspace_inode)
+                || fs::read_dir(&workspace)?.next().is_some()
+            {
+                return Err(io::Error::other("live journal cleanup authority drifted"));
+            }
+            fs::remove_dir(&workspace)?;
+        }
+        if fs::read_dir(&run_dir)?.next().is_some() {
+            return Err(io::Error::other("live journal cleanup authority drifted"));
+        }
+        fs::remove_dir(&run_dir)?;
+        if fs::read_dir(&self.runs)?.next().is_some() {
+            return Err(io::Error::other("live journal cleanup authority drifted"));
+        }
+        self.persist_document(JournalDocument {
+            state: JournalState::Idle,
+        })
+    }
+
+    fn workspace(&self) -> io::Result<PathBuf> {
+        let (JournalState::Active { generation, .. }
+        | JournalState::CleanupComplete { generation, .. }) = &self.document.state
+        else {
+            return Err(io::Error::other("idle journal has no workspace"));
+        };
+        Ok(self.runs.join(generation).join("workspace"))
+    }
+
+    fn persist_document(&mut self, document: JournalDocument) -> io::Result<()> {
+        let bytes = serde_json::to_vec(&document).map_err(io::Error::other)?;
+        atomic_write_fixed(&self.path, &self.staging, bytes)?;
+        self.document = document;
+        self.writes += 1;
+        Ok(())
+    }
+
+    fn persist(&mut self) -> io::Result<()> {
+        self.persist_document(self.document.clone())
+    }
+
+    fn validate_state(&self) -> io::Result<()> {
+        match &self.document.state {
+            JournalState::Idle => Ok(()),
+            JournalState::Active {
+                generation,
+                run_device,
+                run_inode,
+                workspace_device,
+                workspace_inode,
+                owned_thread_ids,
+            } => validate_active_state(
+                &self.runs,
+                generation,
+                *run_device,
+                *run_inode,
+                *workspace_device,
+                *workspace_inode,
+                owned_thread_ids,
+            ),
+            JournalState::CleanupComplete {
+                generation,
+                run_device,
+                run_inode,
+                workspace_device,
+                workspace_inode,
+            } => validate_active_state(
+                &self.runs,
+                generation,
+                *run_device,
+                *run_inode,
+                *workspace_device,
+                *workspace_inode,
+                &[],
+            ),
+        }
+    }
+
+    fn validate_layout(&self) -> io::Result<()> {
+        let mut root_entries = fs::read_dir(&self.root)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
             .collect::<io::Result<Vec<_>>>()?;
-        entries.sort();
-        let mut expected = vec![self.path.clone(), self.document.workspace.clone()];
-        expected.sort();
-        if entries != expected {
-            return Err(io::Error::other(
-                "refusing to remove a run directory with unexpected entries",
-            ));
+        root_entries.sort();
+        let expected = vec![
+            std::ffi::OsString::from(JOURNAL_NAME),
+            std::ffi::OsString::from(LOCK_NAME),
+            std::ffi::OsString::from(RUNS_NAME),
+        ];
+        if root_entries != expected {
+            return Err(io::Error::other("live authority has unexpected entries"));
         }
-        if fs::read_dir(&self.document.workspace)?.next().is_some() {
-            return Err(io::Error::other(
-                "refusing to remove a nonempty live workspace",
-            ));
+        let expected_generation = match &self.document.state {
+            JournalState::Idle => None,
+            JournalState::Active { generation, .. }
+            | JournalState::CleanupComplete { generation, .. } => Some(generation.as_str()),
+        };
+        let mut run_entries = fs::read_dir(&self.runs)?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<io::Result<Vec<_>>>()?;
+        run_entries.sort();
+        let expected = expected_generation
+            .map(|generation| vec![std::ffi::OsString::from(generation)])
+            .unwrap_or_default();
+        if run_entries != expected {
+            return Err(io::Error::other("live authority runs are unexpected"));
         }
-        fs::remove_file(&self.path)?;
-        fs::remove_dir(&self.document.workspace)?;
-        fs::remove_dir(&self.run_dir)
+        Ok(())
     }
 }
 
-fn atomic_write_fsync(path: &Path, bytes: Vec<u8>) -> io::Result<()> {
+fn validate_active_state(
+    runs: &Path,
+    generation: &str,
+    run_device: u64,
+    run_inode: u64,
+    workspace_device: u64,
+    workspace_inode: u64,
+    owned_thread_ids: &[OwnedThreadId],
+) -> io::Result<()> {
+    if !valid_generation(generation) {
+        return Err(io::Error::other("live journal has an invalid generation"));
+    }
+    let run = runs.join(generation);
+    let workspace = run.join("workspace");
+    if private_dir_identity(&run)? != (run_device, run_inode)
+        || private_dir_identity(&workspace)? != (workspace_device, workspace_inode)
+    {
+        return Err(io::Error::other("live journal identity binding drifted"));
+    }
+    let mut unique = BTreeSet::new();
+    for id in owned_thread_ids {
+        if !unique.insert(id.as_str()) || valid_owned_id(id.as_str()).is_err() {
+            return Err(io::Error::other("live journal has an invalid owned ID"));
+        }
+    }
+    Ok(())
+}
+
+fn create_private_file(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+}
+
+fn validate_private_dir(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != uzers::get_current_uid()
+        || metadata.permissions().mode() & 0o7777 != 0o700
+    {
+        return Err(io::Error::other("live authority directory is unsafe"));
+    }
+    Ok(())
+}
+
+fn private_dir_identity(path: &Path) -> io::Result<(u64, u64)> {
+    validate_private_dir(path)?;
+    let metadata = fs::metadata(path)?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+fn validate_private_file(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file()
+        || metadata.uid() != uzers::get_current_uid()
+        || metadata.permissions().mode() & 0o7777 != 0o600
+    {
+        return Err(io::Error::other("live authority file is unsafe"));
+    }
+    Ok(())
+}
+
+fn valid_generation(generation: &str) -> bool {
+    generation.len() == 32 && generation.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn valid_owned_id(id: &str) -> io::Result<OwnedThreadId> {
+    if id.is_empty() || id.len() > 512 || id.bytes().any(|byte| byte.is_ascii_control()) {
+        return Err(io::Error::other("live journal has an invalid owned ID"));
+    }
+    Ok(OwnedThreadId(id.to_owned()))
+}
+
+fn atomic_write_fixed(path: &Path, staging: &Path, bytes: Vec<u8>) -> io::Result<()> {
     let parent = path
         .parent()
-        .ok_or_else(|| io::Error::other("ledger has no parent"))?;
-    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-    staged
-        .as_file_mut()
-        .set_permissions(fs::Permissions::from_mode(0o600))?;
+        .filter(|parent| Some(*parent) == staging.parent())
+        .ok_or_else(|| io::Error::other("live journal has inconsistent parents"))?;
+    let mut staged = create_private_file(staging)?;
     staged.write_all(&bytes)?;
-    staged.as_file_mut().sync_all()?;
-    staged.persist(path).map_err(|error| error.error)?;
+    staged.sync_all()?;
+    fs::rename(staging, path)?;
     File::open(parent)?.sync_all()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LiveMode {
+    Normal,
+    HardKill,
+    Recovery,
+}
+
+fn select_live_mode(
+    opt_in: Option<&OsStr>,
+    hard_kill: Option<&OsStr>,
+    recovery: Option<&OsStr>,
+) -> io::Result<LiveMode> {
+    match (opt_in, hard_kill, recovery) {
+        (Some(value), None, None) if value == OsStr::new("1") => Ok(LiveMode::Normal),
+        (Some(value), Some(hard_kill), None)
+            if value == OsStr::new("1") && hard_kill == OsStr::new("1") =>
+        {
+            Ok(LiveMode::HardKill)
+        }
+        (Some(value), None, Some(recovery))
+            if value == OsStr::new("1") && recovery == OsStr::new("1") =>
+        {
+            Ok(LiveMode::Recovery)
+        }
+        _ => Err(io::Error::other("live mode opt-in combination is rejected")),
+    }
+}
+
+pub(super) fn journal_grants_authority_only_after_durable_replace() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join(LIVE_ROOT_NAME);
+    let mut journal = FixedJournal::begin(root, "00000000000000000000000000000001").unwrap();
+    let before = fs::read(&journal.path).unwrap();
+    journal.path = journal.root.clone();
+
+    assert!(journal.record_id("prospective".to_owned()).is_err());
+    assert!(matches!(
+        &journal.document.state,
+        JournalState::Active { owned_thread_ids, .. } if owned_thread_ids.is_empty()
+    ));
+    assert_eq!(fs::read(journal.root.join(JOURNAL_NAME)).unwrap(), before);
+
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join(LIVE_ROOT_NAME);
+    let mut journal =
+        FixedJournal::begin(root.clone(), "00000000000000000000000000000005").unwrap();
+    journal.cleanup_complete().unwrap();
+    journal.delete_local_idempotently().unwrap();
+    assert_eq!(journal.document.state, JournalState::Idle);
+    drop(journal);
+    assert_eq!(
+        FixedJournal::open(root).unwrap().document.state,
+        JournalState::Idle
+    );
+}
+
+pub(super) fn journal_rejects_unsafe_or_mismatched_authority() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join(LIVE_ROOT_NAME);
+    let journal = FixedJournal::begin(root.clone(), "00000000000000000000000000000002").unwrap();
+    drop(journal);
+    set_mode(&root.join(LOCK_NAME), 0o644).unwrap();
+    assert!(FixedJournal::open(root).is_err());
+
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join(LIVE_ROOT_NAME);
+    let mut journal =
+        FixedJournal::begin(root.clone(), "00000000000000000000000000000003").unwrap();
+    let JournalState::Active { run_inode, .. } = &mut journal.document.state else {
+        panic!("new journal must be active")
+    };
+    *run_inode += 1;
+    journal.persist().unwrap();
+    drop(journal);
+    assert!(FixedJournal::open(root).is_err());
+}
+
+pub(super) fn live_mode_matrix_is_total_and_recovery_is_fixed_authority() {
+    assert_eq!(
+        select_live_mode(Some(OsStr::new("1")), None, None).unwrap(),
+        LiveMode::Normal
+    );
+    assert_eq!(
+        select_live_mode(Some(OsStr::new("1")), Some(OsStr::new("1")), None).unwrap(),
+        LiveMode::HardKill
+    );
+    assert_eq!(
+        select_live_mode(Some(OsStr::new("1")), None, Some(OsStr::new("1"))).unwrap(),
+        LiveMode::Recovery
+    );
+    for (opt_in, hard_kill, recovery) in [
+        (None, None, None),
+        (Some("0"), None, None),
+        (Some("1"), Some("0"), None),
+        (Some("1"), None, Some("0")),
+        (Some("1"), Some("1"), Some("1")),
+    ] {
+        assert!(
+            select_live_mode(
+                opt_in.map(OsStr::new),
+                hard_kill.map(OsStr::new),
+                recovery.map(OsStr::new),
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        recovery_ledger(
+            Some(OsStr::new("1")),
+            Some(OsStr::new("/tmp/owned-thread-ids.json")),
+        )
+        .is_err()
+    );
+}
+
+pub(super) fn workspace_recovery_validates_all_pages_before_one_journal_write() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join(LIVE_ROOT_NAME);
+    let mut journal = FixedJournal::begin(root, "00000000000000000000000000000004").unwrap();
+    let workspace = journal.workspace().unwrap();
+    let before = fs::read(&journal.path).unwrap();
+    let writes = journal.writes;
+    let invalid_later_page = vec![
+        json!({"data": [{"id": "one", "cwd": workspace}], "nextCursor": "next"}),
+        json!({"data": [{"id": "one", "cwd": workspace}]}),
+    ];
+    assert!(
+        crate::live_harness::collect_workspace_page_ids(&workspace, &invalid_later_page).is_err()
+    );
+    assert_eq!(fs::read(&journal.path).unwrap(), before);
+    assert_eq!(journal.writes, writes);
+
+    let pages = vec![
+        json!({"data": [{"id": "one", "cwd": workspace}], "nextCursor": "next"}),
+        json!({"data": [{"id": "two", "cwd": workspace}]}),
+    ];
+    let ids = crate::live_harness::collect_workspace_page_ids(&workspace, &pages).unwrap();
+    journal.record_recovered_ids(ids).unwrap();
+    assert_eq!(journal.writes, writes + 1);
+    assert!(matches!(
+        &journal.document.state,
+        JournalState::Active { owned_thread_ids, .. }
+            if owned_thread_ids.iter().map(OwnedThreadId::as_str).collect::<Vec<_>>() == ["one", "two"]
+    ));
+}
+
+pub(super) fn workspace_pagination_rejects_cycles_and_exhaustion() {
+    let workspace = Path::new("/tmp/codex-session-control-live-test/workspace");
+    let cycle = vec![
+        json!({"data": [{"id": "one", "cwd": workspace}], "nextCursor": "again"}),
+        json!({"data": [{"id": "two", "cwd": workspace}], "nextCursor": "again"}),
+    ];
+    assert!(crate::live_harness::collect_workspace_page_ids(workspace, &cycle).is_err());
+
+    let exhausted = (0..65)
+        .map(|index| {
+            let mut page = json!({
+                "data": [{"id": format!("owned-{index}"), "cwd": workspace}],
+            });
+            if index < 64 {
+                page["nextCursor"] = json!(format!("cursor-{index}"));
+            }
+            page
+        })
+        .collect::<Vec<_>>();
+    assert!(crate::live_harness::collect_workspace_page_ids(workspace, &exhausted).is_err());
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub(super) struct OwnedThreadId(String);
+
+impl OwnedThreadId {
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 fn require_live_opt_in(value: Option<&OsStr>) -> io::Result<()> {
@@ -176,135 +684,53 @@ fn require_live_opt_in(value: Option<&OsStr>) -> io::Result<()> {
 
 fn recovery_ledger(opt_in: Option<&OsStr>, ledger: Option<&OsStr>) -> io::Result<PathBuf> {
     require_live_opt_in(opt_in)?;
-    let path = ledger
+    if ledger.is_some() {
+        return Err(io::Error::other(
+            "hard-kill recovery never accepts a caller-selected journal path",
+        ));
+    }
+    Ok(fixed_live_root()?.join(JOURNAL_NAME))
+}
+
+fn fixed_live_root() -> io::Result<PathBuf> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
-        .filter(|path| path.file_name() == Some(OsStr::new(LEDGER_FILE_NAME)))
-        .ok_or_else(|| {
-            io::Error::other("hard-kill recovery requires exact opt-in and an absolute ledger path")
-        })?;
-    Ok(path)
+        .ok_or_else(|| io::Error::other("live recovery has no fixed runtime authority"))?;
+    validate_private_dir(&runtime)?;
+    Ok(runtime.join("codex-session-control").join(LIVE_ROOT_NAME))
 }
 
-pub(super) fn ledger_persists_each_owned_id_with_file_and_directory_fsync() {
-    let run_dir = tempfile::tempdir().unwrap();
-    let workspace = run_dir.path().join("workspace");
-    let mut ledger = OwnedThreadLedger::create(run_dir.path().to_path_buf(), workspace).unwrap();
-    let first = ledger
-        .record_created_response(&json!({"threadId": "first"}))
-        .unwrap();
-    let second = ledger
-        .record_forked_response(&json!({"thread": {"id": "second"}}))
-        .unwrap();
-
-    assert_eq!(ledger.document.owned_thread_ids, vec![first, second]);
-    let persisted: LedgerDocument =
-        serde_json::from_slice(&fs::read(&ledger.path).unwrap()).unwrap();
-    assert_eq!(persisted.owned_thread_ids, ledger.document.owned_thread_ids);
-    assert_eq!(
-        fs::metadata(&ledger.path).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
-}
-
-pub(super) fn ledger_persists_workspace_before_first_creation() {
-    let run_dir = tempfile::tempdir().unwrap();
-    let workspace = run_dir.path().join("workspace");
-    let ledger =
-        OwnedThreadLedger::create(run_dir.path().to_path_buf(), workspace.clone()).unwrap();
-
-    let persisted: LedgerDocument =
-        serde_json::from_slice(&fs::read(&ledger.path).unwrap()).unwrap();
-    assert_eq!(persisted.workspace, workspace);
-    assert!(persisted.owned_thread_ids.is_empty());
-}
-
-pub(super) fn live_gate_requires_exact_opt_in_before_mutation() {
-    assert!(require_live_opt_in(Some(OsStr::new("1"))).is_ok());
-    for rejected in [
-        None,
-        Some(OsStr::new("")),
-        Some(OsStr::new("0")),
-        Some(OsStr::new("true")),
-    ] {
-        assert!(require_live_opt_in(rejected).is_err());
+fn normal_fixed_live_root() -> io::Result<PathBuf> {
+    let root = fixed_live_root()?;
+    let control = root
+        .parent()
+        .ok_or_else(|| io::Error::other("live authority has no control parent"))?;
+    if control.exists() {
+        validate_private_dir(control)?;
+    } else {
+        fs::create_dir(control)?;
+        set_mode(control, 0o700)?;
     }
+    Ok(root)
 }
 
-pub(super) fn recovery_requires_exact_opt_in_and_absolute_ledger() {
-    let absolute = PathBuf::from("/tmp/owned-thread-ids.json");
-    assert_eq!(
-        recovery_ledger(Some(OsStr::new("1")), Some(absolute.as_os_str())).unwrap(),
-        absolute
-    );
-    for (opt_in, ledger) in [
-        (None, Some(OsStr::new("/tmp/owned-thread-ids.json"))),
-        (
-            Some(OsStr::new("0")),
-            Some(OsStr::new("/tmp/owned-thread-ids.json")),
-        ),
-        (
-            Some(OsStr::new("1")),
-            Some(OsStr::new("owned-thread-ids.json")),
-        ),
-        (
-            Some(OsStr::new("1")),
-            Some(OsStr::new("/tmp/not-a-ledger.json")),
-        ),
-    ] {
-        assert!(recovery_ledger(opt_in, ledger).is_err());
+fn start_normal_journal() -> io::Result<FixedJournal> {
+    let root = normal_fixed_live_root()?;
+    if !root.exists() {
+        return FixedJournal::begin(root, "00000000000000000000000000000000");
     }
-}
-
-pub(super) fn cleanup_retains_ledger_until_archive_proof() {
-    let run_dir = tempfile::tempdir().unwrap();
-    let ledger = OwnedThreadLedger::create(
-        run_dir.path().to_path_buf(),
-        run_dir.path().join("workspace"),
-    )
-    .unwrap();
-
-    let _ = ledger.cleanup_failure("archive proof failed");
-    assert!(ledger.path.exists());
-    assert!(ledger.run_dir.exists());
-}
-
-pub(super) fn exact_workspace_list_is_source_complete_and_provider_unfiltered() {
-    let params = crate::live_harness::exact_workspace_list_params(
-        Path::new("/tmp/codex-session-control-live-test/workspace"),
-        false,
-        Some("next-page"),
-    );
-
-    assert_eq!(
-        params,
-        json!({
-            "cwd": "/tmp/codex-session-control-live-test/workspace",
-            "archived": false,
-            "limit": 100,
-            "sourceKinds": [
-                "cli",
-                "vscode",
-                "exec",
-                "appServer",
-                "subAgent",
-                "subAgentReview",
-                "subAgentCompact",
-                "subAgentThreadSpawn",
-                "subAgentOther",
-                "unknown"
-            ],
-            "modelProviders": [],
-            "cursor": "next-page"
-        })
-    );
+    let mut journal = FixedJournal::open(root)?;
+    journal.activate("00000000000000000000000000000000")?;
+    Ok(journal)
 }
 
 pub(super) async fn already_archived_exact_ledger_target_skips_archive_and_converges() {
     let run_dir = tempfile::tempdir().unwrap();
-    let mut ledger = OwnedThreadLedger::create(
-        run_dir.path().to_path_buf(),
-        run_dir.path().join("workspace"),
+    let mut ledger = FixedJournal::begin(
+        run_dir.path().join(LIVE_ROOT_NAME),
+        "00000000000000000000000000000006",
     )
     .unwrap();
     ledger.record_id("owned-target".to_owned()).unwrap();
@@ -314,11 +740,9 @@ pub(super) async fn already_archived_exact_ledger_target_skips_archive_and_conve
             "/tmp/codex-home/archived_sessions/rollout.jsonl",
         ))])
         .await;
-    let harness = LiveHarness::for_test_native_socket(
-        ledger.document.workspace.clone(),
-        server.socket.clone(),
-    )
-    .unwrap();
+    let harness =
+        LiveHarness::for_test_native_socket(ledger.workspace().unwrap(), server.socket.clone())
+            .unwrap();
 
     let result = archive_and_verify(&harness, &ledger).await;
     let archive_calls = server.archive_call_count().await;
@@ -332,9 +756,9 @@ pub(super) async fn already_archived_exact_ledger_target_skips_archive_and_conve
 
 pub(super) async fn active_exact_ledger_target_archives_once_then_converges() {
     let run_dir = tempfile::tempdir().unwrap();
-    let mut ledger = OwnedThreadLedger::create(
-        run_dir.path().to_path_buf(),
-        run_dir.path().join("workspace"),
+    let mut ledger = FixedJournal::begin(
+        run_dir.path().join(LIVE_ROOT_NAME),
+        "00000000000000000000000000000007",
     )
     .unwrap();
     ledger.record_id("owned-target".to_owned()).unwrap();
@@ -349,11 +773,9 @@ pub(super) async fn active_exact_ledger_target_archives_once_then_converges() {
         )),
     ])
     .await;
-    let harness = LiveHarness::for_test_native_socket(
-        ledger.document.workspace.clone(),
-        server.socket.clone(),
-    )
-    .unwrap();
+    let harness =
+        LiveHarness::for_test_native_socket(ledger.workspace().unwrap(), server.socket.clone())
+            .unwrap();
 
     let result = archive_and_verify(&harness, &ledger).await;
     let archive_calls = server.archive_call_count().await;
@@ -401,18 +823,16 @@ pub(super) async fn invalid_exact_read_evidence_fails_closed_and_retains_ledger(
         ),
     ] {
         let run_dir = tempfile::tempdir().unwrap();
-        let mut ledger = OwnedThreadLedger::create(
-            run_dir.path().to_path_buf(),
-            run_dir.path().join("workspace"),
+        let mut ledger = FixedJournal::begin(
+            run_dir.path().join(LIVE_ROOT_NAME),
+            "00000000000000000000000000000008",
         )
         .unwrap();
         ledger.record_id("owned-target".to_owned()).unwrap();
         let server = ArchiveReconciliationServer::start(vec![reply]).await;
-        let harness = LiveHarness::for_test_native_socket(
-            ledger.document.workspace.clone(),
-            server.socket.clone(),
-        )
-        .unwrap();
+        let harness =
+            LiveHarness::for_test_native_socket(ledger.workspace().unwrap(), server.socket.clone())
+                .unwrap();
 
         let error = archive_and_verify(&harness, &ledger).await.unwrap_err();
         let archive_calls = server.archive_call_count().await;
@@ -426,7 +846,7 @@ pub(super) async fn invalid_exact_read_evidence_fails_closed_and_retains_ledger(
         );
         assert_eq!(archive_calls, 0);
         assert!(ledger.path.exists());
-        assert!(ledger.run_dir.exists());
+        assert!(ledger.workspace().unwrap().exists());
         assert!(!message.contains("owned-target"));
         assert!(!message.contains("opaque-storage"));
     }
@@ -554,17 +974,28 @@ pub(super) fn cleanup_failure_classifies_tool_run_panic_without_payload() {
 pub(super) async fn live_desktop_authority_all_thirteen_tools_are_disposable()
 -> Result<(), Box<dyn Error>> {
     let opt_in = std::env::var_os(LIVE_OPT_IN);
-    if let Some(recovery_value) = std::env::var_os(RECOVERY_LEDGER) {
-        let ledger_path = recovery_ledger(opt_in.as_deref(), Some(&recovery_value))?;
-        return recover_hard_kill_ledger(ledger_path).await;
+    let hard_kill = std::env::var_os(LIVE_HARD_KILL);
+    let recovery = std::env::var_os(LIVE_RECOVERY);
+    match select_live_mode(opt_in.as_deref(), hard_kill.as_deref(), recovery.as_deref())? {
+        LiveMode::Recovery => {
+            let journal = recovery_ledger(opt_in.as_deref(), None)?;
+            let root = journal
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| io::Error::other("live recovery journal has no fixed root"))?;
+            return recover_hard_kill_ledger(root).await;
+        }
+        LiveMode::HardKill => {
+            return Err(
+                io::Error::other("hard-kill orchestration is not available in Slice 1").into(),
+            );
+        }
+        LiveMode::Normal => {}
     }
-    require_live_opt_in(opt_in.as_deref())?;
 
-    let mut harness = LiveHarness::prepare()?;
-    let mut ledger = OwnedThreadLedger::create(
-        harness.run_dir().to_path_buf(),
-        harness.workspace().to_path_buf(),
-    )?;
+    let mut ledger = start_normal_journal()?;
+    let workspace = ledger.workspace()?;
+    let mut harness = LiveHarness::from_ledger(&workspace)?;
     let run_result = AssertUnwindSafe(async {
         harness.start_mcp().await?;
         harness.assert_exact_catalog().await?;
@@ -578,7 +1009,8 @@ pub(super) async fn live_desktop_authority_all_thirteen_tools_are_disposable()
         harness.stop_and_reap_mcp_child().await?;
         recover_exact_workspace_ids(&harness, &mut ledger).await?;
         archive_and_verify(&harness, &ledger).await?;
-        ledger.remove_proven_clean_run_dir()?;
+        ledger.cleanup_complete()?;
+        ledger.delete_local_idempotently()?;
         Ok(())
     }
     .await;
@@ -602,9 +1034,10 @@ fn cleanup_failure_with_run_result(cleanup: impl Display, run_result: &LiveRunRe
     io::Error::other(message)
 }
 
-async fn recover_hard_kill_ledger(path: PathBuf) -> Result<(), Box<dyn Error>> {
-    let mut ledger = OwnedThreadLedger::open(path)?;
-    let harness = LiveHarness::from_ledger(&ledger.document.workspace)?;
+async fn recover_hard_kill_ledger(root: PathBuf) -> Result<(), Box<dyn Error>> {
+    let mut ledger = FixedJournal::recover(root)?;
+    let workspace = ledger.workspace()?;
+    let harness = LiveHarness::from_ledger(&workspace)?;
     let cleanup_result = async {
         recover_exact_workspace_ids(&harness, &mut ledger).await?;
         archive_and_verify(&harness, &ledger).await
@@ -613,7 +1046,10 @@ async fn recover_hard_kill_ledger(path: PathBuf) -> Result<(), Box<dyn Error>> {
     if let Err(error) = cleanup_result {
         return Err(ledger.cleanup_failure(error).into());
     }
-    if let Err(error) = ledger.remove_proven_clean_run_dir() {
+    if let Err(error) = ledger
+        .cleanup_complete()
+        .and_then(|()| ledger.delete_local_idempotently())
+    {
         return Err(ledger.cleanup_failure(error).into());
     }
     Ok(())
@@ -621,13 +1057,11 @@ async fn recover_hard_kill_ledger(path: PathBuf) -> Result<(), Box<dyn Error>> {
 
 async fn run_all_thirteen_tools(
     harness: &mut LiveHarness,
-    ledger: &mut OwnedThreadLedger,
+    ledger: &mut FixedJournal,
 ) -> Result<(), Box<dyn Error>> {
+    let workspace = ledger.workspace()?;
     let created = {
-        let response = harness
-            .mcp_mut()?
-            .create_thread(ledger.document.workspace.as_path())
-            .await?;
+        let response = harness.mcp_mut()?.create_thread(&workspace).await?;
         ledger.record_created_response(&response)?
     };
     let forked = {
@@ -635,8 +1069,7 @@ async fn run_all_thirteen_tools(
         ledger.record_forked_response(&response)?
     };
     let mcp = harness.mcp_mut()?;
-    mcp.list_threads(ledger.document.workspace.as_path(), false)
-        .await?;
+    mcp.list_threads(&workspace, false).await?;
     mcp.read_thread(&created).await?;
     mcp.send_message(&created, &forked).await?;
     mcp.set_goal(&created, &forked).await?;
@@ -656,29 +1089,28 @@ async fn run_all_thirteen_tools(
 
 async fn recover_exact_workspace_ids(
     harness: &LiveHarness,
-    ledger: &mut OwnedThreadLedger,
+    ledger: &mut FixedJournal,
 ) -> Result<(), Box<dyn Error>> {
     let mut native = harness.connect_native().await?;
     native.initialize().await?;
-    for id in harness.workspace_thread_ids(&mut native, false).await? {
-        ledger.record_recovered_id(id)?;
-    }
+    ledger.record_recovered_ids(harness.workspace_thread_ids(&mut native, false).await?)?;
     Ok(())
 }
 
 async fn archive_and_verify(
     harness: &LiveHarness,
-    ledger: &OwnedThreadLedger,
+    ledger: &FixedJournal,
 ) -> Result<(), Box<dyn Error>> {
     let mut native = harness.connect_native().await?;
     native.initialize().await?;
-    let mut archive_dispatched = vec![false; ledger.document.owned_thread_ids.len()];
+    let owned_thread_ids = ledger.owned_thread_ids()?;
+    let mut archive_dispatched = vec![false; owned_thread_ids.len()];
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
 
     loop {
-        let mut counts = ExactArchiveCounts::new(ledger.document.owned_thread_ids.len());
+        let mut counts = ExactArchiveCounts::new(owned_thread_ids.len());
         let mut active = Vec::new();
-        for (index, owned_id) in ledger.document.owned_thread_ids.iter().enumerate() {
+        for (index, owned_id) in owned_thread_ids.iter().enumerate() {
             match exact_thread_storage(&mut native, owned_id).await {
                 Ok(ExactThreadStorage::Archived) => counts.archived += 1,
                 Ok(ExactThreadStorage::Active) => {
