@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set +m
 umask 077
 
 readonly live_test_name=live_desktop_authority_all_thirteen_tools_are_disposable
@@ -86,6 +87,17 @@ wait_until_leader_is_stopped() {
     ((SECONDS < deadline)) || return 1
     sleep 0.01 || return 1
   done
+}
+
+leader_has_owned_identity() {
+  local leader="$1"
+  local stat fields pgid sid
+  [[ -r "/proc/$leader/stat" ]] || return 1
+  stat="$(<"/proc/$leader/stat")" || return 1
+  fields="${stat##*) }"
+  [[ "$fields" != "$stat" ]] || return 1
+  read -r _ _ pgid sid _ <<<"$fields" || return 1
+  [[ "$pgid" == "$leader" && "$sid" == "$leader" ]]
 }
 
 wait_until_leader_is_waitable() {
@@ -450,7 +462,7 @@ assert_private_wait_and_group_cleanup_for_self_test() {
   fi
   [[ "$cleanup_group_state" -eq 1 ]]
 
-  for scenario in launch-signal delayed-group; do
+  for scenario in launch-signal delayed-group owned-launch; do
     : >"$public_capture"
     marker="$self_root/$scenario-ran"
     if [[ "$scenario" == launch-signal ]]; then
@@ -458,7 +470,7 @@ assert_private_wait_and_group_cleanup_for_self_test() {
       trap 'deferred_signal=143' TERM
     fi
     (
-      if [[ "$scenario" == launch-signal ]]; then
+      if [[ "$scenario" != delayed-group ]]; then
         kill -STOP "$BASHPID"
       else
         sleep 2
@@ -477,6 +489,12 @@ assert_private_wait_and_group_cleanup_for_self_test() {
       trap 'finalize 143 signal' TERM
       [[ "$deferred_signal" -eq 143 ]]
       wait_until_leader_is_stopped "$leader" "$((SECONDS + 1))"
+    elif [[ "$scenario" == owned-launch ]]; then
+      wait_until_leader_is_stopped "$leader" "$((SECONDS + 1))"
+      confirm_group_absent "$leader" "$SECONDS"
+      kill -CONT "$leader"
+      wait_until_group_exists "$leader" "$((SECONDS + 1))"
+      leader_has_owned_identity "$leader"
     fi
     if ! cleanup_owned_test >"$public_capture" 2>&1; then
       kill -CONT "$leader" 2>/dev/null || true
@@ -484,7 +502,11 @@ assert_private_wait_and_group_cleanup_for_self_test() {
       cleanup_owned_test >"$public_capture" 2>&1 || return 1
       return 1
     fi
-    [[ ! -e "$marker" ]]
+    if [[ "$scenario" == owned-launch ]]; then
+      [[ -e "$marker" ]]
+    else
+      [[ ! -e "$marker" ]]
+    fi
     [[ -z "$test_leader" && -z "$test_pgid" ]]
     [[ ! -s "$public_capture" ]]
   done
@@ -833,6 +855,7 @@ assert_final_emission_for_self_test() {
 
 run_self_test() {
   local self_root capture
+  [[ $- != *m* ]]
   new_capture_root
   self_root="$capture_root"
   capture="$self_root/capture"
@@ -956,8 +979,10 @@ spawn_live_test() {
   fi
   if ! wait_until_leader_is_stopped \
     "$test_leader" "$((SECONDS + 1))" ||
+    ! confirm_group_absent "$test_pgid" "$SECONDS" ||
     ! kill -CONT "$test_leader" 2>/dev/null ||
-    ! wait_until_group_exists "$test_pgid" "$((SECONDS + 1))"; then
+    ! wait_until_group_exists "$test_pgid" "$((SECONDS + 1))" ||
+    ! leader_has_owned_identity "$test_leader"; then
     record_failure child_reap_failed
     exit 1
   fi
