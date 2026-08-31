@@ -1,35 +1,33 @@
 # Security
 
-Codex Session Control is a local, per-user tool. It relies on Unix user separation and validates file ownership, type, path, and permissions. It cannot protect against a hostile process already running as the same Linux user.
+Codex Session Control relies on Unix user separation. A hostile process already
+running as the same Linux user is outside its protection boundary.
 
-## Files, paths, and permissions
+## Endpoint trust boundary
 
-Codex Session Control gets `$HOME` from the current Linux account and uses `/run/user/<uid>` as its runtime directory. Before changing the installation or opening an MCP connection, it rejects identity mismatches, symbolic links, incorrect owners or file types, unsafe directory permissions, and paths outside those locations.
+For every independent operation, the plugin resolves and validates the
+Desktop-owned endpoint afresh. The derived directory must be a same-user
+directory with mode `0700`, and the socket must be a same-user Unix socket with
+mode `0600` or `0700`. The plugin rejects symbolic links, unexpected file types or
+owners, unsafe permissions, and validation races.
 
-The selected `CODEX_HOME` belongs to Codex, not Codex Session Control. Codex Session Control owns only its executable, product configuration, release manifest, systemd user service, installed plugin files, Desktop connection file, and runtime directory. It does not own authentication, sessions, Codex configuration, or unrelated plugins.
+The explicit bridge socket takes precedence when supplied. The plugin never
+puts its selected path or environment values in public errors. Redact these
+values, credentials, and task content from reports.
 
-Product directories use mode `0700`, and sensitive files use `0600`. The configured endpoint must be a Unix socket owned by the current user, with no group or other access. Codex Session Control does not change socket permissions after Codex creates it.
+The plugin neither owns the Desktop authority nor manages its lifecycle. It
+does not use TCP, scan for sockets, or read legacy state.
 
-The systemd user service starts the configured Codex executable directly with the saved Codex home and socket. It does not use a shell or intermediary daemon.
+## MCP caller trust
 
-## Authentication
+Any MCP client running as the same Linux user can invoke the tools. Caller
+metadata and annotations do not authenticate a caller. The plugin cannot
+approve prompts or provide interactive input on a caller's behalf.
 
-Setup does not run `codex login`, copy credentials, or create another login. Authentication is not required to install or start Codex Session Control. Users sign in through Codex CLI or the supported Desktop build. Codex Session Control never reads, transforms, synchronizes, or stores credentials.
-
-## MCP access
-
-Any MCP client running under the same Linux user can invoke the tools. Access depends on Linux user permissions; MCP metadata, annotations, and caller identifiers do not authenticate the caller.
-
-Every request goes to the local socket saved in Codex Session Control's configuration. Caller metadata cannot redirect it. The MCP server cannot approve prompts or provide interactive input on the user's behalf.
-
-See [Architecture](architecture.md#mcp-connections) for transport, timeout, and at-most-once behavior.
-
-## Release verification
-
-Installation and updates use releases published by [`agentlehub/codex-session-control`](https://github.com/agentlehub/codex-session-control). Downloads use HTTPS, and release tags must not change after publication.
-
-Before a binary is installed, it is verified against the exact SHA-256 checksum in that release's `SHA256SUMS` file. Updates also verify the asset name and size, executable architecture, and product version.
+See [Architecture](architecture.md) for at-most-once and `outcome_unknown`
+semantics.
 
 ## Reporting vulnerabilities
 
-Do not open a public issue for a suspected vulnerability. Follow the private reporting instructions in [SECURITY.md](../SECURITY.md).
+Do not open a public issue for a suspected vulnerability. Follow the private
+reporting instructions in [SECURITY.md](../SECURITY.md).

@@ -1,125 +1,96 @@
 # Codex Session Control
 
-Codex Session Control lets MCP clients create, inspect, message, and manage your Codex sessions. It runs locally under your Linux account and uses your Codex installation and configuration. MCP clients, Codex CLI, and compatible Desktop builds can connect to the same local service and work with the same sessions.
+Codex Session Control is a local, stateless stdio MCP plugin for coordinating
+Codex tasks. It connects each operation to the shared app-server authority
+already owned by Codex Desktop; Desktop must be open and its private shared
+socket must be available.
 
-## Why this exists
-
-Codex can delegate work to subagents, but its native tools for coordinating independent sessions, especially across Desktop and CLI, are limited. Desktop’s built-in tools cannot manage session goals, regular Desktop and CLI instances do not share live task control, and `codex exec` is better suited to individual non-interactive runs than ongoing coordination.
-
-Codex Session Control provides one MCP interface for managing live Codex sessions. Clients can create workers, inspect progress, wait for updates, send follow-ups, manage goals, and interrupt active responses. Attached CLI sessions, supported Desktop builds, and other MCP clients all work with the same sessions.
-
-This enables two powerful workflows:
-
-- **Orchestrator:** delegate work across multiple sessions, coordinate their progress, and combine their results.
-- **Supervisor:** monitor long-running sessions, periodically check their work, and intervene only when necessary.
-
-Workers can be ordinary Codex sessions rather than native subagents. This keeps them visible and easy to inspect, and supports model combinations that native spawning cannot currently use. For example, a Sol or Terra controller can manage a Luna worker.
-
-All of this is possible through the underlying Codex app-server, but integrating with that protocol directly is cumbersome. Codex Session Control handles those details and exposes a simpler interface designed for agents.
+The plugin exposes one thirteen-tool catalog for Codex CLI, Codex Desktop, and
+other stdio MCP hosts. It has no management CLI, does not own app-server or
+socket lifecycle, and does not add a network listener.
 
 ## Install
 
+Keep a stable checkout of this repository. From its root, install the local
+plugin:
+
+```bash
+./scripts/install-local-plugin.sh
+```
+
+The installer builds and stages a native binary for the current Linux host. It
+supports x86-64 and AArch64. It then registers the checkout-local legacy
+plugin with Codex.
+
 Requirements:
 
-- Linux on x86-64 or ARM64 with a working systemd user session
+- Linux on x86-64 or AArch64
+- Codex Desktop open with `shared-app-server-socket` enabled
+- A private Desktop shared socket available to the current Linux user
 - Native app-server protocol validated against Codex `0.150.0-alpha.12.2`. <!-- generated: supported-codex-version -->
 - Codex CLI `0.149.1` on `PATH` is the plugin-host target.
-- `curl` and `sha256sum`
 
-Download and run the release installer:
+## Use
 
-```bash
-curl --fail --location --output install.sh \
-  https://github.com/agentlehub/codex-session-control/releases/latest/download/install.sh
-sh ./install.sh
-```
+Start a new normal Codex CLI session or a new Desktop task after installation.
+The host loads plugin tools when it creates the session or task; an already open
+one does not acquire them retroactively. In Desktop, use the Plugins UI to
+enable or disable the plugin, then create a new task to observe the change.
 
-The installer downloads the correct release for your system and configures Codex Session Control.
-
-If you use a custom `CODEX_HOME`, pass its absolute path to the installer:
-
-```bash
-CODEX_HOME=/absolute/path/to/codex-home sh ./install.sh
-```
-
-Codex Session Control saves this choice for future commands.
-
-## How to use
-
-Launch a Codex CLI that shares the same sessions:
-
-```bash
-codex-session-control codex
-```
-
-If Codex is signed out, complete its normal sign-in flow. Codex Session Control does not require or perform sign-in during installation.
-
-You can still run `codex` normally when you do not want it connected to Codex Session Control. Already-running CLI and Desktop clients do not switch automatically; close and relaunch them to connect.
-
-Available commands:
-
-| Command | What it does |
-| --- | --- |
-| `setup` | Install Codex Session Control and start its service. |
-| `update` | Install the latest release. |
-| `status` | Check whether Codex Session Control is ready. |
-| `enable` | Start the service and turn on automatic startup. |
-| `disable` | Stop the service and turn off automatic startup. |
-| `uninstall` | Remove the service while keeping your Codex data. |
-| `codex` | Launch Codex CLI connected to Codex Session Control. |
+Other stdio MCP clients can use the same checkout-local plugin binary. They
+receive the same catalog and require the same open Desktop authority.
 
 ### MCP tools
 
 | Tool | Purpose |
 | --- | --- |
-| `thread_create` | Create a session and send its first message. |
-| `thread_fork` | Create a new session from an existing one. |
-| `threads_list` | List sessions. |
-| `thread_read` | Read a session and its conversation history. |
-| `threads_wait` | Wait for changes across multiple sessions. |
-| `thread_message_send` | Send a message to a session. |
-| `thread_title_set` | Rename a session. |
-| `thread_goal_get` | Read a session's goal. |
-| `thread_goal_set` | Set or replace a session's goal. |
-| `thread_goal_pause` | Pause a session's goal. |
-| `thread_goal_resume` | Resume a session's goal. |
-| `thread_goal_clear` | Clear a session's goal. |
-| `thread_interrupt` | Interrupt a session's active response, optionally including active subagents. |
+| `thread_create` | Create a thread and start its initial turn. |
+| `thread_fork` | Fork a thread. |
+| `threads_list` | List threads. |
+| `thread_read` | Read thread metadata and a page of turns. |
+| `threads_wait` | Wait until a target is ready, a target read fails, or the timeout expires. |
+| `thread_message_send` | Send a message to another thread, starting a turn if idle or steering its active turn. Overrides are rejected when steering. |
+| `thread_title_set` | Set a thread title. |
+| `thread_goal_get` | Read another thread's goal. |
+| `thread_goal_set` | Set or replace another thread's goal and make it active. A running turn continues unchanged. |
+| `thread_goal_pause` | Pause another thread's goal without interrupting its active turn. |
+| `thread_goal_resume` | Resume another thread's goal. |
+| `thread_goal_clear` | Clear another thread's goal without interrupting its active turn. |
+| `thread_interrupt` | Interrupt another thread's active turn, optionally including active subagents. Active goals may start another turn. |
 
-Do not work on the same session through Codex Session Control and regular Codex at the same time. Concurrent changes are not coordinated and can conflict.
+Do not make conflicting changes to the same thread through multiple clients at
+once. A mutation is dispatched at most once. If a tool returns
+`outcome_unknown`, the action may already have reached Codex; inspect the thread
+before deciding what to do next rather than retrying blindly.
 
-If a connection drops during an action, an MCP tool may return `outcome_unknown`. The action might already have happened, so inspect the session before trying again.
+## Update and remove
 
-## Updates and removal
-
-Update to the latest release with:
-
-```bash
-codex-session-control update
-```
-
-Most updates do not interrupt running work. If a service restart is required, Codex Session Control lists the active sessions and asks before continuing. The default answer is no.
-
-Running responses interrupted by a restart remain marked as interrupted. Active goals are not paused automatically and may continue when their sessions resume. Pause any goal you do not want to continue before approving the restart. If an update stops partway through, follow the retry command shown in the error message.
-
-Remove Codex Session Control with:
+To update, keep using the same stable checkout, pull the desired revision, and
+run the installer again:
 
 ```bash
-codex-session-control uninstall
+git pull
+./scripts/install-local-plugin.sh
 ```
 
-Uninstalling does not delete your Codex configuration, login, sessions, or unrelated plugins.
+Start a new CLI session or Desktop task after restaging. Existing sessions and
+tasks keep their already loaded plugin process.
 
-## Desktop compatibility
+To remove the native plugin registration:
 
-Desktop integration is optional. CLI and MCP work without it. Only builds from the [`agentlehub/codex-desktop-linux` fork](https://github.com/agentlehub/codex-desktop-linux) are supported. Follow [Desktop support](docs/desktop.md) to build and connect Desktop.
+```bash
+codex plugin remove codex-session-control@codex-session-control-local
+```
 
-## Support
+Native removal removes the plugin from newly created sessions and tasks. It
+does not delete the checkout or its staged binary, and it does not terminate
+processes already owned by open sessions or tasks. See [upgrading](docs/upgrading.md)
+when replacing a historical 0.3.x installation.
 
-If something is not working, check [Troubleshooting](docs/troubleshooting.md) first. If that does not solve the problem, open a [bug report](https://github.com/agentlehub/codex-session-control/issues/new?template=bug.yml).
+## Support and security
 
-## Security
-
-Codex Session Control runs locally under your Linux account and does not open a network port. Only processes running as the same user can access it. See [Architecture](docs/architecture.md) and [Security](docs/security.md) for details.
-
-Report vulnerabilities privately by following [SECURITY.md](SECURITY.md). Do not use public issues for security reports.
+See [Troubleshooting](docs/troubleshooting.md) before opening a
+[bug report](https://github.com/agentlehub/codex-session-control/issues/new?template=bug.yml).
+For the transport and trust model, see [Architecture](docs/architecture.md) and
+[Security](docs/security.md). Report vulnerabilities privately as described in
+[SECURITY.md](SECURITY.md).

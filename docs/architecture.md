@@ -1,72 +1,44 @@
 # Architecture
 
-Codex Session Control consists of one Rust executable, one systemd user service, and one local MCP server. Codex continues to own authentication and session data in the selected `CODEX_HOME`; Codex Session Control owns only the files required to install, connect, and run the service. It does not create another login or session database.
+Codex Session Control is one stateless stdio MCP process for each host task.
+The checkout-local plugin starts
+`plugins/codex-session-control/bin/codex-session-control` with no arguments.
+It does not own a Codex app-server, a socket, process lifecycle, configuration
+state, or a network endpoint.
 
 ```text
-attached CLI ───────────────┐
-supported Desktop ──────────┼── Unix socket ── native Codex app-server
-MCP caller ─ stdio endpoint ┘                       │
-                                                    └── selected CODEX_HOME
-                                                            ▲
-                                                 direct systemd user unit
+Codex CLI task ────────┐
+Codex Desktop task ────┼── stdio MCP ── private Unix socket ── Desktop app-server
+Generic stdio host ────┘
 ```
 
-## Installed files and paths
+## Endpoint and connection model
 
-| Purpose | Path or source |
-| --- | --- |
-| Executable | `$HOME/.local/bin/codex-session-control` |
-| Product configuration | `$HOME/.config/codex-session-control/config.toml` |
-| User unit | `$HOME/.config/systemd/user/codex-session-control.service` |
-| Marketplace and manifest | `$HOME/.local/share/codex-session-control` |
-| Runtime directory | `$XDG_RUNTIME_DIR/codex-session-control` |
-| App-server socket | `$XDG_RUNTIME_DIR/codex-session-control/app-server.sock` |
-| Optional Desktop connection file | `${XDG_CONFIG_HOME:-$HOME/.config}/<Desktop app ID>/app-server-attachment.json` |
+Every independent tool operation freshly resolves and validates the Desktop
+endpoint, opens the Unix WebSocket at exact `/rpc`, and initializes the
+connection. An explicit bridge socket takes precedence; otherwise the endpoint
+is derived from the runtime directory and Desktop application ID. The process
+does not scan for endpoints, use TCP, or read legacy installation state.
 
-## Saved Codex settings
+The endpoint directory and socket must be private and owned by the current
+Linux user. Unsafe, missing, or changed metadata prevents the operation from
+connecting. A Desktop restart is recovered by the next independent operation,
+which resolves a fresh endpoint instead of reusing an old connection.
 
-During first setup, Codex Session Control uses `CODEX_HOME` when it is set; otherwise it uses `$HOME/.codex`. It saves the selected Codex home, Codex executable, and socket in its configuration and release manifest. Later changes to `CODEX_HOME` do not affect the installed service.
+## Operation semantics
 
-After installation, Codex Session Control stops without making changes if those saved settings are missing, invalid, or inconsistent.
+The MCP server retains the Codex protocol mapping, request correlation, waits,
+and cross-thread safeguards. A mutation is dispatched at most once. If the
+connection breaks after it may have been sent, the result is `outcome_unknown`;
+the server does not replay the mutation.
 
-## How the service runs
+A persisted thread can be returned as `notLoaded` after a restart. Before
+`thread_message_send` starts a turn, it resumes that exact thread on the same
+connection and verifies that it loaded. A failed, mismatched, still-unloaded,
+or active result sends no prompt.
 
-The systemd user service runs:
+`thread_interrupt` interrupts the selected thread by default. With
+`includeDescendants: true`, it also interrupts discovered active subagents,
+including nested subagents. Interrupting does not pause or clear goals.
 
-```text
-<configured-codex> app-server --listen unix://<configured-socket>
-```
-
-It uses the saved `CODEX_HOME` and `UMask=0077`. systemd starts Codex directly without a shell, intermediary daemon, second endpoint, or separate session store.
-
-## CLI and clients
-
-`codex-session-control codex` validates the installed configuration, socket, and app-server connection. It then launches Codex with the saved `CODEX_HOME`, configured socket, and original arguments. Regular `codex` still works, but it does not use the shared app-server. To work with sessions through Codex Session Control, launch it with `codex-session-control codex`.
-
-Do not use regular `codex` and Codex Session Control to change the same session at the same time. Their changes are not coordinated and can conflict.
-
-CLI and MCP work without Desktop integration. Desktop support requires a verified build from the [`agentlehub/codex-desktop-linux` fork](https://github.com/agentlehub/codex-desktop-linux) and its connection file. See [Desktop support](desktop.md).
-
-## Lifecycle
-
-`setup` and `enable` create the Desktop connection file before starting the service. `disable` and `uninstall` stop the service and wait for its socket to disappear before removing that file. Uninstall removes only files owned by Codex Session Control.
-
-Codex Session Control stops or restarts an active managed service only when the lifecycle command is independent of that service. Otherwise, it refuses before changing service or installed state and shows how to retry.
-
-`update` verifies the downloaded release and the current installation before making changes. It restarts the service only when the Codex executable or systemd unit changes. If the restart would interrupt active sessions, Codex Session Control lists them and asks for permission to continue. The update stops unless the user explicitly answers yes.
-
-Updates that do not require a restart are applied without interrupting the service. If an update fails, Codex Session Control reports which steps completed and shows a command to retry. It does not undo completed changes automatically.
-
-MCP tool catalog changes apply to new sessions. Already-open sessions may continue using cached tools.
-
-## MCP connections
-
-Each MCP client using Codex Session Control starts `codex-session-control mcp-server` as a local stdio process. The MCP server sends tool requests to the shared Codex app-server through the configured Unix socket, so all connected MCP clients work with the same sessions.
-
-MCP operations have time limits, and responses are matched to request IDs. Actions that change a session are sent at most once. If the connection is lost after an action may have been sent, the tool reports `outcome_unknown` instead of retrying automatically.
-
-### Interrupting subagents
-
-`thread_interrupt` stops only the selected session by default and lists any active subagents left running. Set `includeDescendants` to `true` to stop its active subagents too, including nested ones. Interrupting does not pause or clear goals.
-
-See [Security](security.md) for MCP access and trust boundaries.
+See [Security](security.md) for the transport and caller trust boundary.

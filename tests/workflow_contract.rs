@@ -569,3 +569,115 @@ fn standard_checks_wrapper_owns_private_temporary_directory_lifecycle() {
         "native CI must delegate temporary-directory ownership to scripts/check.sh"
     );
 }
+
+#[test]
+fn reader_facing_surfaces_do_not_advertise_removed_lifecycle() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let current_surfaces = [
+        "README.md",
+        "CONTRIBUTING.md",
+        "SECURITY.md",
+        "docs/architecture.md",
+        "docs/desktop.md",
+        "docs/security.md",
+        "docs/troubleshooting.md",
+        ".github/ISSUE_TEMPLATE/bug.yml",
+    ];
+    let removed_surface = [
+        "codex-session-control setup",
+        "codex-session-control status",
+        "codex-session-control enable",
+        "codex-session-control disable",
+        "codex-session-control update",
+        "codex-session-control uninstall",
+        "codex-session-control codex",
+        "codex-session-control mcp-server",
+        "external-app-server-attachment",
+        "app-server-attachment.json",
+        "codex-session-control.service",
+        "releases/latest/download/install.sh",
+        "$HOME/.local/bin/codex-session-control",
+        "$HOME/.config/codex-session-control",
+        "| `setup` |",
+        "| `update` |",
+        "| `status` |",
+        "| `enable` |",
+        "| `disable` |",
+        "| `uninstall` |",
+        "| `codex` |",
+    ];
+
+    for path in current_surfaces {
+        let text = fs::read_to_string(root.join(path)).unwrap();
+        for removed in removed_surface {
+            assert!(
+                !text.contains(removed),
+                "{path} advertises removed lifecycle surface: {removed}"
+            );
+        }
+    }
+}
+
+#[test]
+fn upgrading_documents_the_historical_cutover() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let upgrading = fs::read_to_string(root.join("docs/upgrading.md")).unwrap();
+    let ordered_steps = [
+        "codex plugin remove codex-session-control@codex-session-control-local",
+        "codex plugin marketplace remove codex-session-control-local",
+        "systemctl --user disable --now codex-session-control.service",
+        "shared-app-server-socket",
+        "./scripts/install-local-plugin.sh",
+        "new CLI/Desktop task",
+        "thirteen-tool catalog",
+        "no old CSC authority",
+    ];
+
+    assert!(
+        upgrading.contains("0.3.x"),
+        "upgrade guide must label the old installation as historical 0.3.x"
+    );
+    assert!(
+        upgrading.contains("does not perform automatic migration"),
+        "upgrade guide must state that the installer performs no automatic migration"
+    );
+
+    let mut previous = 0;
+    for step in ordered_steps {
+        let position = upgrading
+            .find(step)
+            .unwrap_or_else(|| panic!("upgrade guide omitted required cutover step: {step}"));
+        assert!(
+            position >= previous,
+            "upgrade guide puts {step} before an earlier cutover step"
+        );
+        previous = position;
+    }
+}
+
+#[test]
+fn bug_form_requests_plugin_available_evidence() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let bug_form = fs::read_to_string(root.join(".github/ISSUE_TEMPLATE/bug.yml")).unwrap();
+
+    assert_required(
+        &bug_form,
+        &[
+            "Host surface",
+            "Plugin version and visibility",
+            "Desktop shared-socket availability",
+            "Exact stderr or MCP error",
+            "Reproduction steps",
+        ],
+        "bug report evidence",
+    );
+    for removed_instruction in [
+        "codex-session-control --version",
+        "codex-session-control status",
+    ] {
+        assert!(
+            !bug_form.contains(removed_instruction),
+            "bug form asks for removed command evidence: {removed_instruction}"
+        );
+    }
+}

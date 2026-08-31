@@ -8,37 +8,42 @@ body:
     attributes:
       value: |
         Do not report security vulnerabilities here. Use the [private security advisory form](https://github.com/agentlehub/codex-session-control/security/advisories/new).
+  - type: dropdown
+    id: host_surface
+    attributes:
+      label: Host surface
+      options:
+        - Codex Desktop
+        - Codex CLI
+        - Generic stdio MCP host
+    validations:
+      required: true
   - type: input
-    id: version
+    id: plugin
     attributes:
-      label: Codex Session Control version
-      description: Paste the output of `codex-session-control --version`.
+      label: Plugin version and visibility
+      description: Report the manifest version and whether the plugin is enabled and visible in this host.
     validations:
       required: true
   - type: textarea
-    id: environment
+    id: desktop_socket
     attributes:
-      label: Environment
-      description: Include your Linux distribution, CPU architecture, Codex CLI version, and how you use Codex Session Control.
-      placeholder: |
-        Linux distribution:
-        CPU architecture:
-        Codex CLI version:
-        How you use Codex Session Control (MCP, codex-session-control codex, Desktop, or other):
+      label: Desktop shared-socket availability
+      description: Report whether the private shared socket exists. Do not paste its full path or environment values.
     validations:
       required: true
   - type: textarea
-    id: status
+    id: error
     attributes:
-      label: Status output
-      description: Run `codex-session-control status` and paste the complete output. Remove private paths and session data.
+      label: Exact stderr or MCP error
+      description: Paste the exact error after redacting paths, credentials, environment values, and task content.
     validations:
       required: true
   - type: textarea
     id: reproduction
     attributes:
-      label: Reproduction
-      description: Provide the shortest sequence of steps that reproduces the problem. Remove secrets and private session data.
+      label: Reproduction steps
+      description: Provide the shortest sequence of steps that reproduces the problem. Remove secrets and private task data.
       placeholder: |
         1. ...
         2. ...
@@ -54,6 +59,6 @@ body:
     id: actual
     attributes:
       label: Actual behavior and relevant output
-      description: Redact tokens, credentials, private paths, and session content.
+      description: Redact credentials, private paths, environment values, and task content.
     validations:
       required: true
