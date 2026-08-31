@@ -1,25 +1,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum ControllerError {
-    #[error("{0}")]
-    Operational(String),
-    #[error("invalid {field}: {reason}")]
-    InvalidData {
-        field: &'static str,
-        reason: &'static str,
-    },
-}
-
-impl ControllerError {
-    pub const fn exit_code(&self) -> u8 {
-        1
-    }
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolErrorCategory {
