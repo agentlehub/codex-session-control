@@ -1,13 +1,12 @@
 use std::{
     collections::{BTreeSet, VecDeque},
-    error::Error,
     fmt, fs,
     future::Future,
     io,
     os::unix::fs::{FileTypeExt, MetadataExt},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -122,8 +121,6 @@ impl fmt::Display for LiveCode {
     }
 }
 
-impl Error for LiveCode {}
-
 #[derive(Clone, Copy, Debug)]
 struct Deadline {
     at: Instant,
@@ -216,6 +213,7 @@ pub(super) struct OwnedMcpChild {
     child: Option<Child>,
     process_group: Option<u32>,
     group_kill_sent: bool,
+    wait_error_once_for_test: bool,
 }
 
 impl OwnedMcpChild {
@@ -226,6 +224,7 @@ impl OwnedMcpChild {
             process_group: child.id(),
             child: Some(child),
             group_kill_sent: false,
+            wait_error_once_for_test: false,
         };
         if owned.process_group.is_none() {
             return Err(LiveCode::ChildSpawnFailed);
@@ -284,19 +283,54 @@ impl OwnedMcpChild {
         }
     }
 
+    async fn wait_for_leader(&mut self) -> io::Result<std::process::ExitStatus> {
+        if std::mem::take(&mut self.wait_error_once_for_test) {
+            return Err(io::Error::other("injected child wait failure"));
+        }
+        self.child
+            .as_mut()
+            .expect("leader wait requires retained child authority")
+            .wait()
+            .await
+    }
+
+    fn inject_wait_error_once_for_test(&mut self) {
+        self.wait_error_once_for_test = true;
+    }
+
     async fn shutdown_and_reap(&mut self, budget: CleanupBudget) -> Result<bool, LiveCode> {
         self.close_owned_stdin();
-        let remaining = budget.deadline.remaining()?;
+        let remaining = match budget.deadline.remaining() {
+            Ok(remaining) => remaining,
+            Err(_) => {
+                self.kill_process_group_once()?;
+                match self.child.as_mut().map(Child::try_wait) {
+                    Some(Ok(Some(_))) => {
+                        self.child.take();
+                    }
+                    Some(Ok(None)) | None => {}
+                    Some(Err(_)) => return Err(LiveCode::ChildReapFailed),
+                }
+                if self.child.is_none() && !self.process_group_exists()? {
+                    self.process_group.take();
+                }
+                return Err(LiveCode::ChildReapFailed);
+            }
+        };
         let reserve = REAP_RESERVE.min(remaining / 2);
         let graceful_deadline = budget.deadline.at - reserve;
         let mut killed_group = false;
+        let mut wait_failed = false;
 
-        if let Some(child) = self.child.as_mut() {
-            match tokio::time::timeout_at(graceful_deadline, child.wait()).await {
+        if self.child.is_some() {
+            match tokio::time::timeout_at(graceful_deadline, self.wait_for_leader()).await {
                 Ok(Ok(_)) => {
                     self.child.take();
                 }
-                Ok(Err(_)) => return Err(LiveCode::ChildReapFailed),
+                Ok(Err(_)) => {
+                    wait_failed = true;
+                    killed_group = self.kill_process_group_once()?;
+                }
                 Err(_) => {
                     killed_group = self.kill_process_group_once()?;
                 }
@@ -306,8 +340,8 @@ impl OwnedMcpChild {
         if self.child.is_none() && self.process_group_exists()? {
             killed_group |= self.kill_process_group_once()?;
         }
-        if let Some(child) = self.child.as_mut() {
-            match tokio::time::timeout_at(budget.deadline.at, child.wait()).await {
+        if self.child.is_some() {
+            match tokio::time::timeout_at(budget.deadline.at, self.wait_for_leader()).await {
                 Ok(Ok(_)) => {
                     self.child.take();
                 }
@@ -318,7 +352,11 @@ impl OwnedMcpChild {
         loop {
             if !self.process_group_exists()? {
                 self.process_group.take();
-                return Ok(killed_group);
+                return if wait_failed {
+                    Err(LiveCode::ChildReapFailed)
+                } else {
+                    Ok(killed_group)
+                };
             }
             budget.check().map_err(|_| LiveCode::ChildReapFailed)?;
             budget
@@ -336,26 +374,11 @@ impl Drop for OwnedMcpChild {
         }
         self.close_owned_stdin();
         let _ = self.kill_process_group_once();
-        let deadline = std::time::Instant::now() + REAP_RESERVE;
-        loop {
-            let leader_reaped = match self.child.as_mut().map(Child::try_wait) {
-                None => true,
-                Some(Ok(Some(_))) => {
-                    self.child.take();
-                    true
-                }
-                Some(Ok(None)) => false,
-                Some(Err(_)) => false,
-            };
-            let group_absent = matches!(self.process_group_exists(), Ok(false));
-            if leader_reaped && group_absent {
-                self.process_group.take();
-                return;
-            }
-            if std::time::Instant::now() >= deadline {
-                return;
-            }
-            std::thread::sleep(CHILD_POLL_INTERVAL);
+        if matches!(self.child.as_mut().map(Child::try_wait), Some(Ok(Some(_)))) {
+            self.child.take();
+        }
+        if self.child.is_none() && matches!(self.process_group_exists(), Ok(false)) {
+            self.process_group.take();
         }
     }
 }
@@ -431,14 +454,59 @@ fn sleeping_child_command() -> Command {
     command
 }
 
-pub(super) async fn assert_owned_child_exit_paths_for_test() {
-    let mut extraction_failure = sleeping_child_command();
-    extraction_failure.stdout(Stdio::null());
-    let mut owned = OwnedMcpChild::spawn(&mut extraction_failure).unwrap();
-    let pid = owned.id();
-    assert!(owned.take_stdout().is_none());
-    drop(owned);
+async fn explicitly_reap_test_owner(owner: &mut Option<OwnedMcpChild>) {
+    owner
+        .as_mut()
+        .expect("test retains explicit child authority")
+        .shutdown_and_reap(CleanupBudget::with_timeout(Duration::from_secs(1)))
+        .await
+        .expect("test child is reaped within its explicit cleanup budget");
+    owner.take();
+}
+
+async fn assert_startup_failure_retains_explicit_owner_for_test() {
+    let mut command = sleeping_child_command();
+    command.stdout(Stdio::null());
+    let mut owner = None;
+    assert!(matches!(
+        McpClient::start_command(
+            &mut owner,
+            &mut command,
+            Deadline::after(Duration::from_secs(1)),
+            None,
+        )
+        .await,
+        Err(LiveCode::ChildSpawnFailed)
+    ));
+    let pid = owner
+        .as_ref()
+        .expect("startup failure must return with explicit ownership")
+        .id();
+    explicitly_reap_test_owner(&mut owner).await;
     assert_process_and_group_absent(pid);
+}
+
+async fn assert_inner_wait_error_kills_and_confirms_reap_for_test() {
+    let mut command = sleeping_child_command();
+    let mut owner = Some(OwnedMcpChild::spawn(&mut command).unwrap());
+    let pid = owner.as_ref().unwrap().id();
+    owner.as_mut().unwrap().inject_wait_error_once_for_test();
+    assert_eq!(
+        owner
+            .as_mut()
+            .unwrap()
+            .shutdown_and_reap(CleanupBudget::with_timeout(Duration::from_secs(1)))
+            .await,
+        Err(LiveCode::ChildReapFailed)
+    );
+    assert!(owner.is_some(), "wait failure must retain the owner slot");
+    assert_process_and_group_absent(pid);
+    explicitly_reap_test_owner(&mut owner).await;
+}
+
+pub(super) async fn assert_owned_child_exit_paths_for_test() {
+    assert_startup_failure_retains_explicit_owner_for_test().await;
+    assert_inner_wait_error_kills_and_confirms_reap_for_test().await;
 
     let mut normal = Command::new("/bin/sh");
     normal
@@ -457,27 +525,24 @@ pub(super) async fn assert_owned_child_exit_paths_for_test() {
     );
     assert_process_and_group_absent(pid);
 
-    let mut panic_pid = None;
+    let mut panic_owner = Some(OwnedMcpChild::spawn(&mut sleeping_child_command()).unwrap());
+    let panic_pid = panic_owner.as_ref().unwrap().id();
     let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut command = sleeping_child_command();
-        let owned = OwnedMcpChild::spawn(&mut command).unwrap();
-        panic_pid = Some(owned.id());
-        let _owned = owned;
         std::panic::resume_unwind(Box::new("intentional owned-child panic-path probe"));
     }));
     assert!(panic_result.is_err());
-    assert_process_and_group_absent(panic_pid.unwrap());
+    explicitly_reap_test_owner(&mut panic_owner).await;
+    assert_process_and_group_absent(panic_pid);
 
     let mut command = sleeping_child_command();
-    let owned = OwnedMcpChild::spawn(&mut command).unwrap();
-    let pid = owned.id();
-    let task = tokio::spawn(async move {
-        let _owned = owned;
-        std::future::pending::<()>().await;
-    });
-    tokio::task::yield_now().await;
-    task.abort();
-    assert!(task.await.unwrap_err().is_cancelled());
+    let mut cancel_owner = Some(OwnedMcpChild::spawn(&mut command).unwrap());
+    let pid = cancel_owner.as_ref().unwrap().id();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), std::future::pending::<()>())
+            .await
+            .is_err()
+    );
+    explicitly_reap_test_owner(&mut cancel_owner).await;
     assert_process_and_group_absent(pid);
 }
 
@@ -494,9 +559,30 @@ pub(super) async fn assert_owned_child_timeout_for_test() {
         "timeout did not dispatch the one process-group kill"
     );
     assert_process_and_group_absent(pid);
+
+    let mut expired_command = sleeping_child_command();
+    let mut expired_owner = Some(OwnedMcpChild::spawn(&mut expired_command).unwrap());
+    let expired_pid = expired_owner.as_ref().unwrap().id();
+    let expired_budget = CleanupBudget::with_timeout(Duration::from_millis(1));
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert_eq!(
+        expired_owner
+            .as_mut()
+            .unwrap()
+            .shutdown_and_reap(expired_budget)
+            .await,
+        Err(LiveCode::ChildReapFailed)
+    );
+    assert!(
+        expired_owner.is_some(),
+        "expired cleanup must retain explicit ownership"
+    );
+    explicitly_reap_test_owner(&mut expired_owner).await;
+    assert_process_and_group_absent(expired_pid);
 }
 
 pub(super) async fn assert_deadline_and_framing_contract_for_test() {
+    assert_actual_mcp_deadline_paths_for_test().await;
     tokio::time::pause();
     let cleanup = CleanupBudget::with_timeout(Duration::from_millis(100));
     let original_deadline = cleanup.deadline.at;
@@ -529,6 +615,102 @@ pub(super) async fn assert_deadline_and_framing_contract_for_test() {
             .unwrap(),
         b"{\"id\":1}"
     );
+}
+
+async fn assert_actual_mcp_deadline_paths_for_test() {
+    let startup_probe = McpDeadlineProbe::blocking_at(8, Duration::from_secs(2));
+    let startup_deadline = Deadline::after(Duration::from_secs(1));
+    let mut startup_owner = None;
+    assert!(matches!(
+        McpClient::start_with_deadline_probe(
+            &mut startup_owner,
+            startup_deadline,
+            startup_probe.clone(),
+        )
+        .await,
+        Err(LiveCode::DeadlineExceeded)
+    ));
+    let startup_observed = startup_probe.snapshot();
+    assert!(
+        startup_observed.len() > 5,
+        "startup did not reach notification"
+    );
+    assert!(
+        startup_observed
+            .iter()
+            .all(|(_, deadline)| *deadline == startup_deadline.at),
+        "startup request and notification reset the absolute deadline"
+    );
+    explicitly_reap_test_owner(&mut startup_owner).await;
+
+    let mut owner = None;
+    let mut client = McpClient::start_with_deadline_probe(
+        &mut owner,
+        Deadline::after(Duration::from_secs(2)),
+        McpDeadlineProbe::non_blocking(),
+    )
+    .await
+    .unwrap();
+
+    let request_probe = McpDeadlineProbe::blocking_at(5, Duration::from_secs(2));
+    client.deadline_probe = Some(request_probe.clone());
+    let request_deadline = Deadline::after(Duration::from_secs(1));
+    assert_eq!(
+        client
+            .request_with_deadline("tools/list", json!({}), request_deadline)
+            .await,
+        Err(LiveCode::DeadlineExceeded)
+    );
+    let request_observed = request_probe.snapshot();
+    assert_eq!(
+        request_observed
+            .iter()
+            .map(|(stage, _)| *stage)
+            .collect::<Vec<_>>(),
+        vec![
+            McpDeadlineStage::Serialize,
+            McpDeadlineStage::Write,
+            McpDeadlineStage::Flush,
+            McpDeadlineStage::Read,
+            McpDeadlineStage::Decode,
+        ]
+    );
+    assert!(
+        request_observed
+            .iter()
+            .all(|(_, deadline)| *deadline == request_deadline.at),
+        "request stages reset the absolute deadline"
+    );
+
+    let notification_probe = McpDeadlineProbe::blocking_at(3, Duration::from_secs(2));
+    client.deadline_probe = Some(notification_probe.clone());
+    let notification_deadline = Deadline::after(Duration::from_secs(1));
+    assert_eq!(
+        client
+            .notification_with_deadline("notifications/test", json!({}), notification_deadline)
+            .await,
+        Err(LiveCode::DeadlineExceeded)
+    );
+    let notification_observed = notification_probe.snapshot();
+    assert_eq!(
+        notification_observed
+            .iter()
+            .map(|(stage, _)| *stage)
+            .collect::<Vec<_>>(),
+        vec![
+            McpDeadlineStage::Serialize,
+            McpDeadlineStage::Write,
+            McpDeadlineStage::Flush,
+        ]
+    );
+    assert!(
+        notification_observed
+            .iter()
+            .all(|(_, deadline)| *deadline == notification_deadline.at),
+        "notification stages reset the absolute deadline"
+    );
+    client.close_stdin();
+    explicitly_reap_test_owner(&mut owner).await;
 }
 
 #[derive(Debug)]
@@ -643,6 +825,7 @@ pub(super) struct LiveHarness {
     workspace: PathBuf,
     endpoint_source: EndpointSource,
     mcp: Option<McpClient>,
+    mcp_child: Option<OwnedMcpChild>,
 }
 
 impl LiveHarness {
@@ -653,6 +836,7 @@ impl LiveHarness {
                 deterministic_sockets: None,
             },
             mcp: None,
+            mcp_child: None,
         })
     }
 
@@ -669,6 +853,7 @@ impl LiveHarness {
                 deterministic_sockets: Some(Mutex::new(sockets.into())),
             },
             mcp: None,
+            mcp_child: None,
         })
     }
 
@@ -677,11 +862,13 @@ impl LiveHarness {
             workspace,
             endpoint_source: EndpointSource::Fixed(socket),
             mcp: None,
+            mcp_child: None,
         })
     }
 
     pub(super) async fn start_mcp(&mut self) -> Result<(), LiveCode> {
-        self.mcp = Some(McpClient::start().await?);
+        let client = McpClient::start(&mut self.mcp_child).await?;
+        self.mcp = Some(client);
         Ok(())
     }
 
@@ -780,10 +967,14 @@ impl LiveHarness {
         &mut self,
         budget: CleanupBudget,
     ) -> Result<(), LiveCode> {
-        let Some(mcp) = self.mcp.as_mut() else {
+        if let Some(mcp) = self.mcp.as_mut() {
+            mcp.close_stdin();
+        }
+        let Some(child) = self.mcp_child.as_mut() else {
             return Ok(());
         };
-        mcp.shutdown(budget).await?;
+        child.shutdown_and_reap(budget).await?;
+        self.mcp_child.take();
         self.mcp.take();
         Ok(())
     }
@@ -1080,8 +1271,71 @@ impl NativeConnection {
 pub(super) struct McpClient {
     stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
-    child: OwnedMcpChild,
     next_id: u64,
+    deadline_probe: Option<McpDeadlineProbe>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum McpDeadlineStage {
+    Serialize,
+    Write,
+    Flush,
+    Read,
+    Decode,
+}
+
+#[derive(Clone)]
+struct McpDeadlineProbe {
+    block_at: Option<usize>,
+    block_for: Duration,
+    observed: Arc<Mutex<Vec<(McpDeadlineStage, Instant)>>>,
+}
+
+impl McpDeadlineProbe {
+    fn blocking_at(block_at: usize, block_for: Duration) -> Self {
+        Self {
+            block_at: Some(block_at),
+            block_for,
+            observed: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn non_blocking() -> Self {
+        Self {
+            block_at: None,
+            block_for: Duration::ZERO,
+            observed: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    async fn enter(&self, stage: McpDeadlineStage, deadline: Deadline) -> Result<(), LiveCode> {
+        let observed_count = {
+            let mut observed = self
+                .observed
+                .lock()
+                .expect("deadline probe lock is not poisoned");
+            observed.push((stage, deadline.at));
+            observed.len()
+        };
+        let delay = if self.block_at == Some(observed_count) {
+            self.block_for
+        } else {
+            Duration::ZERO
+        };
+        deadline
+            .run(async {
+                tokio::time::sleep(delay).await;
+                Ok(())
+            })
+            .await
+    }
+
+    fn snapshot(&self) -> Vec<(McpDeadlineStage, Instant)> {
+        self.observed
+            .lock()
+            .expect("deadline probe lock is not poisoned")
+            .clone()
+    }
 }
 
 fn project_tool_call_result(result: &Value) -> Result<Value, LiveCode> {
@@ -1124,8 +1378,34 @@ pub(super) fn caller_bound_tool_request_keeps_metadata_outside_public_arguments(
 }
 
 impl McpClient {
-    async fn start() -> Result<Self, LiveCode> {
-        let startup = Deadline::after(STARTUP_TIMEOUT);
+    async fn enter_deadline_stage(
+        &self,
+        stage: McpDeadlineStage,
+        deadline: Deadline,
+    ) -> Result<(), LiveCode> {
+        match &self.deadline_probe {
+            Some(probe) => probe.enter(stage, deadline).await,
+            None => deadline.check(),
+        }
+    }
+
+    async fn start(owner: &mut Option<OwnedMcpChild>) -> Result<Self, LiveCode> {
+        Self::start_with_optional_probe(owner, Deadline::after(STARTUP_TIMEOUT), None).await
+    }
+
+    async fn start_with_deadline_probe(
+        owner: &mut Option<OwnedMcpChild>,
+        startup: Deadline,
+        deadline_probe: McpDeadlineProbe,
+    ) -> Result<Self, LiveCode> {
+        Self::start_with_optional_probe(owner, startup, Some(deadline_probe)).await
+    }
+
+    async fn start_with_optional_probe(
+        owner: &mut Option<OwnedMcpChild>,
+        startup: Deadline,
+        deadline_probe: Option<McpDeadlineProbe>,
+    ) -> Result<Self, LiveCode> {
         let binary = cargo_bin("codex-session-control");
         if !binary.is_file() {
             return Err(LiveCode::ChildSpawnFailed);
@@ -1135,14 +1415,29 @@ impl McpClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let mut child = OwnedMcpChild::spawn(&mut command)?;
+        Self::start_command(owner, &mut command, startup, deadline_probe).await
+    }
+
+    async fn start_command(
+        owner: &mut Option<OwnedMcpChild>,
+        command: &mut Command,
+        startup: Deadline,
+        deadline_probe: Option<McpDeadlineProbe>,
+    ) -> Result<Self, LiveCode> {
+        if owner.is_some() {
+            return Err(LiveCode::ChildSpawnFailed);
+        }
+        *owner = Some(OwnedMcpChild::spawn(command)?);
+        let child = owner
+            .as_mut()
+            .expect("spawned MCP child authority is installed before fallible setup");
         let stdin = child.take_stdin().ok_or(LiveCode::ChildSpawnFailed)?;
         let stdout = child.take_stdout().ok_or(LiveCode::ChildSpawnFailed)?;
         let mut client = Self {
             stdin: Some(stdin),
             stdout: BufReader::new(stdout),
-            child,
             next_id: 1,
+            deadline_probe,
         };
         client
             .request_with_deadline(
@@ -1159,6 +1454,10 @@ impl McpClient {
             .notification_with_deadline("notifications/initialized", json!({}), startup)
             .await?;
         Ok(client)
+    }
+
+    fn close_stdin(&mut self) {
+        self.stdin.take();
     }
 
     pub(super) async fn list_tools(&mut self) -> Result<Value, LiveCode> {
@@ -1373,20 +1672,33 @@ impl McpClient {
         let id = self.next_id;
         self.next_id += 1;
         let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        self.enter_deadline_stage(McpDeadlineStage::Serialize, deadline)
+            .await?;
         let mut encoded = serde_json::to_vec(&message).map_err(|_| LiveCode::ToolFailed)?;
         deadline.check()?;
         if encoded.len() >= MAX_MCP_FRAME_BYTES {
             return Err(LiveCode::ToolFailed);
         }
         encoded.push(b'\n');
-        let stdin = self.stdin.as_mut().ok_or(LiveCode::ToolFailed)?;
-        deadline
-            .run_io(stdin.write_all(&encoded), LiveCode::ToolFailed)
+        self.enter_deadline_stage(McpDeadlineStage::Write, deadline)
             .await?;
+        {
+            let stdin = self.stdin.as_mut().ok_or(LiveCode::ToolFailed)?;
+            deadline
+                .run_io(stdin.write_all(&encoded), LiveCode::ToolFailed)
+                .await?;
+        }
+        self.enter_deadline_stage(McpDeadlineStage::Flush, deadline)
+            .await?;
+        let stdin = self.stdin.as_mut().ok_or(LiveCode::ToolFailed)?;
         deadline.run_io(stdin.flush(), LiveCode::ToolFailed).await?;
         loop {
+            self.enter_deadline_stage(McpDeadlineStage::Read, deadline)
+                .await?;
             let line = read_bounded_line(&mut self.stdout, deadline, MAX_MCP_FRAME_BYTES).await?;
             deadline.check()?;
+            self.enter_deadline_stage(McpDeadlineStage::Decode, deadline)
+                .await?;
             let value: Value = serde_json::from_slice(&line).map_err(|_| LiveCode::ToolFailed)?;
             deadline.check()?;
             if value.get("id").and_then(Value::as_u64) != Some(id) {
@@ -1407,22 +1719,26 @@ impl McpClient {
     ) -> Result<(), LiveCode> {
         deadline.check()?;
         let message = json!({"jsonrpc": "2.0", "method": method, "params": params});
+        self.enter_deadline_stage(McpDeadlineStage::Serialize, deadline)
+            .await?;
         let mut encoded = serde_json::to_vec(&message).map_err(|_| LiveCode::ToolFailed)?;
         deadline.check()?;
         if encoded.len() >= MAX_MCP_FRAME_BYTES {
             return Err(LiveCode::ToolFailed);
         }
         encoded.push(b'\n');
-        let stdin = self.stdin.as_mut().ok_or(LiveCode::ToolFailed)?;
-        deadline
-            .run_io(stdin.write_all(&encoded), LiveCode::ToolFailed)
+        self.enter_deadline_stage(McpDeadlineStage::Write, deadline)
             .await?;
+        {
+            let stdin = self.stdin.as_mut().ok_or(LiveCode::ToolFailed)?;
+            deadline
+                .run_io(stdin.write_all(&encoded), LiveCode::ToolFailed)
+                .await?;
+        }
+        self.enter_deadline_stage(McpDeadlineStage::Flush, deadline)
+            .await?;
+        let stdin = self.stdin.as_mut().ok_or(LiveCode::ToolFailed)?;
         deadline.run_io(stdin.flush(), LiveCode::ToolFailed).await?;
         Ok(())
-    }
-
-    pub(super) async fn shutdown(&mut self, budget: CleanupBudget) -> Result<(), LiveCode> {
-        self.stdin.take();
-        self.child.shutdown_and_reap(budget).await.map(|_| ())
     }
 }

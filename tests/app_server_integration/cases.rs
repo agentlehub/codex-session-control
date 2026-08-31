@@ -1,12 +1,13 @@
 use std::{
     collections::BTreeSet,
-    error::Error,
     ffi::{OsStr, OsString},
     fs::{self, File},
+    future::Future,
     io::{self, Read, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
     panic::AssertUnwindSafe,
     path::{Path, PathBuf},
+    process::ExitCode,
     sync::Arc,
 };
 
@@ -2180,10 +2181,20 @@ fn run_isolated_child_probe(test_name: &str, probe: &str) {
 }
 
 pub(super) async fn deadline_scopes_are_bounded_and_do_not_extend_each_other() {
+    if std::env::var_os("CODEX_SESSION_CONTROL_OWNED_CHILD_PROBE").as_deref()
+        != Some(OsStr::new("deadline"))
+    {
+        run_isolated_child_probe(
+            "deadline_scopes_are_bounded_and_do_not_extend_each_other",
+            "deadline",
+        );
+        return;
+    }
     crate::live_harness::assert_deadline_and_framing_contract_for_test().await;
 }
 
-pub(super) fn live_codes_are_the_only_output_and_cleanup_has_precedence() {
+pub(super) async fn live_codes_are_the_only_output_and_cleanup_has_precedence() {
+    assert_live_gate_output_boundary_for_test().await;
     assert_eq!(
         LiveCode::ALL.map(|code| code.to_string()),
         [
@@ -2225,23 +2236,103 @@ pub(super) fn live_codes_are_the_only_output_and_cleanup_has_precedence() {
     );
 }
 
-pub(super) async fn live_desktop_authority_all_thirteen_tools_are_disposable()
--> Result<(), Box<dyn Error>> {
+pub(super) async fn live_desktop_authority_all_thirteen_tools_are_disposable() -> ExitCode {
     let opt_in = std::env::var_os(LIVE_OPT_IN);
     let hard_kill = std::env::var_os(LIVE_HARD_KILL);
     let recovery = std::env::var_os(LIVE_RECOVERY);
-    let mode = select_live_mode(opt_in.as_deref(), hard_kill.as_deref(), recovery.as_deref())
-        .map_err(|_| LiveCode::OptInRejected)?;
-    let previous_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let result = AssertUnwindSafe(execute_live_mode(mode, opt_in.as_deref()))
-        .catch_unwind()
-        .await;
-    std::panic::set_hook(previous_hook);
-    match result {
-        Ok(result) => result.map_err(Into::into),
-        Err(payload) => std::panic::resume_unwind(payload),
+    let execution = async {
+        let mode = select_live_mode(opt_in.as_deref(), hard_kill.as_deref(), recovery.as_deref())
+            .map_err(|_| LiveCode::OptInRejected)?;
+        execute_live_mode(mode, opt_in.as_deref()).await
+    };
+    let mut stderr = std::io::stderr().lock();
+    live_gate_status(execution, &mut stderr).await
+}
+
+type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>;
+
+struct PanicHookGuard {
+    previous: Option<PanicHook>,
+}
+
+impl PanicHookGuard {
+    fn replace(replacement: PanicHook) -> Self {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(replacement);
+        Self {
+            previous: Some(previous),
+        }
     }
+
+    fn suppress() -> Self {
+        Self::replace(Box::new(|_| {}))
+    }
+}
+
+impl Drop for PanicHookGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            std::panic::set_hook(previous);
+        }
+    }
+}
+
+async fn live_gate_status<F, W>(execution: F, output: &mut W) -> ExitCode
+where
+    F: Future<Output = Result<(), LiveCode>>,
+    W: Write,
+{
+    let hook = PanicHookGuard::suppress();
+    let result = AssertUnwindSafe(execution).catch_unwind().await;
+    drop(hook);
+    match result {
+        Ok(Ok(())) => ExitCode::SUCCESS,
+        Ok(Err(code)) => {
+            let _ = writeln!(output, "{code}");
+            ExitCode::FAILURE
+        }
+        Err(_) => {
+            let _ = writeln!(output, "{}", LiveCode::ToolFailed);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn assert_live_gate_output_boundary_for_test() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let hook_calls = Arc::new(AtomicUsize::new(0));
+    let hook_calls_for_hook = Arc::clone(&hook_calls);
+    let hook = PanicHookGuard::replace(Box::new(move |_| {
+        hook_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+    }));
+
+    let mut error_output = Vec::new();
+    let error_status = live_gate_status(
+        async { Err(LiveCode::ArchiveProofFailed) },
+        &mut error_output,
+    )
+    .await;
+    assert_eq!(error_status, ExitCode::FAILURE);
+    assert_eq!(error_output, b"archive_proof_failed\n");
+
+    let mut panic_output = Vec::new();
+    let panic_status = live_gate_status(
+        async {
+            panic!("sensitive panic payload");
+            #[allow(unreachable_code)]
+            Ok(())
+        },
+        &mut panic_output,
+    )
+    .await;
+    assert_eq!(panic_status, ExitCode::FAILURE);
+    assert_eq!(panic_output, b"tool_failed\n");
+    assert_eq!(hook_calls.load(Ordering::SeqCst), 0);
+
+    let _ = std::panic::catch_unwind(|| panic!("restored hook probe"));
+    assert_eq!(hook_calls.load(Ordering::SeqCst), 1);
+    drop(hook);
 }
 
 async fn execute_live_mode(mode: LiveMode, opt_in: Option<&OsStr>) -> Result<(), LiveCode> {
@@ -2282,6 +2373,9 @@ async fn execute_live_mode(mode: LiveMode, opt_in: Option<&OsStr>) -> Result<(),
         .catch_unwind()
         .await;
     if mode == LiveMode::HardKill && matches!(run_result, Ok(Ok(()))) {
+        let budget = CleanupBudget::new();
+        harness.stop_and_reap_mcp_child(budget).await?;
+        budget.check()?;
         println!("{}", LiveCode::HardKillReady);
         std::io::stdout()
             .flush()

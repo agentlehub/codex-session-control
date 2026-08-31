@@ -19,8 +19,15 @@ readonly fixed_codes=(
 )
 
 capture_root=
-test_pid=
+private_wait_capture=/dev/null
+test_leader=
+test_pgid=
+leader_reaped=0
 test_status=
+ownership_failure=0
+
+readonly term_grace_seconds=2
+readonly reap_grace_seconds=3
 
 is_fixed_code() {
   local candidate="${1-}"
@@ -39,21 +46,223 @@ require_status() {
   [[ "$actual" -eq "$expected" ]]
 }
 
-cleanup_capture() {
-  if [[ -n "$test_pid" ]] && kill -0 "$test_pid" 2>/dev/null; then
-    kill -TERM "$test_pid" 2>/dev/null || true
-    wait "$test_pid" 2>/dev/null || true
+group_state() {
+  local pgid="$1"
+  local diagnostic status
+  if diagnostic="$(LC_ALL=C kill -0 -- "-$pgid" 2>&1)"; then
+    status=0
+  else
+    status=$?
   fi
-  test_pid=
+  if [[ "$status" -eq 0 ]]; then
+    return 0
+  fi
+  if [[ "$diagnostic" == *"No such process"* ]]; then
+    return 1
+  fi
+  return 2
+}
+
+signal_group() {
+  local signal="$1"
+  local pgid="$2"
+  local diagnostic status
+  if diagnostic="$(LC_ALL=C kill "-$signal" -- "-$pgid" 2>&1)"; then
+    status=0
+  else
+    status=$?
+  fi
+  if [[ "$status" -eq 0 ]]; then
+    return 0
+  fi
+  if [[ "$diagnostic" == *"No such process"* ]]; then
+    return 1
+  fi
+  return 2
+}
+
+leader_is_waitable() {
+  local leader="$1"
+  local state
+  if [[ ! -r "/proc/$leader/stat" ]]; then
+    return 0
+  fi
+  state="$(awk '{print $3}' "/proc/$leader/stat" 2>/dev/null)" || return 2
+  [[ "$state" == Z ]]
+}
+
+wait_until_leader_is_waitable() {
+  local leader="$1"
+  local deadline="$2"
+  while ! leader_is_waitable "$leader"; do
+    if ((SECONDS >= deadline)); then
+      return 1
+    fi
+    sleep 0.05
+  done
+}
+
+private_wait_for_leader() {
+  local leader="$1"
+  local status
+  if wait "$leader" >"$private_wait_capture" 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  if [[ "$status" -eq 127 ]]; then
+    return 1
+  fi
+  test_status="$status"
+  leader_reaped=1
+}
+
+confirm_group_absent() {
+  local pgid="$1"
+  local deadline="$2"
+  local state
+  while true; do
+    if group_state "$pgid"; then
+      state=0
+    else
+      state=$?
+    fi
+    case "$state" in
+      1) return 0 ;;
+      2) return 1 ;;
+    esac
+    if ((SECONDS >= deadline)); then
+      return 1
+    fi
+    sleep 0.05
+  done
+}
+
+wait_until_group_exists() {
+  local pgid="$1"
+  local deadline="$2"
+  local state
+  while true; do
+    if group_state "$pgid"; then
+      state=0
+    else
+      state=$?
+    fi
+    case "$state" in
+      0) return 0 ;;
+      2) return 1 ;;
+    esac
+    if ((SECONDS >= deadline)); then
+      return 1
+    fi
+    sleep 0.01
+  done
+}
+
+release_owned_test() {
+  local state
+  if [[ "$leader_reaped" -ne 1 ]]; then
+    return 1
+  fi
+  if group_state "$test_pgid"; then
+    state=0
+  else
+    state=$?
+  fi
+  if [[ "$state" -eq 1 ]]; then
+    test_leader=
+    test_pgid=
+    leader_reaped=0
+    return 0
+  fi
+  return 1
+}
+
+cleanup_owned_test_inner() {
+  local state deadline
+  if [[ -z "$test_leader" || -z "$test_pgid" ]]; then
+    return 0
+  fi
+
+  if signal_group TERM "$test_pgid"; then
+    state=0
+  else
+    state=$?
+  fi
+  if [[ "$state" -eq 2 ]]; then
+    return 1
+  fi
+  deadline=$((SECONDS + term_grace_seconds))
+  if confirm_group_absent "$test_pgid" "$deadline"; then
+    state=0
+  else
+    state=$?
+  fi
+  if [[ "$state" -ne 0 ]]; then
+    if signal_group KILL "$test_pgid"; then
+      state=0
+    else
+      state=$?
+    fi
+    if [[ "$state" -eq 2 ]]; then
+      return 1
+    fi
+  fi
+
+  if [[ "$leader_reaped" -ne 1 ]]; then
+    deadline=$((SECONDS + reap_grace_seconds))
+    wait_until_leader_is_waitable "$test_leader" "$deadline" || return 1
+    private_wait_for_leader "$test_leader" || return 1
+  fi
+  deadline=$((SECONDS + reap_grace_seconds))
+  confirm_group_absent "$test_pgid" "$deadline" || return 1
+  release_owned_test
+}
+
+cleanup_owned_test() {
+  cleanup_owned_test_inner >>"$private_wait_capture" 2>&1
+}
+
+kill_owned_group_and_wait() {
+  local state
+  {
+    if signal_group KILL "$test_pgid"; then
+      state=0
+    else
+      state=$?
+    fi
+    [[ "$state" -eq 0 ]]
+    wait_until_leader_is_waitable "$test_leader" "$((SECONDS + reap_grace_seconds))"
+    private_wait_for_leader "$test_leader"
+    confirm_group_absent "$test_pgid" "$((SECONDS + reap_grace_seconds))"
+    release_owned_test
+  } >>"$private_wait_capture" 2>&1
+}
+
+cleanup_capture() {
+  if ! cleanup_owned_test; then
+    ownership_failure=1
+  fi
   if [[ -n "$capture_root" ]] &&
     [[ "$capture_root" == "${TMPDIR:-/tmp}"/codex-session-control-live-proof.* ]] &&
     [[ -d "$capture_root" ]]; then
     rm -rf -- "$capture_root"
   fi
   capture_root=
+  private_wait_capture=/dev/null
 }
 
-trap cleanup_capture EXIT HUP INT TERM
+handle_signal() {
+  local status="$1"
+  trap - EXIT HUP INT TERM
+  cleanup_capture
+  exit "$status"
+}
+
+trap cleanup_capture EXIT
+trap 'handle_signal 129' HUP
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM
 
 new_capture_root() {
   capture_root="$(
@@ -61,6 +270,8 @@ new_capture_root() {
   )"
   chmod 0700 "$capture_root"
   [[ "$(stat --format=%a "$capture_root")" == 700 ]]
+  private_wait_capture="$capture_root/private-wait"
+  new_capture_file "$private_wait_capture"
 }
 
 new_capture_file() {
@@ -68,6 +279,63 @@ new_capture_file() {
   : >"$path"
   chmod 0600 "$path"
   [[ "$(stat --format=%a "$path")" == 600 ]]
+}
+
+assert_private_wait_and_group_cleanup_for_self_test() {
+  local self_root="$1"
+  local public_capture="$self_root/public"
+  local killed_leader killed_pgid cleanup_leader cleanup_pgid
+  new_capture_file "$public_capture"
+
+  setsid /bin/sh -c 'exec sleep 30' >/dev/null 2>&1 &
+  test_leader=$!
+  test_pgid="$test_leader"
+  leader_reaped=0
+  wait_until_group_exists "$test_pgid" "$((SECONDS + 1))"
+  killed_leader="$test_leader"
+  killed_pgid="$test_pgid"
+  kill_owned_group_and_wait >"$public_capture" 2>&1
+  [[ "$test_status" -eq 137 ]]
+  [[ -z "$test_leader" && -z "$test_pgid" ]]
+  if grep -Fq "$killed_leader" "$public_capture"; then
+    return 1
+  fi
+  if grep -Fq 'sleep 30' "$public_capture"; then
+    return 1
+  fi
+  [[ ! -s "$public_capture" ]]
+  local killed_group_state
+  if group_state "$killed_pgid"; then
+    killed_group_state=0
+  else
+    killed_group_state=$?
+  fi
+  [[ "$killed_group_state" -eq 1 ]]
+
+  : >"$public_capture"
+  setsid /bin/sh -c 'exec sleep 30' >/dev/null 2>&1 &
+  test_leader=$!
+  test_pgid="$test_leader"
+  leader_reaped=0
+  wait_until_group_exists "$test_pgid" "$((SECONDS + 1))"
+  cleanup_leader="$test_leader"
+  cleanup_pgid="$test_pgid"
+  cleanup_owned_test >"$public_capture" 2>&1
+  [[ -z "$test_leader" && -z "$test_pgid" ]]
+  if grep -Fq "$cleanup_leader" "$public_capture"; then
+    return 1
+  fi
+  if grep -Fq 'sleep 30' "$public_capture"; then
+    return 1
+  fi
+  [[ ! -s "$public_capture" ]]
+  local cleanup_group_state
+  if group_state "$cleanup_pgid"; then
+    cleanup_group_state=0
+  else
+    cleanup_group_state=$?
+  fi
+  [[ "$cleanup_group_state" -eq 1 ]]
 }
 
 run_self_test() {
@@ -100,6 +368,7 @@ run_self_test() {
   if is_fixed_code hard_kill_ready_suffix; then
     exit 1
   fi
+  assert_private_wait_and_group_cleanup_for_self_test "$self_root"
   cleanup_capture
   [[ ! -e "$self_root" ]]
   printf '%s\n' 'self_test_status=0'
@@ -199,16 +468,39 @@ spawn_live_test() {
     "$harness" "$live_test_name" \
     --exact --ignored --nocapture --test-threads=1 \
     >"$stdout_path" 2>"$stderr_path" &
-  test_pid=$!
+  test_leader=$!
+  test_pgid="$test_leader"
+  leader_reaped=0
+  ownership_failure=0
+  wait_until_group_exists "$test_pgid" "$((SECONDS + 1))" || {
+    printf '%s\n' child_reap_failed >&2
+    exit 1
+  }
+}
+
+wait_for_test_inner() {
+  local leader="$test_leader"
+  local pgid="$test_pgid"
+  local state
+  ownership_failure=0
+  if ! private_wait_for_leader "$leader"; then
+    ownership_failure=1
+    return
+  fi
+  if group_state "$pgid"; then
+    state=0
+  else
+    state=$?
+  fi
+  if [[ "$state" -eq 1 ]]; then
+    release_owned_test || ownership_failure=1
+  else
+    ownership_failure=1
+  fi
 }
 
 wait_for_test() {
-  local pid="$1"
-  set +e
-  wait "$pid"
-  test_status=$?
-  set -e
-  test_pid=
+  wait_for_test_inner >>"$private_wait_capture" 2>&1
 }
 
 emit_captured_failure() {
@@ -227,8 +519,12 @@ emit_captured_failure() {
 readonly normal_stdout="$capture_root/normal.stdout"
 readonly normal_stderr="$capture_root/normal.stderr"
 spawn_live_test normal "$normal_stdout" "$normal_stderr"
-wait_for_test "$test_pid"
+wait_for_test
 normal_status="$test_status"
+if [[ "$ownership_failure" -ne 0 ]]; then
+  printf '%s\n' child_reap_failed >&2
+  exit 1
+fi
 if ! require_status "$normal_status" 0; then
   emit_captured_failure "$normal_stdout" "$normal_stderr"
   exit 1
@@ -243,11 +539,12 @@ jq --exit-status '. == {"state":{"kind":"idle"}}' "$journal" >/dev/null 2>&1 ||
 readonly hard_kill_stdout="$capture_root/hard-kill.stdout"
 readonly hard_kill_stderr="$capture_root/hard-kill.stderr"
 spawn_live_test hard-kill "$hard_kill_stdout" "$hard_kill_stderr"
-hard_kill_pid="$test_pid"
+hard_kill_leader="$test_leader"
+hard_kill_pgid="$test_pgid"
 handshake_deadline=$((SECONDS + 180))
 until grep -Fxq hard_kill_ready "$hard_kill_stdout"; do
-  if ! kill -0 "$hard_kill_pid" 2>/dev/null; then
-    wait_for_test "$hard_kill_pid"
+  if ! kill -0 "$hard_kill_leader" 2>/dev/null; then
+    wait_for_test
     hard_kill_status="$test_status"
     emit_captured_failure "$hard_kill_stdout" "$hard_kill_stderr"
     exit 1
@@ -258,17 +555,21 @@ until grep -Fxq hard_kill_ready "$hard_kill_stdout"; do
   fi
   sleep 0.1
 done
-if ! kill -KILL "$hard_kill_pid" 2>/dev/null; then
+if ! kill_owned_group_and_wait; then
   printf '%s\n' tool_failed >&2
   exit 1
 fi
-wait_for_test "$hard_kill_pid"
 hard_kill_status="$test_status"
 if ! require_status "$hard_kill_status" 137; then
   printf '%s\n' tool_failed >&2
   exit 1
 fi
-if kill -0 -- "-$hard_kill_pid" 2>/dev/null; then
+if group_state "$hard_kill_pgid"; then
+  hard_kill_group_state=0
+else
+  hard_kill_group_state=$?
+fi
+if [[ "$hard_kill_group_state" -ne 1 ]]; then
   printf '%s\n' child_reap_failed >&2
   exit 1
 fi
@@ -282,8 +583,12 @@ jq --exit-status '.state.kind == "active"' "$journal" >/dev/null 2>&1 ||
 readonly recovery_stdout="$capture_root/recovery.stdout"
 readonly recovery_stderr="$capture_root/recovery.stderr"
 spawn_live_test recovery "$recovery_stdout" "$recovery_stderr"
-wait_for_test "$test_pid"
+wait_for_test
 recovery_status="$test_status"
+if [[ "$ownership_failure" -ne 0 ]]; then
+  printf '%s\n' child_reap_failed >&2
+  exit 1
+fi
 if ! require_status "$recovery_status" 0; then
   emit_captured_failure "$recovery_stdout" "$recovery_stderr"
   exit 1

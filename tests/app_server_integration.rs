@@ -1,4 +1,4 @@
-use std::error::Error;
+use std::process::ExitCode;
 
 #[path = "app_server_integration/cases.rs"]
 mod cases;
@@ -62,9 +62,9 @@ async fn deadline_scopes_are_bounded_and_do_not_extend_each_other() {
     cases::deadline_scopes_are_bounded_and_do_not_extend_each_other().await;
 }
 
-#[test]
-fn live_codes_are_the_only_output_and_cleanup_has_precedence() {
-    cases::live_codes_are_the_only_output_and_cleanup_has_precedence();
+#[tokio::test]
+async fn live_codes_are_the_only_output_and_cleanup_has_precedence() {
+    cases::live_codes_are_the_only_output_and_cleanup_has_precedence().await;
 }
 
 #[test]
@@ -74,6 +74,6 @@ fn caller_bound_tool_request_keeps_metadata_outside_public_arguments() {
 
 #[tokio::test]
 #[ignore = "requires explicit disposable-task opt-in and a live Desktop authority"]
-async fn live_desktop_authority_all_thirteen_tools_are_disposable() -> Result<(), Box<dyn Error>> {
+async fn live_desktop_authority_all_thirteen_tools_are_disposable() -> ExitCode {
     cases::live_desktop_authority_all_thirteen_tools_are_disposable().await
 }
