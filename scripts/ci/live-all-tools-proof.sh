@@ -76,6 +76,18 @@ leader_is_waitable() {
   [[ "$state" == Z ]]
 }
 
+wait_until_leader_is_stopped() {
+  local leader="$1"
+  local deadline="$2"
+  local state
+  while true; do
+    state="$(awk '{print $3}' "/proc/$leader/stat" 2>/dev/null)" || return 1
+    [[ "$state" == T ]] && return 0
+    ((SECONDS < deadline)) || return 1
+    sleep 0.01 || return 1
+  done
+}
+
 wait_until_leader_is_waitable() {
   local leader="$1"
   local deadline="$2"
@@ -174,7 +186,7 @@ release_owned_test() {
 }
 
 cleanup_owned_test_inner() {
-  local state deadline
+  local state deadline leader_signal
   if [[ -z "$test_leader" || -z "$test_pgid" ]]; then
     return 0
   fi
@@ -185,6 +197,15 @@ cleanup_owned_test_inner() {
     state=$?
   fi
   if [[ "$state" -eq 2 ]]; then
+    return 1
+  fi
+  if [[ "$state" -eq 1 ]]; then
+    leader_signal=KILL
+  else
+    leader_signal=TERM
+  fi
+  if ! kill "-$leader_signal" "$test_leader" 2>/dev/null &&
+    kill -0 "$test_leader" 2>/dev/null; then
     return 1
   fi
   deadline=$((SECONDS + term_grace_seconds))
@@ -376,6 +397,7 @@ assert_private_wait_and_group_cleanup_for_self_test() {
   local self_root="$1"
   local public_capture="$self_root/public"
   local killed_leader killed_pgid cleanup_leader cleanup_pgid
+  local scenario leader marker deferred_signal
   new_capture_file "$public_capture"
 
   setsid /bin/sh -c 'exec sleep 30' >/dev/null 2>&1 &
@@ -427,6 +449,45 @@ assert_private_wait_and_group_cleanup_for_self_test() {
     cleanup_group_state=$?
   fi
   [[ "$cleanup_group_state" -eq 1 ]]
+
+  for scenario in launch-signal delayed-group; do
+    : >"$public_capture"
+    marker="$self_root/$scenario-ran"
+    if [[ "$scenario" == launch-signal ]]; then
+      deferred_signal=
+      trap 'deferred_signal=143' TERM
+    fi
+    (
+      if [[ "$scenario" == launch-signal ]]; then
+        kill -STOP "$BASHPID"
+      else
+        sleep 2
+      fi
+      printf 'ran\n' >"$marker"
+      exec setsid /bin/sh -c 'exec sleep 30'
+    ) >/dev/null 2>&1 &
+    leader=$!
+    if [[ "$scenario" == launch-signal ]]; then
+      kill -TERM "$BASHPID"
+    fi
+    test_leader="$leader"
+    test_pgid="$leader"
+    leader_reaped=0
+    if [[ "$scenario" == launch-signal ]]; then
+      trap 'finalize 143 signal' TERM
+      [[ "$deferred_signal" -eq 143 ]]
+      wait_until_leader_is_stopped "$leader" "$((SECONDS + 1))"
+    fi
+    if ! cleanup_owned_test >"$public_capture" 2>&1; then
+      kill -CONT "$leader" 2>/dev/null || true
+      wait_until_group_exists "$leader" "$((SECONDS + reap_grace_seconds))" || true
+      cleanup_owned_test >"$public_capture" 2>&1 || return 1
+      return 1
+    fi
+    [[ ! -e "$marker" ]]
+    [[ -z "$test_leader" && -z "$test_pgid" ]]
+    [[ ! -s "$public_capture" ]]
+  done
 }
 
 assert_hard_kill_helper_fail_fast_for_self_test() {
@@ -866,6 +927,7 @@ spawn_live_test() {
   local mode="$1"
   local stdout_path="$2"
   local stderr_path="$3"
+  local deferred_signal=
   new_capture_file "$stdout_path"
   new_capture_file "$stderr_path"
   local -a environment
@@ -873,18 +935,32 @@ spawn_live_test() {
     record_failure opt_in_rejected
     exit 1
   fi
-  setsid env "${environment[@]}" \
-    "$harness" "$live_test_name" \
-    --exact --ignored --nocapture --test-threads=1 \
-    >"$stdout_path" 2>"$stderr_path" &
+  trap 'deferred_signal=129' HUP
+  trap 'deferred_signal=130' INT
+  trap 'deferred_signal=143' TERM
+  (
+    kill -STOP "$BASHPID"
+    exec setsid env "${environment[@]}" \
+      "$harness" "$live_test_name" \
+      --exact --ignored --nocapture --test-threads=1
+  ) >"$stdout_path" 2>"$stderr_path" &
   test_leader=$!
   test_pgid="$test_leader"
   leader_reaped=0
   ownership_failure=0
-  wait_until_group_exists "$test_pgid" "$((SECONDS + 1))" || {
+  trap 'finalize 129 signal' HUP
+  trap 'finalize 130 signal' INT
+  trap 'finalize 143 signal' TERM
+  if [[ -n "$deferred_signal" ]]; then
+    finalize "$deferred_signal" signal
+  fi
+  if ! wait_until_leader_is_stopped \
+    "$test_leader" "$((SECONDS + 1))" ||
+    ! kill -CONT "$test_leader" 2>/dev/null ||
+    ! wait_until_group_exists "$test_pgid" "$((SECONDS + 1))"; then
     record_failure child_reap_failed
     exit 1
-  }
+  fi
 }
 
 wait_for_test_inner() {
