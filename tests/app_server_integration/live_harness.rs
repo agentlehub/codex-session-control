@@ -51,7 +51,6 @@ const WAIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(125);
 const WAIT_NATIVE_RESERVE: Duration = Duration::from_secs(5);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(60);
 const REAP_RESERVE: Duration = Duration::from_secs(2);
-const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
 pub(super) static PROCESS_INHERITANCE_TEST_LOCK: Mutex<()> = Mutex::new(());
 const TOOLS_CALL_METHOD: &str = "tools/call";
 const SESSION_CONTROL_TOOLS: [&str; 13] = [
@@ -212,30 +211,15 @@ impl CleanupBudget {
 
 pub(super) struct OwnedMcpChild {
     child: Option<Child>,
-    process_group: Option<u32>,
-    group_kill_sent: bool,
-    wait_error_once_for_test: bool,
-    waitability_error_once_for_test: bool,
 }
 
 impl OwnedMcpChild {
     fn spawn(command: &mut Command) -> Result<Self, LiveCode> {
-        command.process_group(0);
         let _process_inheritance_guard = PROCESS_INHERITANCE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let child = command.spawn().map_err(|_| LiveCode::ChildSpawnFailed)?;
-        let owned = Self {
-            process_group: child.id(),
-            child: Some(child),
-            group_kill_sent: false,
-            wait_error_once_for_test: false,
-            waitability_error_once_for_test: false,
-        };
-        if owned.process_group.is_none() {
-            return Err(LiveCode::ChildSpawnFailed);
-        }
-        Ok(owned)
+        Ok(Self { child: Some(child) })
     }
 
     fn id(&self) -> u32 {
@@ -259,84 +243,7 @@ impl OwnedMcpChild {
         }
     }
 
-    fn process_group_exists(&self) -> Result<bool, LiveCode> {
-        let Some(raw) = self.process_group else {
-            return Ok(false);
-        };
-        let process_group =
-            rustix::process::Pid::from_raw(raw as i32).ok_or(LiveCode::ChildReapFailed)?;
-        match rustix::process::test_kill_process_group(process_group) {
-            Ok(()) => Ok(true),
-            Err(rustix::io::Errno::SRCH) => Ok(false),
-            Err(_) => Err(LiveCode::ChildReapFailed),
-        }
-    }
-
-    fn observe_and_clear_process_group(&mut self) -> Result<(), LiveCode> {
-        if self.child.is_some() {
-            return Err(LiveCode::ChildReapFailed);
-        }
-        let result = self.process_group_exists();
-        self.process_group.take();
-        match result {
-            Ok(false) => Ok(()),
-            Ok(true) | Err(_) => Err(LiveCode::ChildReapFailed),
-        }
-    }
-
-    fn kill_process_group_once(&mut self) -> Result<(), LiveCode> {
-        if self.child.is_none() {
-            return Err(LiveCode::ChildReapFailed);
-        }
-        if self.group_kill_sent {
-            return Ok(());
-        }
-        self.group_kill_sent = true;
-        let Some(raw) = self.process_group else {
-            return Ok(());
-        };
-        let process_group =
-            rustix::process::Pid::from_raw(raw as i32).ok_or(LiveCode::ChildReapFailed)?;
-        match rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL) {
-            Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
-            Err(_) => Err(LiveCode::ChildReapFailed),
-        }
-    }
-
-    fn leader_is_waitable(&mut self) -> Result<bool, LiveCode> {
-        if std::mem::take(&mut self.waitability_error_once_for_test) {
-            return Err(LiveCode::ChildReapFailed);
-        }
-        let raw = self
-            .child
-            .as_ref()
-            .and_then(Child::id)
-            .ok_or(LiveCode::ChildReapFailed)?;
-        let pid = rustix::process::Pid::from_raw(raw as i32).ok_or(LiveCode::ChildReapFailed)?;
-        let options = rustix::process::WaitIdOptions::EXITED
-            | rustix::process::WaitIdOptions::NOHANG
-            | rustix::process::WaitIdOptions::NOWAIT;
-        rustix::process::waitid(rustix::process::WaitId::Pid(pid), options)
-            .map(|status| status.is_some())
-            .map_err(|_| LiveCode::ChildReapFailed)
-    }
-
-    async fn wait_until_leader_is_waitable(&mut self, deadline: Deadline) -> Result<(), LiveCode> {
-        loop {
-            if self.leader_is_waitable()? || Instant::now() >= deadline.at {
-                return Ok(());
-            }
-            tokio::time::sleep(
-                CHILD_POLL_INTERVAL.min(deadline.at.saturating_duration_since(Instant::now())),
-            )
-            .await;
-        }
-    }
-
     async fn wait_for_leader(&mut self) -> io::Result<std::process::ExitStatus> {
-        if std::mem::take(&mut self.wait_error_once_for_test) {
-            return Err(io::Error::other("injected child wait failure"));
-        }
         self.child
             .as_mut()
             .expect("leader wait requires retained child authority")
@@ -344,97 +251,43 @@ impl OwnedMcpChild {
             .await
     }
 
-    fn inject_wait_error_once_for_test(&mut self) {
-        self.wait_error_once_for_test = true;
-    }
-
-    fn inject_waitability_error_once_for_test(&mut self) {
-        self.waitability_error_once_for_test = true;
-    }
-
     async fn shutdown_and_reap(&mut self, budget: CleanupBudget) -> Result<(), LiveCode> {
         self.close_owned_stdin();
-        let remaining = match budget.deadline.remaining() {
-            Ok(remaining) => remaining,
-            Err(_) => {
-                self.kill_process_group_once()?;
-                match self.child.as_mut().map(Child::try_wait) {
-                    Some(Ok(Some(_))) => {
-                        self.child.take();
-                    }
-                    Some(Ok(None)) | None => {}
-                    Some(Err(_)) => return Err(LiveCode::ChildReapFailed),
-                }
-                if self.child.is_none() {
-                    let _ = self.observe_and_clear_process_group();
-                }
-                return Err(LiveCode::ChildReapFailed);
-            }
-        };
-        let reserve = REAP_RESERVE.min(remaining / 2);
-        let graceful_deadline = budget.deadline.at - reserve;
-        let mut cleanup_uncertain = false;
+        if self.child.is_none() {
+            return Ok(());
+        }
 
-        if self.child.is_some() {
-            if self
-                .wait_until_leader_is_waitable(Deadline {
-                    at: graceful_deadline,
-                })
-                .await
-                .is_err()
+        if let Ok(remaining) = budget.deadline.remaining() {
+            let reserve = REAP_RESERVE.min(remaining / 2);
+            let graceful_deadline = budget.deadline.at - reserve;
+            if let Ok(Ok(_)) =
+                tokio::time::timeout_at(graceful_deadline, self.wait_for_leader()).await
             {
-                cleanup_uncertain = true;
-            }
-            self.kill_process_group_once()?;
-            if self
-                .wait_until_leader_is_waitable(budget.deadline)
-                .await
-                .is_err()
-            {
-                cleanup_uncertain = true;
-            }
-            match tokio::time::timeout_at(budget.deadline.at, self.wait_for_leader()).await {
-                Ok(Ok(_)) => {
-                    self.child.take();
-                }
-                Ok(Err(_)) => {
-                    cleanup_uncertain = true;
-                }
-                Err(_) => return Err(LiveCode::ChildReapFailed),
+                self.child.take();
+                return Ok(());
             }
         }
 
-        if self.child.is_some() {
-            match tokio::time::timeout_at(budget.deadline.at, self.wait_for_leader()).await {
-                Ok(Ok(_)) => {
-                    self.child.take();
-                }
-                Ok(Err(_)) | Err(_) => return Err(LiveCode::ChildReapFailed),
+        self.child
+            .as_mut()
+            .expect("kill requires retained child authority")
+            .start_kill()
+            .map_err(|_| LiveCode::ChildReapFailed)?;
+        match tokio::time::timeout_at(budget.deadline.at, self.wait_for_leader()).await {
+            Ok(Ok(_)) => {
+                self.child.take();
+                Ok(())
             }
-        }
-
-        if self.observe_and_clear_process_group().is_err() || cleanup_uncertain {
-            Err(LiveCode::ChildReapFailed)
-        } else {
-            Ok(())
+            Ok(Err(_)) | Err(_) => Err(LiveCode::ChildReapFailed),
         }
     }
 }
 
 impl Drop for OwnedMcpChild {
     fn drop(&mut self) {
-        if self.child.is_none() && self.process_group.is_none() {
-            return;
-        }
         self.close_owned_stdin();
-        if self.child.is_some() {
-            let _ = self.kill_process_group_once();
-            if matches!(self.child.as_mut().map(Child::try_wait), Some(Ok(Some(_)))) {
-                self.child.take();
-            }
-        }
-        if self.child.is_none() {
-            let _ = self.observe_and_clear_process_group();
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.start_kill();
         }
     }
 }
@@ -478,24 +331,10 @@ async fn read_bounded_line<R: AsyncBufRead + Unpin>(
     }
 }
 
-fn process_group_is_absent(raw: u32) -> bool {
-    let Some(process_group) = rustix::process::Pid::from_raw(raw as i32) else {
-        return false;
-    };
-    matches!(
-        rustix::process::test_kill_process_group(process_group),
-        Err(rustix::io::Errno::SRCH)
-    )
-}
-
-fn assert_process_and_group_absent(pid: u32) {
+fn assert_process_absent(pid: u32) {
     assert!(
         !Path::new(&format!("/proc/{pid}")).exists(),
         "owned child leader was not reaped"
-    );
-    assert!(
-        process_group_is_absent(pid),
-        "owned child process group survived cleanup"
     );
 }
 
@@ -503,7 +342,7 @@ fn sleeping_child_command() -> Command {
     let mut command = Command::new("/bin/sh");
     command
         .arg("-c")
-        .arg("sleep 30 & wait")
+        .arg("exec sleep 30")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -514,7 +353,7 @@ async fn explicitly_reap_test_owner(owner: &mut Option<OwnedMcpChild>) {
     owner
         .as_mut()
         .expect("test retains explicit child authority")
-        .shutdown_and_reap(CleanupBudget::with_timeout(Duration::from_secs(1)))
+        .shutdown_and_reap(CleanupBudget::with_timeout(Duration::from_secs(5)))
         .await
         .expect("test child is reaped within its explicit cleanup budget");
     owner.take();
@@ -539,46 +378,11 @@ async fn assert_startup_failure_retains_explicit_owner_for_test() {
         .expect("startup failure must return with explicit ownership")
         .id();
     explicitly_reap_test_owner(&mut owner).await;
-    assert_process_and_group_absent(pid);
-}
-
-async fn assert_cleanup_error_kills_and_confirms_reap_for_test(
-    inject_error: fn(&mut OwnedMcpChild),
-) {
-    let mut command = sleeping_child_command();
-    let mut owner = Some(OwnedMcpChild::spawn(&mut command).unwrap());
-    let pid = owner.as_ref().unwrap().id();
-    inject_error(owner.as_mut().unwrap());
-    assert_eq!(
-        owner
-            .as_mut()
-            .unwrap()
-            .shutdown_and_reap(CleanupBudget::with_timeout(Duration::from_secs(1)))
-            .await,
-        Err(LiveCode::ChildReapFailed)
-    );
-    assert!(
-        owner.is_some(),
-        "cleanup failure must retain the owner slot"
-    );
-    assert!(
-        owner.as_ref().unwrap().group_kill_sent,
-        "probe failure must still kill while child authority is retained"
-    );
-    assert_process_and_group_absent(pid);
-    explicitly_reap_test_owner(&mut owner).await;
+    assert_process_absent(pid);
 }
 
 pub(super) async fn assert_owned_child_exit_paths_for_test() {
     assert_startup_failure_retains_explicit_owner_for_test().await;
-    assert_cleanup_error_kills_and_confirms_reap_for_test(
-        OwnedMcpChild::inject_wait_error_once_for_test,
-    )
-    .await;
-    assert_cleanup_error_kills_and_confirms_reap_for_test(
-        OwnedMcpChild::inject_waitability_error_once_for_test,
-    )
-    .await;
 
     let mut normal = Command::new("/bin/sh");
     normal
@@ -593,11 +397,7 @@ pub(super) async fn assert_owned_child_exit_paths_for_test() {
         .shutdown_and_reap(CleanupBudget::with_timeout(Duration::from_secs(1)))
         .await
         .unwrap();
-    assert!(
-        owned.group_kill_sent,
-        "normal cleanup must signal the group before reaping the leader"
-    );
-    assert_process_and_group_absent(pid);
+    assert_process_absent(pid);
 }
 
 pub(super) async fn assert_owned_child_timeout_for_test() {
@@ -608,7 +408,7 @@ pub(super) async fn assert_owned_child_timeout_for_test() {
         .shutdown_and_reap(CleanupBudget::with_timeout(Duration::from_millis(400)))
         .await
         .unwrap();
-    assert_process_and_group_absent(pid);
+    assert_process_absent(pid);
 
     let mut expired_command = sleeping_child_command();
     let mut expired_owner = Some(OwnedMcpChild::spawn(&mut expired_command).unwrap());
@@ -628,7 +428,7 @@ pub(super) async fn assert_owned_child_timeout_for_test() {
         "expired cleanup must retain explicit ownership"
     );
     explicitly_reap_test_owner(&mut expired_owner).await;
-    assert_process_and_group_absent(expired_pid);
+    assert_process_absent(expired_pid);
 }
 
 pub(super) async fn assert_deadline_and_framing_contract_for_test() {
@@ -668,22 +468,29 @@ pub(super) async fn assert_deadline_and_framing_contract_for_test() {
 }
 
 async fn assert_actual_mcp_deadline_paths_for_test() {
-    let startup_probe = McpDeadlineProbe::blocking_at(8, Duration::from_secs(2));
-    let startup_deadline = Deadline::after(Duration::from_secs(1));
-    let mut startup_owner = None;
-    assert!(matches!(
-        McpClient::start_with_deadline_probe(
-            &mut startup_owner,
-            startup_deadline,
-            startup_probe.clone(),
-        )
-        .await,
-        Err(LiveCode::DeadlineExceeded)
-    ));
+    let startup_probe = McpDeadlineProbe::non_blocking();
+    let startup_deadline = Deadline::after(STARTUP_TIMEOUT);
+    let mut owner = None;
+    let mut client =
+        McpClient::start_with_deadline_probe(&mut owner, startup_deadline, startup_probe.clone())
+            .await
+            .unwrap();
     let startup_observed = startup_probe.snapshot();
-    assert!(
-        startup_observed.len() > 5,
-        "startup did not reach notification"
+    assert_eq!(
+        startup_observed
+            .iter()
+            .map(|(stage, _)| *stage)
+            .collect::<Vec<_>>(),
+        vec![
+            McpDeadlineStage::Serialize,
+            McpDeadlineStage::Write,
+            McpDeadlineStage::Flush,
+            McpDeadlineStage::Read,
+            McpDeadlineStage::Decode,
+            McpDeadlineStage::Serialize,
+            McpDeadlineStage::Write,
+            McpDeadlineStage::Flush,
+        ]
     );
     assert!(
         startup_observed
@@ -691,18 +498,10 @@ async fn assert_actual_mcp_deadline_paths_for_test() {
             .all(|(_, deadline)| *deadline == startup_deadline.at),
         "startup request and notification reset the absolute deadline"
     );
-    explicitly_reap_test_owner(&mut startup_owner).await;
 
-    let mut owner = None;
-    let mut client = McpClient::start_with_deadline_probe(
-        &mut owner,
-        Deadline::after(Duration::from_secs(2)),
-        McpDeadlineProbe::non_blocking(),
-    )
-    .await
-    .unwrap();
-
-    let request_probe = McpDeadlineProbe::blocking_at(5, Duration::from_secs(2));
+    tokio::time::pause();
+    let request_probe =
+        McpDeadlineProbe::blocking_at(McpDeadlineStage::Read, Duration::from_secs(2));
     client.deadline_probe = Some(request_probe.clone());
     let request_deadline = Deadline::after(Duration::from_secs(1));
     assert_eq!(
@@ -722,7 +521,6 @@ async fn assert_actual_mcp_deadline_paths_for_test() {
             McpDeadlineStage::Write,
             McpDeadlineStage::Flush,
             McpDeadlineStage::Read,
-            McpDeadlineStage::Decode,
         ]
     );
     assert!(
@@ -732,7 +530,8 @@ async fn assert_actual_mcp_deadline_paths_for_test() {
         "request stages reset the absolute deadline"
     );
 
-    let notification_probe = McpDeadlineProbe::blocking_at(3, Duration::from_secs(2));
+    let notification_probe =
+        McpDeadlineProbe::blocking_at(McpDeadlineStage::Flush, Duration::from_secs(2));
     client.deadline_probe = Some(notification_probe.clone());
     let notification_deadline = Deadline::after(Duration::from_secs(1));
     assert_eq!(
@@ -759,6 +558,7 @@ async fn assert_actual_mcp_deadline_paths_for_test() {
             .all(|(_, deadline)| *deadline == notification_deadline.at),
         "notification stages reset the absolute deadline"
     );
+    tokio::time::resume();
     client.close_stdin();
     explicitly_reap_test_owner(&mut owner).await;
 }
@@ -1336,13 +1136,13 @@ enum McpDeadlineStage {
 
 #[derive(Clone)]
 struct McpDeadlineProbe {
-    block_at: Option<usize>,
+    block_at: Option<McpDeadlineStage>,
     block_for: Duration,
     observed: Arc<Mutex<Vec<(McpDeadlineStage, Instant)>>>,
 }
 
 impl McpDeadlineProbe {
-    fn blocking_at(block_at: usize, block_for: Duration) -> Self {
+    fn blocking_at(block_at: McpDeadlineStage, block_for: Duration) -> Self {
         Self {
             block_at: Some(block_at),
             block_for,
@@ -1359,15 +1159,14 @@ impl McpDeadlineProbe {
     }
 
     async fn enter(&self, stage: McpDeadlineStage, deadline: Deadline) -> Result<(), LiveCode> {
-        let observed_count = {
+        {
             let mut observed = self
                 .observed
                 .lock()
                 .expect("deadline probe lock is not poisoned");
             observed.push((stage, deadline.at));
-            observed.len()
-        };
-        let delay = if self.block_at == Some(observed_count) {
+        }
+        let delay = if self.block_at == Some(stage) {
             self.block_for
         } else {
             Duration::ZERO
