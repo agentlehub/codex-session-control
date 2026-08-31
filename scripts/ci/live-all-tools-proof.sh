@@ -23,8 +23,8 @@ capture_root=
 private_wait_capture=/dev/null
 test_leader=
 test_pgid=
-leader_reaped=0
 test_status=
+test_status_path=
 ownership_failure=0
 cleanup_failure_code=
 pending_failure_code=
@@ -75,6 +75,16 @@ leader_is_waitable() {
   fi
   state="$(awk '{print $3}' "/proc/$leader/stat" 2>/dev/null)" || return 2
   [[ "$state" == Z ]]
+}
+
+leader_anchor_is_absent() {
+  local state
+  if leader_is_waitable "$1"; then
+    return 1
+  else
+    state=$?
+  fi
+  [[ "$state" -eq 2 ]]
 }
 
 wait_until_leader_is_stopped() {
@@ -132,8 +142,24 @@ private_wait_for_leader() {
     return 1
   fi
   test_status="$status"
-  leader_reaped=1
   return 0
+}
+
+consume_saved_test_status() {
+  local saved_status
+  if [[ -z "$test_status_path" || ! -s "$test_status_path" ]]; then
+    test_status_path=
+    return 0
+  fi
+  if ! IFS= read -r saved_status <"$test_status_path"; then
+    return 1
+  fi
+  if [[ "$saved_status" != 0 && ! "$saved_status" =~ ^[1-9][0-9]{0,2}$ ]] ||
+    ((10#$saved_status > 255)); then
+    return 1
+  fi
+  test_status=$((10#$saved_status))
+  test_status_path=
 }
 
 confirm_group_absent() {
@@ -178,25 +204,21 @@ wait_until_group_exists() {
   done
 }
 
-release_owned_test() {
-  local state
-  if [[ "$leader_reaped" -ne 1 ]]; then
+reap_absent_anchor() {
+  private_wait_for_leader "$test_leader" || {
+    test_leader=
+    test_pgid=
     return 1
-  fi
-  if group_state "$test_pgid"; then
-    state=0
-  else
-    state=$?
-  fi
+  }
   test_leader=
   test_pgid=
-  leader_reaped=0
-  [[ "$state" -eq 1 ]]
+  consume_saved_test_status || true
+  return 1
 }
 
 reap_and_release_owned_test() {
   local deadline="$1"
-  local state
+  local state status_state=0
   if wait_until_leader_is_waitable "$test_leader" "$deadline"; then
     state=0
   else
@@ -206,16 +228,28 @@ reap_and_release_owned_test() {
   if ! private_wait_for_leader "$test_leader"; then
     test_leader=
     test_pgid=
-    leader_reaped=0
     return 1
   fi
-  release_owned_test
+  if group_state "$test_pgid"; then
+    state=0
+  else
+    state=$?
+  fi
+  test_leader=
+  test_pgid=
+  consume_saved_test_status || status_state=1
+  [[ "$state" -eq 1 && "$status_state" -eq 0 ]]
 }
 
 cleanup_owned_test_inner() {
-  local state deadline leader_signal
+  local state deadline
   if [[ -z "$test_leader" || -z "$test_pgid" ]]; then
     return 0
+  fi
+
+  if leader_anchor_is_absent "$test_leader"; then
+    reap_absent_anchor
+    return 1
   fi
 
   if signal_group TERM "$test_pgid"; then
@@ -227,29 +261,22 @@ cleanup_owned_test_inner() {
     return 1
   fi
   if [[ "$state" -eq 1 ]]; then
-    leader_signal=KILL
-  else
-    leader_signal=TERM
-  fi
-  if ! kill "-$leader_signal" "$test_leader" 2>/dev/null &&
-    kill -0 "$test_leader" 2>/dev/null; then
-    return 1
+    if ! kill -KILL "$test_leader" 2>/dev/null; then
+      return 1
+    fi
   fi
   deadline=$((SECONDS + term_grace_seconds))
-  if confirm_group_absent "$test_pgid" "$deadline"; then
-    state=0
-  else
-    state=$?
-  fi
-  if [[ "$state" -ne 0 ]]; then
+  if ! confirm_group_absent "$test_pgid" "$deadline"; then
+    if leader_anchor_is_absent "$test_leader"; then
+      reap_absent_anchor
+      return 1
+    fi
     if signal_group KILL "$test_pgid"; then
       state=0
     else
       state=$?
     fi
-    if [[ "$state" -eq 2 ]]; then
-      return 1
-    fi
+    [[ "$state" -ne 2 ]] || return 1
   fi
 
   reap_and_release_owned_test "$((SECONDS + reap_grace_seconds))"
@@ -264,6 +291,10 @@ cleanup_owned_test() {
 kill_owned_group_and_wait() {
   {
     {
+      if leader_anchor_is_absent "$test_leader"; then
+        reap_absent_anchor
+        return 1
+      fi
       signal_group KILL "$test_pgid" || return 1
       reap_and_release_owned_test "$((SECONDS + reap_grace_seconds))"
     } >>"$private_wait_capture" 2>&1
@@ -408,62 +439,88 @@ runtime_journal_preflight() {
     "$runtime/codex-session-control/live-test/current.json"
 }
 
+spawn_owned_anchor() {
+  local stdout_path="$1"
+  local stderr_path="$2"
+  local status_path="$3"
+  shift 3
+  (
+    trap 'kill -STOP "$BASHPID"' TERM
+    kill -STOP "$BASHPID"
+    # shellcheck disable=SC2016
+    exec setsid "$BASH" --noprofile --norc -c '
+      status_path=$1
+      shift
+      trap "" TERM
+      if (
+        trap - TERM
+        exec "$@"
+      ); then
+        harness_status=0
+      else
+        harness_status=$?
+      fi
+      if ! printf "%s\n" "$harness_status" >"$status_path"; then
+        exit 125
+      fi
+      kill -STOP "$BASHPID"
+      exit "$harness_status"
+    ' owned-anchor "$status_path" "$@"
+  ) >"$stdout_path" 2>"$stderr_path" &
+  test_leader=$!
+  test_pgid="$test_leader"
+  test_status_path="$status_path"
+  ownership_failure=0
+  if ! wait_until_leader_is_stopped \
+    "$test_leader" "$((SECONDS + 1))" ||
+    ! confirm_group_absent "$test_pgid" "$SECONDS" ||
+    ! kill -CONT "$test_leader" 2>/dev/null ||
+    ! wait_until_group_exists "$test_pgid" "$((SECONDS + 1))" ||
+    ! leader_has_owned_identity "$test_leader"; then
+    return 1
+  fi
+}
+
 assert_private_wait_and_group_cleanup_for_self_test() {
   local self_root="$1"
   local public_capture="$self_root/public"
-  local killed_leader killed_pgid cleanup_leader cleanup_pgid
-  local scenario leader marker deferred_signal
+  local anchor_stdout="$self_root/anchor.stdout"
+  local anchor_stderr="$self_root/anchor.stderr"
+  local anchor_status="$self_root/anchor.status"
+  local killed_leader
+  local scenario leader marker deferred_signal helper
   new_capture_file "$public_capture"
+  new_capture_file "$anchor_stdout"
+  new_capture_file "$anchor_stderr"
+  new_capture_file "$anchor_status"
 
-  setsid /bin/sh -c 'exec sleep 30' >/dev/null 2>&1 &
-  test_leader=$!
-  test_pgid="$test_leader"
-  leader_reaped=0
-  wait_until_group_exists "$test_pgid" "$((SECONDS + reap_grace_seconds))"
+  spawn_owned_anchor \
+    "$anchor_stdout" "$anchor_stderr" "$anchor_status" \
+    /bin/sh -c 'exec sleep 30'
   killed_leader="$test_leader"
-  killed_pgid="$test_pgid"
   kill_owned_group_and_wait >"$public_capture" 2>&1
   [[ "$test_status" -eq 137 ]]
   [[ -z "$test_leader" && -z "$test_pgid" ]]
-  if grep -Fq "$killed_leader" "$public_capture"; then
-    return 1
-  fi
-  if grep -Fq 'sleep 30' "$public_capture"; then
-    return 1
-  fi
-  [[ ! -s "$public_capture" ]]
-  local killed_group_state
-  if group_state "$killed_pgid"; then
-    killed_group_state=0
-  else
-    killed_group_state=$?
-  fi
-  [[ "$killed_group_state" -eq 1 ]]
+  [[ ! -e "/proc/$killed_leader" ]]
+  [[ ! -s "$public_capture" && ! -s "$anchor_status" ]]
+  [[ ! -s "$anchor_stdout" && ! -s "$anchor_stderr" ]]
 
   : >"$public_capture"
-  setsid /bin/sh -c 'exec sleep 30' >/dev/null 2>&1 &
-  test_leader=$!
-  test_pgid="$test_leader"
-  leader_reaped=0
-  wait_until_group_exists "$test_pgid" "$((SECONDS + reap_grace_seconds))" || return 1
-  cleanup_leader="$test_leader"
-  cleanup_pgid="$test_pgid"
+  : >"$anchor_status"
+  spawn_owned_anchor \
+    "$anchor_stdout" "$anchor_stderr" "$anchor_status" \
+    /bin/sh -c 'exit 23'
+  leader="$test_leader"
+  while [[ ! -s "$anchor_status" ]]; do
+    ((SECONDS < 10)) || return 1
+    sleep 0.01
+  done
   cleanup_owned_test >"$public_capture" 2>&1 || return 1
+  [[ "$test_status" -eq 23 ]]
   [[ -z "$test_leader" && -z "$test_pgid" ]]
-  if grep -Fq "$cleanup_leader" "$public_capture"; then
-    return 1
-  fi
-  if grep -Fq 'sleep 30' "$public_capture"; then
-    return 1
-  fi
+  [[ ! -e "/proc/$leader" ]]
   [[ ! -s "$public_capture" ]]
-  local cleanup_group_state
-  if group_state "$cleanup_pgid"; then
-    cleanup_group_state=0
-  else
-    cleanup_group_state=$?
-  fi
-  [[ "$cleanup_group_state" -eq 1 ]]
+  [[ ! -s "$anchor_stdout" && ! -s "$anchor_stderr" ]]
 
   for scenario in launch-signal delayed-group owned-launch; do
     : >"$public_capture"
@@ -487,7 +544,6 @@ assert_private_wait_and_group_cleanup_for_self_test() {
     fi
     test_leader="$leader"
     test_pgid="$leader"
-    leader_reaped=0
     if [[ "$scenario" == launch-signal ]]; then
       trap 'finalize 143 signal' TERM
       [[ "$deferred_signal" -eq 143 ]]
@@ -499,12 +555,7 @@ assert_private_wait_and_group_cleanup_for_self_test() {
       wait_until_group_exists "$leader" "$((SECONDS + 1))"
       leader_has_owned_identity "$leader"
     fi
-    if ! cleanup_owned_test >"$public_capture" 2>&1; then
-      kill -CONT "$leader" 2>/dev/null || true
-      wait_until_group_exists "$leader" "$((SECONDS + reap_grace_seconds))" || true
-      cleanup_owned_test >"$public_capture" 2>&1 || return 1
-      return 1
-    fi
+    cleanup_owned_test >"$public_capture" 2>&1 || return 1
     if [[ "$scenario" == owned-launch ]]; then
       [[ -e "$marker" ]]
     else
@@ -514,18 +565,42 @@ assert_private_wait_and_group_cleanup_for_self_test() {
     [[ ! -s "$public_capture" ]]
   done
 
-  (
-    test_leader=424242
-    test_pgid=424242
-    leader_reaped=1
-    group_state() {
-      return 0
-    }
-    if release_owned_test; then
-      return 1
-    fi
-    [[ -z "$test_leader" && -z "$test_pgid" && "$leader_reaped" -eq 0 ]]
-  )
+  for helper in cleanup_owned_test_inner kill_owned_group_and_wait; do
+    : >"$public_capture"
+    # The globals are intentionally isolated while exercising retained Bash wait status.
+    # shellcheck disable=SC2030,SC2031
+    (
+      local unexpected_signal=0 leader test_leader test_pgid test_status
+      local test_status_path=
+      setsid /bin/sh -c 'exit 23' >/dev/null 2>&1 &
+      leader=$!
+      while [[ -e "/proc/$leader" ]]; do
+        ((SECONDS < 10)) || return 1
+        sleep 0.01
+      done
+      test_leader="$leader"
+      test_pgid="$leader"
+      test_status=
+      # shellcheck disable=SC2317
+      signal_group() { unexpected_signal=1; return 2; }
+      # shellcheck disable=SC2317
+      kill() { unexpected_signal=1; return 1; }
+      # shellcheck disable=SC2317
+      group_state() { unexpected_signal=1; return 2; }
+      if "$helper"; then
+        return 1
+      fi
+      [[ "$test_status" -eq 23 ]]
+      [[ -z "$test_leader" && -z "$test_pgid" ]]
+      [[ "$unexpected_signal" -eq 0 ]]
+    )
+    [[ ! -s "$public_capture" ]]
+  done
+  test_leader=
+  test_pgid=
+  test_status=
+  test_status_path=
+
 }
 
 assert_hard_kill_helper_fail_fast_for_self_test() {
@@ -536,6 +611,9 @@ assert_hard_kill_helper_fail_fast_for_self_test() {
   new_capture_file "$public_capture"
 
   (
+    leader_is_waitable() {
+      return 1
+    }
     signal_group() {
       printf '%s\n' signal_error >>"$trace"
       return 2
@@ -546,10 +624,6 @@ assert_hard_kill_helper_fail_fast_for_self_test() {
     }
     private_wait_for_leader() {
       printf '%s\n' private_wait_reached >>"$trace"
-      return 0
-    }
-    release_owned_test() {
-      printf '%s\n' release_reached >>"$trace"
       return 0
     }
     if ! kill_owned_group_and_wait; then
@@ -563,6 +637,9 @@ assert_hard_kill_helper_fail_fast_for_self_test() {
 
   : >"$trace"
   (
+    leader_is_waitable() {
+      return 1
+    }
     signal_group() {
       printf '%s\n' signal_succeeded >>"$trace"
       return 0
@@ -573,10 +650,6 @@ assert_hard_kill_helper_fail_fast_for_self_test() {
     }
     private_wait_for_leader() {
       printf '%s\n' private_wait_reached >>"$trace"
-      return 0
-    }
-    release_owned_test() {
-      printf '%s\n' release_reached >>"$trace"
       return 0
     }
     if ! kill_owned_group_and_wait; then
@@ -766,7 +839,6 @@ run_finalizer_context_for_self_test() {
   pending_failure_code="$4"
   test_leader=424242
   test_pgid=424242
-  leader_reaped=0
   ownership_failure=0
   cleanup_failure_code=
   # shellcheck disable=SC2317
@@ -774,7 +846,6 @@ run_finalizer_context_for_self_test() {
     if [[ "$cleanup_outcome" == success ]]; then
       test_leader=
       test_pgid=
-      leader_reaped=0
       return 0
     fi
     printf 'private path=%s pid=%s command=%s\n' \
@@ -957,9 +1028,11 @@ spawn_live_test() {
   local mode="$1"
   local stdout_path="$2"
   local stderr_path="$3"
+  local status_path="$stdout_path.status"
   local deferred_signal=
   new_capture_file "$stdout_path"
   new_capture_file "$stderr_path"
+  new_capture_file "$status_path"
   local -a environment
   if ! live_test_environment "$mode" environment; then
     record_failure opt_in_rejected
@@ -968,30 +1041,19 @@ spawn_live_test() {
   trap 'deferred_signal=129' HUP
   trap 'deferred_signal=130' INT
   trap 'deferred_signal=143' TERM
-  (
-    kill -STOP "$BASHPID"
-    exec setsid env "${environment[@]}" \
-      "$harness" "$live_test_name" \
-      --exact --ignored --nocapture --test-threads=1
-  ) >"$stdout_path" 2>"$stderr_path" &
-  test_leader=$!
-  test_pgid="$test_leader"
-  leader_reaped=0
-  ownership_failure=0
+  if ! spawn_owned_anchor \
+    "$stdout_path" "$stderr_path" "$status_path" \
+    env "${environment[@]}" \
+    "$harness" "$live_test_name" \
+    --exact --ignored --nocapture --test-threads=1; then
+    record_failure child_reap_failed
+    exit 1
+  fi
   trap 'finalize 129 signal' HUP
   trap 'finalize 130 signal' INT
   trap 'finalize 143 signal' TERM
   if [[ -n "$deferred_signal" ]]; then
     finalize "$deferred_signal" signal
-  fi
-  if ! wait_until_leader_is_stopped \
-    "$test_leader" "$((SECONDS + 1))" ||
-    ! confirm_group_absent "$test_pgid" "$SECONDS" ||
-    ! kill -CONT "$test_leader" 2>/dev/null ||
-    ! wait_until_group_exists "$test_pgid" "$((SECONDS + 1))" ||
-    ! leader_has_owned_identity "$test_leader"; then
-    record_failure child_reap_failed
-    exit 1
   fi
 }
 
@@ -1000,6 +1062,9 @@ wait_for_test_inner() {
   local state
   ownership_failure=0
   while true; do
+    if [[ -s "$test_status_path" ]]; then
+      break
+    fi
     if leader_is_waitable "$leader"; then
       state=0
     else
@@ -1012,7 +1077,7 @@ wait_for_test_inner() {
         return
       } ;;
       *)
-        reap_and_release_owned_test "$SECONDS" || ownership_failure=1
+        reap_absent_anchor || ownership_failure=1
         return
         ;;
     esac
@@ -1063,10 +1128,9 @@ readonly hard_kill_stdout="$capture_root/hard-kill.stdout"
 readonly hard_kill_stderr="$capture_root/hard-kill.stderr"
 spawn_live_test hard-kill "$hard_kill_stdout" "$hard_kill_stderr"
 hard_kill_leader="$test_leader"
-hard_kill_pgid="$test_pgid"
 handshake_deadline=$((SECONDS + 180))
 until grep -Fxq hard_kill_ready "$hard_kill_stdout"; do
-  if ! kill -0 "$hard_kill_leader" 2>/dev/null; then
+  if leader_anchor_is_absent "$hard_kill_leader"; then
     wait_for_test
     hard_kill_status="$test_status"
     record_captured_failure "$hard_kill_stdout" "$hard_kill_stderr"
@@ -1085,15 +1149,6 @@ fi
 hard_kill_status="$test_status"
 if [[ "$hard_kill_status" -ne 137 ]]; then
   record_failure tool_failed
-  exit 1
-fi
-if group_state "$hard_kill_pgid"; then
-  hard_kill_group_state=0
-else
-  hard_kill_group_state=$?
-fi
-if [[ "$hard_kill_group_state" -ne 1 ]]; then
-  record_failure child_reap_failed
   exit 1
 fi
 printf '%s\n' 'hard_kill_status=137'

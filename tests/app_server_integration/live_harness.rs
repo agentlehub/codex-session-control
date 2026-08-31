@@ -215,6 +215,7 @@ pub(super) struct OwnedMcpChild {
     process_group: Option<u32>,
     group_kill_sent: bool,
     wait_error_once_for_test: bool,
+    waitability_error_once_for_test: bool,
 }
 
 impl OwnedMcpChild {
@@ -229,6 +230,7 @@ impl OwnedMcpChild {
             child: Some(child),
             group_kill_sent: false,
             wait_error_once_for_test: false,
+            waitability_error_once_for_test: false,
         };
         if owned.process_group.is_none() {
             return Err(LiveCode::ChildSpawnFailed);
@@ -301,7 +303,10 @@ impl OwnedMcpChild {
         }
     }
 
-    fn leader_is_waitable(&self) -> Result<bool, LiveCode> {
+    fn leader_is_waitable(&mut self) -> Result<bool, LiveCode> {
+        if std::mem::take(&mut self.waitability_error_once_for_test) {
+            return Err(LiveCode::ChildReapFailed);
+        }
         let raw = self
             .child
             .as_ref()
@@ -316,7 +321,7 @@ impl OwnedMcpChild {
             .map_err(|_| LiveCode::ChildReapFailed)
     }
 
-    async fn wait_until_leader_is_waitable(&self, deadline: Deadline) -> Result<(), LiveCode> {
+    async fn wait_until_leader_is_waitable(&mut self, deadline: Deadline) -> Result<(), LiveCode> {
         loop {
             if self.leader_is_waitable()? || Instant::now() >= deadline.at {
                 return Ok(());
@@ -343,6 +348,10 @@ impl OwnedMcpChild {
         self.wait_error_once_for_test = true;
     }
 
+    fn inject_waitability_error_once_for_test(&mut self) {
+        self.waitability_error_once_for_test = true;
+    }
+
     async fn shutdown_and_reap(&mut self, budget: CleanupBudget) -> Result<(), LiveCode> {
         self.close_owned_stdin();
         let remaining = match budget.deadline.remaining() {
@@ -365,14 +374,26 @@ impl OwnedMcpChild {
         let reserve = REAP_RESERVE.min(remaining / 2);
         let graceful_deadline = budget.deadline.at - reserve;
         let mut wait_failed = false;
+        let mut waitability_failed = false;
 
         if self.child.is_some() {
-            self.wait_until_leader_is_waitable(Deadline {
-                at: graceful_deadline,
-            })
-            .await?;
+            if self
+                .wait_until_leader_is_waitable(Deadline {
+                    at: graceful_deadline,
+                })
+                .await
+                .is_err()
+            {
+                waitability_failed = true;
+            }
             self.kill_process_group_once()?;
-            self.wait_until_leader_is_waitable(budget.deadline).await?;
+            if self
+                .wait_until_leader_is_waitable(budget.deadline)
+                .await
+                .is_err()
+            {
+                waitability_failed = true;
+            }
             match tokio::time::timeout_at(budget.deadline.at, self.wait_for_leader()).await {
                 Ok(Ok(_)) => {
                     self.child.take();
@@ -393,7 +414,7 @@ impl OwnedMcpChild {
             }
         }
 
-        if self.observe_and_clear_process_group().is_err() || wait_failed {
+        if self.observe_and_clear_process_group().is_err() || wait_failed || waitability_failed {
             Err(LiveCode::ChildReapFailed)
         } else {
             Ok(())
@@ -522,11 +543,13 @@ async fn assert_startup_failure_retains_explicit_owner_for_test() {
     assert_process_and_group_absent(pid);
 }
 
-async fn assert_inner_wait_error_kills_and_confirms_reap_for_test() {
+async fn assert_cleanup_error_kills_and_confirms_reap_for_test(
+    inject_error: fn(&mut OwnedMcpChild),
+) {
     let mut command = sleeping_child_command();
     let mut owner = Some(OwnedMcpChild::spawn(&mut command).unwrap());
     let pid = owner.as_ref().unwrap().id();
-    owner.as_mut().unwrap().inject_wait_error_once_for_test();
+    inject_error(owner.as_mut().unwrap());
     assert_eq!(
         owner
             .as_mut()
@@ -535,14 +558,28 @@ async fn assert_inner_wait_error_kills_and_confirms_reap_for_test() {
             .await,
         Err(LiveCode::ChildReapFailed)
     );
-    assert!(owner.is_some(), "wait failure must retain the owner slot");
+    assert!(
+        owner.is_some(),
+        "cleanup failure must retain the owner slot"
+    );
+    assert!(
+        owner.as_ref().unwrap().group_kill_sent,
+        "probe failure must still kill while child authority is retained"
+    );
     assert_process_and_group_absent(pid);
     explicitly_reap_test_owner(&mut owner).await;
 }
 
 pub(super) async fn assert_owned_child_exit_paths_for_test() {
     assert_startup_failure_retains_explicit_owner_for_test().await;
-    assert_inner_wait_error_kills_and_confirms_reap_for_test().await;
+    assert_cleanup_error_kills_and_confirms_reap_for_test(
+        OwnedMcpChild::inject_wait_error_once_for_test,
+    )
+    .await;
+    assert_cleanup_error_kills_and_confirms_reap_for_test(
+        OwnedMcpChild::inject_waitability_error_once_for_test,
+    )
+    .await;
 
     let mut normal = Command::new("/bin/sh");
     normal
