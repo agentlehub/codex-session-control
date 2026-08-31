@@ -560,23 +560,12 @@ assert_live_mode_environment_for_self_test() {
 
 probe_capture_setup_failure_for_self_test() {
   local missing_tmpdir="$1"
-  local saved_capture_root="$capture_root"
-  local saved_private_wait_capture="$private_wait_capture"
-  local saved_rendered_failure_code="$rendered_failure_code"
-  local status
-  local production_failure_boundary=0
-  capture_root=
-  private_wait_capture=/dev/null
-  rendered_failure_code=
-  if TMPDIR="$missing_tmpdir" new_capture_root; then
-    status=0
-  else
-    status=$?
-  fi
-  capture_root="$saved_capture_root"
-  private_wait_capture="$saved_private_wait_capture"
-  rendered_failure_code="$saved_rendered_failure_code"
-  return "$status"
+  (
+    local capture_root=
+    local private_wait_capture=/dev/null
+    local production_failure_boundary=0
+    TMPDIR="$missing_tmpdir" new_capture_root
+  )
 }
 
 probe_capture_cleanup_failure_for_self_test() {
