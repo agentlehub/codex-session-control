@@ -1,4 +1,5 @@
-#!/usr/bin/env bash
+#!/usr/bin/env -S -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS bash --noprofile --norc
+# shellcheck shell=bash
 set -euo pipefail
 set +m
 umask 077
@@ -541,7 +542,9 @@ spawn_owned_anchor() {
     trap 'kill -STOP "$BASHPID"' TERM
     kill -STOP "$BASHPID"
     # shellcheck disable=SC2016
-    exec setsid "$BASH" --noprofile --norc -c '
+    exec setsid /usr/bin/env \
+      -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS \
+      "$BASH" --noprofile --norc -c '
       status_path=$1
       shift
       kill -STOP "$BASHPID"
@@ -1189,6 +1192,37 @@ assert_final_emission_for_self_test() {
   done
 }
 
+assert_startup_environment_is_sanitized_for_self_test() {
+  local self_root="$1"
+  local capture="$self_root/startup-environment.capture"
+  local startup_hook="$self_root/startup-environment-hook"
+  local runner="${BASH_SOURCE[0]}"
+  local status
+  new_capture_file "$capture"
+  new_capture_file "$startup_hook"
+  # shellcheck disable=SC2016
+  printf '%s\n' \
+    'printf "startup_sentinel=%s\n" "${BASH_ENV-absent}" >&2' >"$startup_hook"
+  if /usr/bin/env \
+    _CSC_LIVE_SELF_TEST_CHILD=1 \
+    BASH_ENV="$startup_hook" \
+    ENV="$startup_hook" \
+    SHELLOPTS=xtrace \
+    BASHOPTS=extdebug \
+    "$runner" --self-test >"$capture" 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  [[ "$status" -eq 0 ]]
+  [[ "$(<"$capture")" == self_test_status=0 ]]
+  if grep -Fq startup_sentinel "$capture" ||
+    grep -Fq "$self_root" "$capture" ||
+    grep -Eq '^\+' "$capture"; then
+    return 1
+  fi
+}
+
 run_self_test() {
   local self_root capture
   new_capture_root
@@ -1203,6 +1237,9 @@ run_self_test() {
   assert_capture_failure_boundaries_for_self_test "$self_root"
   assert_runtime_journal_preflight_for_self_test "$self_root"
   assert_final_emission_for_self_test "$self_root"
+  if [[ "${_CSC_LIVE_SELF_TEST_CHILD-}" != 1 ]]; then
+    assert_startup_environment_is_sanitized_for_self_test "$self_root"
+  fi
   assert_hard_kill_helper_fail_fast_for_self_test "$self_root"
   assert_hard_kill_early_failure_for_self_test "$self_root"
   assert_deferred_launch_signals_for_self_test "$self_root"
