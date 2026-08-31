@@ -471,10 +471,13 @@ async fn assert_actual_mcp_deadline_paths_for_test() {
     let startup_probe = McpDeadlineProbe::non_blocking();
     let startup_deadline = Deadline::after(STARTUP_TIMEOUT);
     let mut owner = None;
-    let mut client =
-        McpClient::start_with_deadline_probe(&mut owner, startup_deadline, startup_probe.clone())
-            .await
-            .unwrap();
+    let mut client = McpClient::start_with_optional_probe(
+        &mut owner,
+        startup_deadline,
+        Some(startup_probe.clone()),
+    )
+    .await
+    .unwrap();
     let startup_observed = startup_probe.snapshot();
     assert_eq!(
         startup_observed
@@ -500,8 +503,7 @@ async fn assert_actual_mcp_deadline_paths_for_test() {
     );
 
     tokio::time::pause();
-    let request_probe =
-        McpDeadlineProbe::blocking_at(McpDeadlineStage::Read, Duration::from_secs(2));
+    let request_probe = McpDeadlineProbe::blocking_at(McpDeadlineStage::Read);
     client.deadline_probe = Some(request_probe.clone());
     let request_deadline = Deadline::after(Duration::from_secs(1));
     assert_eq!(
@@ -530,8 +532,7 @@ async fn assert_actual_mcp_deadline_paths_for_test() {
         "request stages reset the absolute deadline"
     );
 
-    let notification_probe =
-        McpDeadlineProbe::blocking_at(McpDeadlineStage::Flush, Duration::from_secs(2));
+    let notification_probe = McpDeadlineProbe::blocking_at(McpDeadlineStage::Flush);
     client.deadline_probe = Some(notification_probe.clone());
     let notification_deadline = Deadline::after(Duration::from_secs(1));
     assert_eq!(
@@ -1137,15 +1138,13 @@ enum McpDeadlineStage {
 #[derive(Clone)]
 struct McpDeadlineProbe {
     block_at: Option<McpDeadlineStage>,
-    block_for: Duration,
     observed: Arc<Mutex<Vec<(McpDeadlineStage, Instant)>>>,
 }
 
 impl McpDeadlineProbe {
-    fn blocking_at(block_at: McpDeadlineStage, block_for: Duration) -> Self {
+    fn blocking_at(block_at: McpDeadlineStage) -> Self {
         Self {
             block_at: Some(block_at),
-            block_for,
             observed: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -1153,7 +1152,6 @@ impl McpDeadlineProbe {
     fn non_blocking() -> Self {
         Self {
             block_at: None,
-            block_for: Duration::ZERO,
             observed: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -1166,17 +1164,13 @@ impl McpDeadlineProbe {
                 .expect("deadline probe lock is not poisoned");
             observed.push((stage, deadline.at));
         }
-        let delay = if self.block_at == Some(stage) {
-            self.block_for
+        if self.block_at == Some(stage) {
+            deadline
+                .run(std::future::pending::<Result<(), LiveCode>>())
+                .await
         } else {
-            Duration::ZERO
-        };
-        deadline
-            .run(async {
-                tokio::time::sleep(delay).await;
-                Ok(())
-            })
-            .await
+            deadline.check()
+        }
     }
 
     fn snapshot(&self) -> Vec<(McpDeadlineStage, Instant)> {
@@ -1240,14 +1234,6 @@ impl McpClient {
 
     async fn start(owner: &mut Option<OwnedMcpChild>) -> Result<Self, LiveCode> {
         Self::start_with_optional_probe(owner, Deadline::after(STARTUP_TIMEOUT), None).await
-    }
-
-    async fn start_with_deadline_probe(
-        owner: &mut Option<OwnedMcpChild>,
-        startup: Deadline,
-        deadline_probe: McpDeadlineProbe,
-    ) -> Result<Self, LiveCode> {
-        Self::start_with_optional_probe(owner, startup, Some(deadline_probe)).await
     }
 
     async fn start_with_optional_probe(
