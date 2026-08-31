@@ -270,7 +270,22 @@ impl OwnedMcpChild {
         }
     }
 
+    fn observe_and_clear_process_group(&mut self) -> Result<(), LiveCode> {
+        if self.child.is_some() {
+            return Err(LiveCode::ChildReapFailed);
+        }
+        let result = self.process_group_exists();
+        self.process_group.take();
+        match result {
+            Ok(false) => Ok(()),
+            Ok(true) | Err(_) => Err(LiveCode::ChildReapFailed),
+        }
+    }
+
     fn kill_process_group_once(&mut self) -> Result<(), LiveCode> {
+        if self.child.is_none() {
+            return Err(LiveCode::ChildReapFailed);
+        }
         if self.group_kill_sent {
             return Ok(());
         }
@@ -283,6 +298,33 @@ impl OwnedMcpChild {
         match rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL) {
             Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
             Err(_) => Err(LiveCode::ChildReapFailed),
+        }
+    }
+
+    fn leader_is_waitable(&self) -> Result<bool, LiveCode> {
+        let raw = self
+            .child
+            .as_ref()
+            .and_then(Child::id)
+            .ok_or(LiveCode::ChildReapFailed)?;
+        let pid = rustix::process::Pid::from_raw(raw as i32).ok_or(LiveCode::ChildReapFailed)?;
+        let options = rustix::process::WaitIdOptions::EXITED
+            | rustix::process::WaitIdOptions::NOHANG
+            | rustix::process::WaitIdOptions::NOWAIT;
+        rustix::process::waitid(rustix::process::WaitId::Pid(pid), options)
+            .map(|status| status.is_some())
+            .map_err(|_| LiveCode::ChildReapFailed)
+    }
+
+    async fn wait_until_leader_is_waitable(&self, deadline: Deadline) -> Result<(), LiveCode> {
+        loop {
+            if self.leader_is_waitable()? || Instant::now() >= deadline.at {
+                return Ok(());
+            }
+            tokio::time::sleep(
+                CHILD_POLL_INTERVAL.min(deadline.at.saturating_duration_since(Instant::now())),
+            )
+            .await;
         }
     }
 
@@ -314,8 +356,8 @@ impl OwnedMcpChild {
                     Some(Ok(None)) | None => {}
                     Some(Err(_)) => return Err(LiveCode::ChildReapFailed),
                 }
-                if self.child.is_none() && !self.process_group_exists()? {
-                    self.process_group.take();
+                if self.child.is_none() {
+                    let _ = self.observe_and_clear_process_group();
                 }
                 return Err(LiveCode::ChildReapFailed);
             }
@@ -325,23 +367,23 @@ impl OwnedMcpChild {
         let mut wait_failed = false;
 
         if self.child.is_some() {
-            match tokio::time::timeout_at(graceful_deadline, self.wait_for_leader()).await {
+            self.wait_until_leader_is_waitable(Deadline {
+                at: graceful_deadline,
+            })
+            .await?;
+            self.kill_process_group_once()?;
+            self.wait_until_leader_is_waitable(budget.deadline).await?;
+            match tokio::time::timeout_at(budget.deadline.at, self.wait_for_leader()).await {
                 Ok(Ok(_)) => {
                     self.child.take();
                 }
                 Ok(Err(_)) => {
                     wait_failed = true;
-                    self.kill_process_group_once()?;
                 }
-                Err(_) => {
-                    self.kill_process_group_once()?;
-                }
+                Err(_) => return Err(LiveCode::ChildReapFailed),
             }
         }
 
-        if self.child.is_none() && self.process_group_exists()? {
-            self.kill_process_group_once()?;
-        }
         if self.child.is_some() {
             match tokio::time::timeout_at(budget.deadline.at, self.wait_for_leader()).await {
                 Ok(Ok(_)) => {
@@ -351,20 +393,10 @@ impl OwnedMcpChild {
             }
         }
 
-        loop {
-            if !self.process_group_exists()? {
-                self.process_group.take();
-                return if wait_failed {
-                    Err(LiveCode::ChildReapFailed)
-                } else {
-                    Ok(())
-                };
-            }
-            budget.check().map_err(|_| LiveCode::ChildReapFailed)?;
-            budget
-                .sleep(CHILD_POLL_INTERVAL)
-                .await
-                .map_err(|_| LiveCode::ChildReapFailed)?;
+        if self.observe_and_clear_process_group().is_err() || wait_failed {
+            Err(LiveCode::ChildReapFailed)
+        } else {
+            Ok(())
         }
     }
 }
@@ -375,12 +407,14 @@ impl Drop for OwnedMcpChild {
             return;
         }
         self.close_owned_stdin();
-        let _ = self.kill_process_group_once();
-        if matches!(self.child.as_mut().map(Child::try_wait), Some(Ok(Some(_)))) {
-            self.child.take();
+        if self.child.is_some() {
+            let _ = self.kill_process_group_once();
+            if matches!(self.child.as_mut().map(Child::try_wait), Some(Ok(Some(_)))) {
+                self.child.take();
+            }
         }
-        if self.child.is_none() && matches!(self.process_group_exists(), Ok(false)) {
-            self.process_group.take();
+        if self.child.is_none() {
+            let _ = self.observe_and_clear_process_group();
         }
     }
 }
@@ -523,7 +557,20 @@ pub(super) async fn assert_owned_child_exit_paths_for_test() {
         .shutdown_and_reap(CleanupBudget::with_timeout(Duration::from_secs(1)))
         .await
         .unwrap();
+    assert!(
+        owned.group_kill_sent,
+        "normal cleanup must signal the group before reaping the leader"
+    );
     assert_process_and_group_absent(pid);
+    owned.group_kill_sent = false;
+    assert_eq!(
+        owned.kill_process_group_once(),
+        Err(LiveCode::ChildReapFailed)
+    );
+    assert!(
+        !owned.group_kill_sent,
+        "childless numeric authority must never reach the signal boundary"
+    );
 }
 
 pub(super) async fn assert_owned_child_timeout_for_test() {

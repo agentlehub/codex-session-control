@@ -71,7 +71,7 @@ leader_is_waitable() {
   local leader="$1"
   local state
   if [[ ! -r "/proc/$leader/stat" ]]; then
-    return 0
+    return 2
   fi
   state="$(awk '{print $3}' "/proc/$leader/stat" 2>/dev/null)" || return 2
   [[ "$state" == Z ]]
@@ -111,7 +111,7 @@ wait_until_leader_is_waitable() {
       state=$?
     fi
     if [[ "$state" -ne 1 ]]; then
-      return 1
+      return "$state"
     fi
     if ((SECONDS >= deadline)); then
       return 1
@@ -188,13 +188,28 @@ release_owned_test() {
   else
     state=$?
   fi
-  if [[ "$state" -eq 1 ]]; then
+  test_leader=
+  test_pgid=
+  leader_reaped=0
+  [[ "$state" -eq 1 ]]
+}
+
+reap_and_release_owned_test() {
+  local deadline="$1"
+  local state
+  if wait_until_leader_is_waitable "$test_leader" "$deadline"; then
+    state=0
+  else
+    state=$?
+  fi
+  [[ "$state" -eq 0 || "$state" -eq 2 ]] || return 1
+  if ! private_wait_for_leader "$test_leader"; then
     test_leader=
     test_pgid=
     leader_reaped=0
-    return 0
+    return 1
   fi
-  return 1
+  release_owned_test
 }
 
 cleanup_owned_test_inner() {
@@ -237,14 +252,7 @@ cleanup_owned_test_inner() {
     fi
   fi
 
-  if [[ "$leader_reaped" -ne 1 ]]; then
-    deadline=$((SECONDS + reap_grace_seconds))
-    wait_until_leader_is_waitable "$test_leader" "$deadline" || return 1
-    private_wait_for_leader "$test_leader" || return 1
-  fi
-  deadline=$((SECONDS + reap_grace_seconds))
-  confirm_group_absent "$test_pgid" "$deadline" || return 1
-  release_owned_test
+  reap_and_release_owned_test "$((SECONDS + reap_grace_seconds))"
 }
 
 cleanup_owned_test() {
@@ -257,12 +265,7 @@ kill_owned_group_and_wait() {
   {
     {
       signal_group KILL "$test_pgid" || return 1
-      wait_until_leader_is_waitable \
-        "$test_leader" "$((SECONDS + reap_grace_seconds))" || return 1
-      private_wait_for_leader "$test_leader" || return 1
-      confirm_group_absent \
-        "$test_pgid" "$((SECONDS + reap_grace_seconds))" || return 1
-      release_owned_test || return 1
+      reap_and_release_owned_test "$((SECONDS + reap_grace_seconds))"
     } >>"$private_wait_capture" 2>&1
   } 2>/dev/null
 }
@@ -510,6 +513,19 @@ assert_private_wait_and_group_cleanup_for_self_test() {
     [[ -z "$test_leader" && -z "$test_pgid" ]]
     [[ ! -s "$public_capture" ]]
   done
+
+  (
+    test_leader=424242
+    test_pgid=424242
+    leader_reaped=1
+    group_state() {
+      return 0
+    }
+    if release_owned_test; then
+      return 1
+    fi
+    [[ -z "$test_leader" && -z "$test_pgid" && "$leader_reaped" -eq 0 ]]
+  )
 }
 
 assert_hard_kill_helper_fail_fast_for_self_test() {
@@ -531,10 +547,6 @@ assert_hard_kill_helper_fail_fast_for_self_test() {
     private_wait_for_leader() {
       printf '%s\n' private_wait_reached >>"$trace"
       return 0
-    }
-    confirm_group_absent() {
-      printf '%s\n' absence_reached >>"$trace"
-      return 1
     }
     release_owned_test() {
       printf '%s\n' release_reached >>"$trace"
@@ -562,10 +574,6 @@ assert_hard_kill_helper_fail_fast_for_self_test() {
     private_wait_for_leader() {
       printf '%s\n' private_wait_reached >>"$trace"
       return 0
-    }
-    confirm_group_absent() {
-      printf '%s\n' absence_reached >>"$trace"
-      return 1
     }
     release_owned_test() {
       printf '%s\n' release_reached >>"$trace"
@@ -989,23 +997,27 @@ spawn_live_test() {
 
 wait_for_test_inner() {
   local leader="$test_leader"
-  local pgid="$test_pgid"
   local state
   ownership_failure=0
-  if ! private_wait_for_leader "$leader"; then
-    ownership_failure=1
-    return
-  fi
-  if group_state "$pgid"; then
-    state=0
-  else
-    state=$?
-  fi
-  if [[ "$state" -eq 1 ]]; then
-    release_owned_test || ownership_failure=1
-  else
-    ownership_failure=1
-  fi
+  while true; do
+    if leader_is_waitable "$leader"; then
+      state=0
+    else
+      state=$?
+    fi
+    case "$state" in
+      0) break ;;
+      1) sleep 0.05 || {
+        ownership_failure=1
+        return
+      } ;;
+      *)
+        reap_and_release_owned_test "$SECONDS" || ownership_failure=1
+        return
+        ;;
+    esac
+  done
+  cleanup_owned_test_inner || ownership_failure=1
 }
 
 wait_for_test() {
