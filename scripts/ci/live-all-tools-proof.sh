@@ -94,11 +94,20 @@ leader_is_waitable() {
 wait_until_leader_is_waitable() {
   local leader="$1"
   local deadline="$2"
-  while ! leader_is_waitable "$leader"; do
+  local state
+  while true; do
+    if leader_is_waitable "$leader"; then
+      return 0
+    else
+      state=$?
+    fi
+    if [[ "$state" -ne 1 ]]; then
+      return 1
+    fi
     if ((SECONDS >= deadline)); then
       return 1
     fi
-    sleep 0.05
+    sleep 0.05 || return 1
   done
 }
 
@@ -115,6 +124,7 @@ private_wait_for_leader() {
   fi
   test_status="$status"
   leader_reaped=1
+  return 0
 }
 
 confirm_group_absent() {
@@ -134,7 +144,7 @@ confirm_group_absent() {
     if ((SECONDS >= deadline)); then
       return 1
     fi
-    sleep 0.05
+    sleep 0.05 || return 1
   done
 }
 
@@ -224,18 +234,14 @@ cleanup_owned_test() {
 }
 
 kill_owned_group_and_wait() {
-  local state
   {
-    if signal_group KILL "$test_pgid"; then
-      state=0
-    else
-      state=$?
-    fi
-    [[ "$state" -eq 0 ]]
-    wait_until_leader_is_waitable "$test_leader" "$((SECONDS + reap_grace_seconds))"
-    private_wait_for_leader "$test_leader"
-    confirm_group_absent "$test_pgid" "$((SECONDS + reap_grace_seconds))"
-    release_owned_test
+    signal_group KILL "$test_pgid" || return 1
+    wait_until_leader_is_waitable \
+      "$test_leader" "$((SECONDS + reap_grace_seconds))" || return 1
+    private_wait_for_leader "$test_leader" || return 1
+    confirm_group_absent \
+      "$test_pgid" "$((SECONDS + reap_grace_seconds))" || return 1
+    release_owned_test || return 1
   } >>"$private_wait_capture" 2>&1
 }
 
@@ -338,6 +344,75 @@ assert_private_wait_and_group_cleanup_for_self_test() {
   [[ "$cleanup_group_state" -eq 1 ]]
 }
 
+assert_hard_kill_helper_fail_fast_for_self_test() {
+  local self_root="$1"
+  local trace="$self_root/helper-trace"
+  local public_capture="$self_root/helper-public"
+  new_capture_file "$trace"
+  new_capture_file "$public_capture"
+
+  (
+    signal_group() {
+      printf '%s\n' signal_error >>"$trace"
+      return 2
+    }
+    wait_until_leader_is_waitable() {
+      printf '%s\n' waitability_reached >>"$trace"
+      return 1
+    }
+    private_wait_for_leader() {
+      printf '%s\n' private_wait_reached >>"$trace"
+      return 0
+    }
+    confirm_group_absent() {
+      printf '%s\n' absence_reached >>"$trace"
+      return 1
+    }
+    release_owned_test() {
+      printf '%s\n' release_reached >>"$trace"
+      return 0
+    }
+    if ! kill_owned_group_and_wait; then
+      printf '%s\n' helper_failed >>"$trace"
+    else
+      printf '%s\n' helper_succeeded >>"$trace"
+    fi
+  ) >"$public_capture" 2>&1
+  [[ "$(tr '\n' ' ' <"$trace")" == "signal_error helper_failed " ]]
+  [[ ! -s "$public_capture" ]]
+
+  : >"$trace"
+  (
+    signal_group() {
+      printf '%s\n' signal_succeeded >>"$trace"
+      return 0
+    }
+    wait_until_leader_is_waitable() {
+      printf '%s\n' waitability_timeout >>"$trace"
+      return 1
+    }
+    private_wait_for_leader() {
+      printf '%s\n' private_wait_reached >>"$trace"
+      return 0
+    }
+    confirm_group_absent() {
+      printf '%s\n' absence_reached >>"$trace"
+      return 1
+    }
+    release_owned_test() {
+      printf '%s\n' release_reached >>"$trace"
+      return 0
+    }
+    if ! kill_owned_group_and_wait; then
+      printf '%s\n' helper_failed >>"$trace"
+    else
+      printf '%s\n' helper_succeeded >>"$trace"
+    fi
+  ) >"$public_capture" 2>&1
+  [[ "$(tr '\n' ' ' <"$trace")" == "signal_succeeded waitability_timeout helper_failed " ]]
+  [[ ! -s "$public_capture" ]]
+}
+
 run_self_test() {
   local self_root trap_probe capture status
   new_capture_root
@@ -368,6 +443,7 @@ run_self_test() {
   if is_fixed_code hard_kill_ready_suffix; then
     exit 1
   fi
+  assert_hard_kill_helper_fail_fast_for_self_test "$self_root"
   assert_private_wait_and_group_cleanup_for_self_test "$self_root"
   cleanup_capture
   [[ ! -e "$self_root" ]]
