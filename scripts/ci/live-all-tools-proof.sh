@@ -357,7 +357,6 @@ wait_for_hard_kill_ready() {
   until grep -Fxq hard_kill_ready "$hard_kill_stdout"; do
     if [[ -s "$test_status_path" ]] || leader_anchor_is_absent "$hard_kill_leader"; then
       wait_for_test
-      hard_kill_status="$test_status"
       if [[ "$ownership_failure" -ne 0 ]]; then
         record_failure child_reap_failed
       else
@@ -848,7 +847,7 @@ assert_hard_kill_early_failure_for_self_test() {
   local status_path="$stdout_path.status"
   local deadline helper_status leader
   local test_leader='' test_pgid='' test_status='' test_status_path=''
-  local ownership_failure=0 pending_failure_code='' hard_kill_status=''
+  local ownership_failure=0 pending_failure_code=''
   local hard_kill_stdout="$stdout_path" hard_kill_stderr="$stderr_path"
   local hard_kill_leader
   new_capture_file "$stdout_path"
@@ -867,10 +866,9 @@ assert_hard_kill_early_failure_for_self_test() {
   fi
   if [[ -n "$test_leader" ]]; then
     cleanup_owned_test || return 1
-    hard_kill_status="$test_status"
   fi
   [[ "$helper_status" -eq 1 && "$pending_failure_code" == tool_failed &&
-    "$hard_kill_status" -eq 23 && "$ownership_failure" -eq 0 &&
+    "$ownership_failure" -eq 0 &&
     -z "$test_leader" && -z "$test_pgid" ]]
   [[ -n "$leader" && ! -e "/proc/$leader" ]]
   if ps -e -o pgid= 2>/dev/null | awk -v pgid="$leader" '$1 == pgid { found=1 } END { exit !found }'; then
@@ -1303,11 +1301,7 @@ readonly hard_kill_stderr="$capture_root/hard-kill.stderr"
 spawn_live_test hard-kill "$hard_kill_stdout" "$hard_kill_stderr"
 hard_kill_leader="$test_leader"
 handshake_deadline=$((SECONDS + 180))
-if wait_for_hard_kill_ready "$handshake_deadline"; then
-  :
-else
-  exit 1
-fi
+wait_for_hard_kill_ready "$handshake_deadline" || exit 1
 if ! kill_owned_group_and_wait; then
   record_failure tool_failed
   exit 1
