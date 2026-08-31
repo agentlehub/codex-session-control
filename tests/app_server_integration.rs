@@ -2,6 +2,8 @@ use std::error::Error;
 
 #[path = "app_server_integration/cases.rs"]
 mod cases;
+#[path = "../src/app_server/endpoint_policy.rs"]
+mod endpoint_policy;
 #[path = "app_server_integration/live_harness.rs"]
 mod live_harness;
 
@@ -30,19 +32,19 @@ fn workspace_pagination_rejects_cycles_and_exhaustion() {
     cases::workspace_pagination_rejects_cycles_and_exhaustion();
 }
 
-#[tokio::test]
-async fn already_archived_exact_ledger_target_skips_archive_and_converges() {
-    cases::already_archived_exact_ledger_target_skips_archive_and_converges().await;
+#[test]
+fn archive_classifier_accepts_only_exact_identity_and_storage() {
+    cases::archive_classifier_accepts_only_exact_identity_and_storage();
 }
 
 #[tokio::test]
-async fn active_exact_ledger_target_archives_once_then_converges() {
-    cases::active_exact_ledger_target_archives_once_then_converges().await;
+async fn archive_reconciliation_dispatches_at_most_once_after_exact_active_read() {
+    cases::archive_reconciliation_dispatches_at_most_once_after_exact_active_read().await;
 }
 
 #[tokio::test]
-async fn invalid_exact_read_evidence_fails_closed_and_retains_ledger() {
-    cases::invalid_exact_read_evidence_fails_closed_and_retains_ledger().await;
+async fn direct_cleanup_requires_safe_endpoint_and_exact_initialized_identity() {
+    cases::direct_cleanup_requires_safe_endpoint_and_exact_initialized_identity().await;
 }
 
 #[test]

@@ -2,12 +2,16 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     fs,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 use rustix::fs::{FileType, Stat};
 
 use crate::error::{ToolErrorCategory, ToolErrorData};
+
+use super::endpoint_policy::{
+    is_normalized_absolute_path, owned_private_directory, owned_private_socket,
+};
 
 const CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET: &str = "CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET";
 const XDG_RUNTIME_DIR: &str = "XDG_RUNTIME_DIR";
@@ -132,26 +136,7 @@ fn require_valid_app_id(value: &OsStr) -> Result<(), ToolErrorData> {
 }
 
 fn require_normalized_absolute_path(path: &Path) -> Result<(), ToolErrorData> {
-    if !path.is_absolute() {
-        return Err(socket_validation_failure());
-    }
-
-    let mut rebuilt = PathBuf::from("/");
-    let mut normal_components = 0;
-    for component in path.components() {
-        match component {
-            Component::RootDir => {}
-            Component::Normal(component) => {
-                rebuilt.push(component);
-                normal_components += 1;
-            }
-            Component::Prefix(_) | Component::CurDir | Component::ParentDir => {
-                return Err(socket_validation_failure());
-            }
-        }
-    }
-
-    if normal_components == 0 || rebuilt.as_os_str() != path.as_os_str() {
+    if !is_normalized_absolute_path(path) {
         return Err(socket_validation_failure());
     }
     Ok(())
@@ -175,15 +160,21 @@ fn selected_lstat(path: &Path) -> Result<Stat, ToolErrorData> {
 }
 
 fn owned_directory_is_private(st_uid: u32, st_mode: u32, euid: u32) -> bool {
-    st_uid == euid
-        && FileType::from_raw_mode(st_mode) == FileType::Directory
-        && st_mode & 0o7777 == 0o700
+    owned_private_directory(
+        st_uid,
+        st_mode,
+        euid,
+        FileType::from_raw_mode(st_mode) == FileType::Directory,
+    )
 }
 
 fn owned_socket_is_private(st_uid: u32, st_mode: u32, euid: u32) -> bool {
-    st_uid == euid
-        && FileType::from_raw_mode(st_mode) == FileType::Socket
-        && matches!(st_mode & 0o7777, 0o600 | 0o700)
+    owned_private_socket(
+        st_uid,
+        st_mode,
+        euid,
+        FileType::from_raw_mode(st_mode) == FileType::Socket,
+    )
 }
 
 fn target_unavailable() -> ToolErrorData {

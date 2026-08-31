@@ -7,7 +7,7 @@ use std::{
     io::{self, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     panic::AssertUnwindSafe,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use tokio::{net::UnixListener, sync::Mutex};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
+use crate::endpoint_policy::{ThreadStorage, classify_thread_storage};
 use crate::live_harness::LiveHarness;
 
 const LIVE_OPT_IN: &str = "CODEX_SESSION_CONTROL_LIVE_ALL_TOOLS";
@@ -726,130 +727,272 @@ fn start_normal_journal() -> io::Result<FixedJournal> {
     Ok(journal)
 }
 
-pub(super) async fn already_archived_exact_ledger_target_skips_archive_and_converges() {
-    let run_dir = tempfile::tempdir().unwrap();
-    let mut ledger = FixedJournal::begin(
-        run_dir.path().join(LIVE_ROOT_NAME),
-        "00000000000000000000000000000006",
-    )
-    .unwrap();
-    ledger.record_id("owned-target".to_owned()).unwrap();
-    let server =
-        ArchiveReconciliationServer::start(vec![ExactReadReply::result(exact_thread_read(
-            "owned-target",
+pub(super) fn archive_classifier_accepts_only_exact_identity_and_storage() {
+    use crate::endpoint_policy::{InitializedIdentity, ThreadStorage, classify_thread_storage};
+
+    let expected = env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION");
+    for (home, user_agent, expected_result) in [
+        (
+            Some("relative-home"),
+            Some(concat!(
+                "codex-cli ",
+                env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION")
+            )),
+            Err("identity_unverified"),
+        ),
+        (
+            Some("relative-home"),
+            Some("codex-cli 0.0.1"),
+            Err("identity_unverified"),
+        ),
+        (Some("relative-home"), None, Err("identity_unverified")),
+        (
+            Some("/tmp//codex-home"),
+            Some(concat!(
+                "codex-cli ",
+                env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION")
+            )),
+            Err("identity_unverified"),
+        ),
+        (
+            Some("/tmp//codex-home"),
+            Some("codex-cli 0.0.1"),
+            Err("identity_unverified"),
+        ),
+        (Some("/tmp//codex-home"), None, Err("identity_unverified")),
+        (
+            Some("/tmp/codex-home"),
+            Some(concat!(
+                "codex-cli ",
+                env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION")
+            )),
+            Ok("/tmp/codex-home"),
+        ),
+        (
+            Some("/tmp/codex-home"),
+            Some("codex-cli 0.0.1"),
+            Err("version_unsupported"),
+        ),
+        (Some("/tmp/codex-home"), None, Err("identity_unverified")),
+    ] {
+        let identity = InitializedIdentity::from_initialize(home, user_agent);
+        assert_eq!(
+            identity.ordinary_codex_home().map(Path::to_path_buf),
+            home.filter(|value| !value.is_empty() && Path::new(value).is_absolute())
+                .map(PathBuf::from),
+            "ordinary initialize handling; home={home:?}"
+        );
+        assert_eq!(
+            identity
+                .recovery_home(expected)
+                .map(|path| path.to_str().unwrap()),
+            expected_result,
+            "home={home:?}; user_agent={user_agent:?}"
+        );
+    }
+
+    let home = Path::new("/tmp/codex-home");
+    for (reported_id, path, expected_result) in [
+        (
+            Some("owned-target"),
+            "/tmp/codex-home/sessions/2026/08/rollout.jsonl",
+            Ok(ThreadStorage::Active),
+        ),
+        (
+            Some("owned-target"),
             "/tmp/codex-home/archived_sessions/rollout.jsonl",
-        ))])
-        .await;
-    let harness =
-        LiveHarness::for_test_native_socket(ledger.workspace().unwrap(), server.socket.clone())
-            .unwrap();
-
-    let result = archive_and_verify(&harness, &ledger).await;
-    let archive_calls = server.archive_call_count().await;
-
-    assert!(
-        result.is_ok(),
-        "already archived target must converge: {result:?}"
-    );
-    assert_eq!(archive_calls, 0);
+            Ok(ThreadStorage::Archived),
+        ),
+        (
+            Some("owned-target"),
+            "/tmp/other-home/sessions/rollout.jsonl",
+            Err("unclassifiable_storage"),
+        ),
+        (
+            Some("owned-target"),
+            "relative/sessions/rollout.jsonl",
+            Err("unclassifiable_storage"),
+        ),
+        (
+            Some("owned-target"),
+            "/tmp/codex-home/sessions/../archived_sessions/rollout.jsonl",
+            Err("unclassifiable_storage"),
+        ),
+        (
+            Some("owned-target"),
+            "/tmp/codex-home/sessions",
+            Err("unclassifiable_storage"),
+        ),
+        (
+            Some("owned-target"),
+            "/tmp/codex-home/sessions/archived_sessions/rollout.jsonl",
+            Err("unclassifiable_storage"),
+        ),
+        (
+            None,
+            "/tmp/codex-home/sessions/rollout.jsonl",
+            Err("mismatched_id"),
+        ),
+        (
+            Some("other-target"),
+            "/tmp/codex-home/sessions/rollout.jsonl",
+            Err("mismatched_id"),
+        ),
+    ] {
+        assert_eq!(
+            classify_thread_storage(home, "owned-target", reported_id, Path::new(path)),
+            expected_result,
+            "reported_id={reported_id:?}; path={path}"
+        );
+    }
 }
 
-pub(super) async fn active_exact_ledger_target_archives_once_then_converges() {
+pub(super) async fn archive_reconciliation_dispatches_at_most_once_after_exact_active_read() {
     let run_dir = tempfile::tempdir().unwrap();
     let mut ledger = FixedJournal::begin(
         run_dir.path().join(LIVE_ROOT_NAME),
         "00000000000000000000000000000007",
     )
     .unwrap();
-    ledger.record_id("owned-target".to_owned()).unwrap();
-    let server = ArchiveReconciliationServer::start(vec![
-        ExactReadReply::result(exact_thread_read(
-            "owned-target",
-            "/tmp/codex-home/sessions/2026/08/rollout.jsonl",
-        )),
-        ExactReadReply::result(exact_thread_read(
-            "owned-target",
-            "/tmp/codex-home/archived_sessions/rollout.jsonl",
-        )),
-    ])
+    let workspace = ledger.workspace().unwrap();
+    let server = ArchiveReconciliationServer::start(
+        exact_initialized_identity(),
+        vec![json!({"data": [{"id": "owned-target", "cwd": workspace}]})],
+        vec![
+            ExactReadReply::result(exact_thread_read(
+                "owned-target",
+                "/tmp/codex-home/sessions/2026/08/rollout.jsonl",
+            )),
+            ExactReadReply::result(exact_thread_read(
+                "owned-target",
+                "/tmp/codex-home/sessions/2026/08/rollout.jsonl",
+            )),
+            ExactReadReply::result(exact_thread_read(
+                "owned-target",
+                "/tmp/codex-home/archived_sessions/rollout.jsonl",
+            )),
+        ],
+    )
     .await;
     let harness =
         LiveHarness::for_test_native_socket(ledger.workspace().unwrap(), server.socket.clone())
             .unwrap();
 
-    let result = archive_and_verify(&harness, &ledger).await;
-    let archive_calls = server.archive_call_count().await;
+    let result = reconcile_direct_cleanup(&harness, &mut ledger).await;
+    let methods = server.method_names().await;
 
     assert!(
         result.is_ok(),
         "active target must converge after archive: {result:?}"
     );
-    assert_eq!(archive_calls, 1);
+    assert_eq!(server.connection_count().await, 1);
+    assert_eq!(server.method_call_count("initialize").await, 1);
+    assert_eq!(server.method_call_count("thread/list").await, 1);
+    assert_eq!(server.method_call_count("thread/read").await, 3);
+    assert_eq!(server.method_call_count("thread/archive").await, 1);
+    let first_read = methods
+        .iter()
+        .position(|method| method == "thread/read")
+        .unwrap();
+    let archive = methods
+        .iter()
+        .position(|method| method == "thread/archive")
+        .unwrap();
+    assert!(
+        archive > first_read,
+        "archive must follow an exact active read"
+    );
+    assert_eq!(ledger.owned_thread_ids().unwrap().len(), 1);
+
+    let mut archived_ledger = FixedJournal::begin(
+        run_dir.path().join("already-archived"),
+        "00000000000000000000000000000009",
+    )
+    .unwrap();
+    let archived_workspace = archived_ledger.workspace().unwrap();
+    let archived_server = ArchiveReconciliationServer::start(
+        exact_initialized_identity(),
+        vec![json!({"data": [{"id": "owned-target", "cwd": archived_workspace}]})],
+        vec![ExactReadReply::result(exact_thread_read(
+            "owned-target",
+            "/tmp/codex-home/archived_sessions/rollout.jsonl",
+        ))],
+    )
+    .await;
+    let archived_harness = LiveHarness::for_test_native_socket(
+        archived_ledger.workspace().unwrap(),
+        archived_server.socket.clone(),
+    )
+    .unwrap();
+
+    reconcile_direct_cleanup(&archived_harness, &mut archived_ledger)
+        .await
+        .unwrap();
+    assert_eq!(archived_server.connection_count().await, 1);
+    assert_eq!(archived_server.method_call_count("thread/archive").await, 0);
 }
 
-pub(super) async fn invalid_exact_read_evidence_fails_closed_and_retains_ledger() {
-    for (category, reply) in [
+pub(super) async fn direct_cleanup_requires_safe_endpoint_and_exact_initialized_identity() {
+    let unsafe_server =
+        ArchiveReconciliationServer::start(exact_initialized_identity(), Vec::new(), Vec::new())
+            .await;
+    unsafe_server.set_socket_mode(0o644);
+    assert_rejected_direct_cleanup(&unsafe_server, "socket_validation").await;
+
+    for (initialized, expected) in [
         (
-            "missing",
-            ExactReadReply::error(json!({"code": -32602, "message": "thread not found"})),
+            json!({"codexHome": "relative-home", "userAgent": "codex-cli 0.0.1"}),
+            "identity_unverified",
         ),
         (
-            "mismatched_id",
-            ExactReadReply::result(exact_thread_read(
-                "different-target",
-                "/tmp/codex-home/sessions/2026/08/rollout.jsonl",
-            )),
+            json!({"codexHome": "/tmp//codex-home", "userAgent": "codex-cli 0.0.1"}),
+            "identity_unverified",
         ),
         (
-            "unclassifiable_storage",
-            ExactReadReply::result(exact_thread_read(
-                "owned-target",
-                "/tmp/opaque-storage/rollout.jsonl",
-            )),
+            json!({"codexHome": "/tmp/codex-home", "userAgent": "codex-cli not-a-version"}),
+            "identity_unverified",
         ),
         (
-            "unclassifiable_storage",
-            ExactReadReply::result(exact_thread_read(
-                "owned-target",
-                "/tmp/unrelated/archived_sessions/rollout.jsonl",
-            )),
-        ),
-        (
-            "unclassifiable_storage",
-            ExactReadReply::result(exact_thread_read(
-                "owned-target",
-                "/tmp/unrelated/sessions/2026/08/rollout.jsonl",
-            )),
+            json!({"codexHome": "/tmp/codex-home", "userAgent": "codex-cli 0.0.1"}),
+            "version_unsupported",
         ),
     ] {
-        let run_dir = tempfile::tempdir().unwrap();
-        let mut ledger = FixedJournal::begin(
-            run_dir.path().join(LIVE_ROOT_NAME),
-            "00000000000000000000000000000008",
-        )
-        .unwrap();
-        ledger.record_id("owned-target".to_owned()).unwrap();
-        let server = ArchiveReconciliationServer::start(vec![reply]).await;
-        let harness =
-            LiveHarness::for_test_native_socket(ledger.workspace().unwrap(), server.socket.clone())
-                .unwrap();
-
-        let error = archive_and_verify(&harness, &ledger).await.unwrap_err();
-        let archive_calls = server.archive_call_count().await;
-        let message = error.to_string();
-
-        assert_eq!(
-            message,
-            format!(
-                "native archive reconciliation failed: stage=thread/read, category={category}, active=0, archived=0, unresolved=1"
-            )
-        );
-        assert_eq!(archive_calls, 0);
-        assert!(ledger.path.exists());
-        assert!(ledger.workspace().unwrap().exists());
-        assert!(!message.contains("owned-target"));
-        assert!(!message.contains("opaque-storage"));
+        let server = ArchiveReconciliationServer::start(initialized, Vec::new(), Vec::new()).await;
+        assert_rejected_direct_cleanup(&server, expected).await;
     }
+}
+
+async fn assert_rejected_direct_cleanup(server: &ArchiveReconciliationServer, expected: &str) {
+    let run_dir = tempfile::tempdir().unwrap();
+    let mut ledger = FixedJournal::begin(
+        run_dir.path().join(LIVE_ROOT_NAME),
+        "00000000000000000000000000000008",
+    )
+    .unwrap();
+    let harness =
+        LiveHarness::for_test_native_socket(ledger.workspace().unwrap(), server.socket.clone())
+            .unwrap();
+
+    let error = reconcile_direct_cleanup(&harness, &mut ledger)
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), expected);
+    assert_eq!(server.method_call_count("initialized").await, 0);
+    assert_eq!(server.method_call_count("thread/list").await, 0);
+    assert_eq!(server.method_call_count("thread/read").await, 0);
+    assert_eq!(server.method_call_count("thread/archive").await, 0);
+    assert!(ledger.path.exists());
+    assert!(ledger.workspace().unwrap().exists());
+}
+
+fn exact_initialized_identity() -> Value {
+    json!({
+        "codexHome": "/tmp/codex-home",
+        "userAgent": concat!(
+            "codex-cli ",
+            env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION")
+        ),
+    })
 }
 
 fn exact_thread_read(id: &str, path: &str) -> Value {
@@ -858,35 +1001,41 @@ fn exact_thread_read(id: &str, path: &str) -> Value {
 
 enum ExactReadReply {
     Result(Value),
-    Error(Value),
 }
 
 impl ExactReadReply {
     fn result(result: Value) -> Self {
         Self::Result(result)
     }
-
-    fn error(error: Value) -> Self {
-        Self::Error(error)
-    }
 }
 
 struct ArchiveReconciliationServer {
     socket: PathBuf,
     requests: Arc<Mutex<Vec<Value>>>,
+    connections: Arc<Mutex<usize>>,
     _directory: tempfile::TempDir,
 }
 
 impl ArchiveReconciliationServer {
-    async fn start(read_replies: Vec<ExactReadReply>) -> Self {
+    async fn start(
+        initialized: Value,
+        list_replies: Vec<Value>,
+        read_replies: Vec<ExactReadReply>,
+    ) -> Self {
         let directory = tempfile::tempdir().unwrap();
+        set_mode(directory.path(), 0o700).unwrap();
         let socket = directory.path().join("archive-reconciliation.sock");
         let listener = UnixListener::bind(&socket).unwrap();
+        set_mode(&socket, 0o600).unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded_requests = Arc::clone(&requests);
+        let connections = Arc::new(Mutex::new(0));
+        let recorded_connections = Arc::clone(&connections);
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
+            *recorded_connections.lock().await += 1;
             let mut websocket = accept_async(stream).await.unwrap();
+            let mut list_replies = list_replies.into_iter();
             let mut read_replies = read_replies.into_iter();
             while let Some(Ok(frame)) = websocket.next().await {
                 let Message::Text(text) = frame else {
@@ -896,21 +1045,21 @@ impl ArchiveReconciliationServer {
                 let Some(method) = request.get("method").and_then(Value::as_str) else {
                     continue;
                 };
+                recorded_requests.lock().await.push(request.clone());
                 if method == "initialized" {
                     continue;
                 }
-                recorded_requests.lock().await.push(request.clone());
                 let response = match method {
-                    "initialize" => Ok(json!({
-                        "codexHome": "/tmp/codex-home",
-                        "userAgent": concat!(
-                            "codex-cli ",
-                            env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION")
-                        ),
-                    })),
+                    "initialize" => Ok(initialized.clone()),
+                    "thread/list" => match list_replies.next() {
+                        Some(result) => Ok(result),
+                        None => Err(json!({
+                            "code": -32603,
+                            "message": "unexpected workspace list"
+                        })),
+                    },
                     "thread/read" => match read_replies.next() {
                         Some(ExactReadReply::Result(result)) => Ok(result),
-                        Some(ExactReadReply::Error(error)) => Err(error),
                         None => Err(json!({
                             "code": -32603,
                             "message": "unexpected exact read"
@@ -932,19 +1081,36 @@ impl ArchiveReconciliationServer {
         Self {
             socket,
             requests,
+            connections,
             _directory: directory,
         }
     }
 
-    async fn archive_call_count(&self) -> usize {
+    fn set_socket_mode(&self, mode: u32) {
+        set_mode(&self.socket, mode).unwrap();
+    }
+
+    async fn connection_count(&self) -> usize {
+        *self.connections.lock().await
+    }
+
+    async fn method_call_count(&self, method: &str) -> usize {
         self.requests
             .lock()
             .await
             .iter()
-            .filter(|request| {
-                request.get("method") == Some(&Value::String("thread/archive".to_owned()))
-            })
+            .filter(|request| request.get("method").and_then(Value::as_str) == Some(method))
             .count()
+    }
+
+    async fn method_names(&self) -> Vec<String> {
+        self.requests
+            .lock()
+            .await
+            .iter()
+            .filter_map(|request| request.get("method").and_then(Value::as_str))
+            .map(ToOwned::to_owned)
+            .collect()
     }
 }
 
@@ -1007,8 +1173,7 @@ pub(super) async fn live_desktop_authority_all_thirteen_tools_are_disposable()
     .await;
     let cleanup_result: Result<(), Box<dyn Error>> = async {
         harness.stop_and_reap_mcp_child().await?;
-        recover_exact_workspace_ids(&harness, &mut ledger).await?;
-        archive_and_verify(&harness, &ledger).await?;
+        reconcile_direct_cleanup(&harness, &mut ledger).await?;
         ledger.cleanup_complete()?;
         ledger.delete_local_idempotently()?;
         Ok(())
@@ -1038,11 +1203,7 @@ async fn recover_hard_kill_ledger(root: PathBuf) -> Result<(), Box<dyn Error>> {
     let mut ledger = FixedJournal::recover(root)?;
     let workspace = ledger.workspace()?;
     let harness = LiveHarness::from_ledger(&workspace)?;
-    let cleanup_result = async {
-        recover_exact_workspace_ids(&harness, &mut ledger).await?;
-        archive_and_verify(&harness, &ledger).await
-    }
-    .await;
+    let cleanup_result = reconcile_direct_cleanup(&harness, &mut ledger).await;
     if let Err(error) = cleanup_result {
         return Err(ledger.cleanup_failure(error).into());
     }
@@ -1087,22 +1248,22 @@ async fn run_all_thirteen_tools(
     Ok(())
 }
 
-async fn recover_exact_workspace_ids(
+async fn reconcile_direct_cleanup(
     harness: &LiveHarness,
     ledger: &mut FixedJournal,
 ) -> Result<(), Box<dyn Error>> {
     let mut native = harness.connect_native().await?;
     native.initialize().await?;
+    native.recovery_home()?;
+    native.finish_initialization().await?;
     ledger.record_recovered_ids(harness.workspace_thread_ids(&mut native, false).await?)?;
-    Ok(())
+    archive_and_verify(&mut native, ledger).await
 }
 
 async fn archive_and_verify(
-    harness: &LiveHarness,
+    native: &mut crate::live_harness::NativeConnection,
     ledger: &FixedJournal,
 ) -> Result<(), Box<dyn Error>> {
-    let mut native = harness.connect_native().await?;
-    native.initialize().await?;
     let owned_thread_ids = ledger.owned_thread_ids()?;
     let mut archive_dispatched = vec![false; owned_thread_ids.len()];
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1111,9 +1272,9 @@ async fn archive_and_verify(
         let mut counts = ExactArchiveCounts::new(owned_thread_ids.len());
         let mut active = Vec::new();
         for (index, owned_id) in owned_thread_ids.iter().enumerate() {
-            match exact_thread_storage(&mut native, owned_id).await {
-                Ok(ExactThreadStorage::Archived) => counts.archived += 1,
-                Ok(ExactThreadStorage::Active) => {
+            match exact_thread_storage(native, owned_id).await {
+                Ok(ThreadStorage::Archived) => counts.archived += 1,
+                Ok(ThreadStorage::Active) => {
                     counts.active += 1;
                     if !archive_dispatched[index] {
                         active.push((index, owned_id));
@@ -1129,7 +1290,7 @@ async fn archive_and_verify(
         }
         for (index, owned_id) in active {
             archive_dispatched[index] = true;
-            if archive_owned_thread(&mut native, owned_id).await.is_err() {
+            if archive_owned_thread(native, owned_id).await.is_err() {
                 return Err(exact_archive_failure("thread/archive", "native_error", counts).into());
             }
         }
@@ -1164,19 +1325,14 @@ impl ExactArchiveCounts {
     }
 }
 
-enum ExactThreadStorage {
-    Active,
-    Archived,
-}
-
 async fn exact_thread_storage(
     native: &mut crate::live_harness::NativeConnection,
     owned_id: &OwnedThreadId,
-) -> Result<ExactThreadStorage, &'static str> {
+) -> Result<ThreadStorage, &'static str> {
     let codex_home = native
-        .initialized_codex_home()
+        .recovery_home()
         .map(Path::to_path_buf)
-        .ok_or("unclassifiable_storage")?;
+        .map_err(|_| "unclassifiable_storage")?;
     let response = native
         .request(
             "thread/read",
@@ -1188,42 +1344,17 @@ async fn exact_thread_storage(
         .get("thread")
         .and_then(Value::as_object)
         .ok_or("unclassifiable_storage")?;
-    if thread.get("id").and_then(Value::as_str) != Some(owned_id.as_str()) {
-        return Err("mismatched_id");
-    }
     let path = thread
         .get("path")
         .and_then(Value::as_str)
         .map(Path::new)
-        .filter(|path| path.is_absolute())
         .ok_or("unclassifiable_storage")?;
-    let relative = path
-        .strip_prefix(codex_home)
-        .map_err(|_| "unclassifiable_storage")?;
-    let mut components = relative.components();
-    let Some(Component::Normal(storage)) = components.next() else {
-        return Err("unclassifiable_storage");
-    };
-    let storage = match storage {
-        storage if storage == OsStr::new("sessions") => ExactThreadStorage::Active,
-        storage if storage == OsStr::new("archived_sessions") => ExactThreadStorage::Archived,
-        _ => return Err("unclassifiable_storage"),
-    };
-    let mut has_rollout_component = false;
-    for component in components {
-        let Component::Normal(component) = component else {
-            return Err("unclassifiable_storage");
-        };
-        if component == OsStr::new("sessions") || component == OsStr::new("archived_sessions") {
-            return Err("unclassifiable_storage");
-        }
-        has_rollout_component = true;
-    }
-    if has_rollout_component {
-        Ok(storage)
-    } else {
-        Err("unclassifiable_storage")
-    }
+    classify_thread_storage(
+        &codex_home,
+        owned_id.as_str(),
+        thread.get("id").and_then(Value::as_str),
+        path,
+    )
 }
 
 fn exact_archive_failure(stage: &str, category: &str, counts: ExactArchiveCounts) -> io::Error {

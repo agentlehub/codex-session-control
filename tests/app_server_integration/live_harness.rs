@@ -2,7 +2,8 @@ use std::{
     collections::BTreeSet,
     error::Error,
     ffi::OsString,
-    fmt, io,
+    fmt, fs, io,
+    os::unix::fs::{FileTypeExt, MetadataExt},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -19,6 +20,9 @@ use tokio::{
 use tokio_tungstenite::{WebSocketStream, client_async, tungstenite::Message};
 
 use crate::cases::OwnedThreadId;
+use crate::endpoint_policy::{
+    InitializedIdentity, is_normalized_absolute_path, owned_private_directory, owned_private_socket,
+};
 
 const EXPECTED_CODEX_VERSION: &str = env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION");
 const ALL_THREAD_SOURCE_KINDS: [&str; 10] = [
@@ -54,9 +58,91 @@ const SESSION_CONTROL_TOOLS: [&str; 13] = [
     "thread_interrupt",
 ];
 
+#[derive(Debug)]
+struct NativeEndpoint {
+    socket_path: PathBuf,
+    kind: NativeEndpointKind,
+}
+
+#[derive(Debug)]
+enum NativeEndpointKind {
+    Explicit,
+    Derived {
+        runtime_dir: PathBuf,
+        app_dir: PathBuf,
+        bridge_dir: PathBuf,
+    },
+}
+
+impl NativeEndpoint {
+    fn explicit(socket_path: PathBuf) -> Self {
+        Self {
+            socket_path,
+            kind: NativeEndpointKind::Explicit,
+        }
+    }
+
+    fn validate(&self) -> io::Result<()> {
+        if !is_normalized_absolute_path(&self.socket_path) {
+            return Err(socket_validation_error());
+        }
+        if let NativeEndpointKind::Derived {
+            runtime_dir,
+            app_dir,
+            bridge_dir,
+        } = &self.kind
+        {
+            validate_private_directory(runtime_dir)?;
+            validate_private_directory(app_dir)?;
+            validate_private_directory(bridge_dir)?;
+        }
+        let parent = self
+            .socket_path
+            .parent()
+            .ok_or_else(socket_validation_error)?;
+        validate_private_directory(parent)?;
+        if fs::canonicalize(parent)
+            .map_err(|_| socket_validation_error())?
+            .as_os_str()
+            != parent.as_os_str()
+        {
+            return Err(socket_validation_error());
+        }
+        let metadata =
+            fs::symlink_metadata(&self.socket_path).map_err(|_| socket_validation_error())?;
+        if !owned_private_socket(
+            metadata.uid(),
+            metadata.mode(),
+            rustix::process::geteuid().as_raw(),
+            metadata.file_type().is_socket(),
+        ) {
+            return Err(socket_validation_error());
+        }
+        Ok(())
+    }
+}
+
+fn validate_private_directory(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| socket_validation_error())?;
+    if owned_private_directory(
+        metadata.uid(),
+        metadata.mode(),
+        rustix::process::geteuid().as_raw(),
+        metadata.file_type().is_dir(),
+    ) {
+        Ok(())
+    } else {
+        Err(socket_validation_error())
+    }
+}
+
+fn socket_validation_error() -> io::Error {
+    io::Error::other("socket_validation")
+}
+
 pub(super) struct LiveHarness {
     workspace: PathBuf,
-    socket: PathBuf,
+    endpoint: NativeEndpoint,
     mcp: Option<McpClient>,
 }
 
@@ -64,7 +150,7 @@ impl LiveHarness {
     pub(super) fn from_ledger(workspace: &Path) -> Result<Self, Box<dyn Error>> {
         Ok(Self {
             workspace: workspace.to_path_buf(),
-            socket: desktop_socket_path()?,
+            endpoint: desktop_endpoint()?,
             mcp: None,
         })
     }
@@ -72,7 +158,7 @@ impl LiveHarness {
     pub(super) fn for_test_native_socket(workspace: PathBuf, socket: PathBuf) -> io::Result<Self> {
         Ok(Self {
             workspace,
-            socket,
+            endpoint: NativeEndpoint::explicit(socket),
             mcp: None,
         })
     }
@@ -131,11 +217,13 @@ impl LiveHarness {
 
     pub(super) async fn assert_supported_native_version(&self) -> Result<(), Box<dyn Error>> {
         let mut native = self.connect_native().await?;
-        native.initialize().await
+        native.initialize().await?;
+        native.recovery_home()?;
+        native.finish_initialization().await
     }
 
     pub(super) async fn connect_native(&self) -> Result<NativeConnection, Box<dyn Error>> {
-        NativeConnection::connect(&self.socket).await
+        NativeConnection::connect(&self.endpoint).await
     }
 
     pub(super) async fn workspace_thread_ids(
@@ -241,10 +329,10 @@ impl<'a> WorkspacePages<'a> {
                     .ok_or_else(|| io::Error::other("thread/list emitted an invalid cursor"))
             })
             .transpose()?;
-        if let Some(cursor) = &next {
-            if !self.cursors.insert(cursor.clone()) {
-                return Err(io::Error::other("thread/list repeated a cursor"));
-            }
+        if let Some(cursor) = &next
+            && !self.cursors.insert(cursor.clone())
+        {
+            return Err(io::Error::other("thread/list repeated a cursor"));
         }
         Ok(next)
     }
@@ -295,17 +383,18 @@ type NativeWebSocket = WebSocketStream<UnixStream>;
 pub(super) struct NativeConnection {
     websocket: NativeWebSocket,
     next_id: u64,
-    codex_home: Option<PathBuf>,
+    identity: Option<InitializedIdentity>,
 }
 
 impl NativeConnection {
-    async fn connect(socket: &Path) -> Result<Self, Box<dyn Error>> {
-        let stream = UnixStream::connect(socket).await?;
+    async fn connect(endpoint: &NativeEndpoint) -> Result<Self, Box<dyn Error>> {
+        endpoint.validate()?;
+        let stream = UnixStream::connect(&endpoint.socket_path).await?;
         let (websocket, _) = client_async("ws://localhost/rpc", stream).await?;
         Ok(Self {
             websocket,
             next_id: 1,
-            codex_home: None,
+            identity: None,
         })
     }
 
@@ -328,30 +417,27 @@ impl NativeConnection {
                 }),
             )
             .await?;
-        let codex_home = initialized
-            .get("codexHome")
-            .and_then(Value::as_str)
-            .filter(|home| Path::new(home).is_absolute())
-            .map(PathBuf::from)
-            .ok_or_else(|| io::Error::other("initialize omitted an absolute Codex home"))?;
-        let user_agent = initialized
-            .get("userAgent")
-            .and_then(Value::as_str)
-            .ok_or_else(|| io::Error::other("initialize omitted a user agent"))?;
-        if !has_supported_codex_version(user_agent) {
-            return Err(
-                io::Error::other("Desktop authority is not on the supported version").into(),
-            );
-        }
-        self.codex_home = Some(codex_home);
+        let identity = InitializedIdentity::from_initialize(
+            initialized.get("codexHome").and_then(Value::as_str),
+            initialized.get("userAgent").and_then(Value::as_str),
+        );
+        self.identity = Some(identity);
+        Ok(())
+    }
+
+    pub(super) fn recovery_home(&self) -> Result<&Path, io::Error> {
+        self.identity
+            .as_ref()
+            .ok_or_else(|| io::Error::other("identity_unverified"))?
+            .recovery_home(EXPECTED_CODEX_VERSION)
+            .map_err(io::Error::other)
+    }
+
+    pub(super) async fn finish_initialization(&mut self) -> Result<(), Box<dyn Error>> {
         self.websocket
             .send(Message::text(json!({"method": "initialized"}).to_string()))
             .await?;
         Ok(())
-    }
-
-    pub(super) fn initialized_codex_home(&self) -> Option<&Path> {
-        self.codex_home.as_deref()
     }
 
     pub(super) async fn request(
@@ -995,10 +1081,10 @@ impl McpClient {
     }
 }
 
-fn desktop_socket_path() -> Result<PathBuf, Box<dyn Error>> {
+fn desktop_endpoint() -> Result<NativeEndpoint, Box<dyn Error>> {
     let explicit = std::env::var_os("CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET");
     if let Some(path) = explicit.filter(|path| !path.is_empty()) {
-        return Ok(PathBuf::from(path));
+        return Ok(NativeEndpoint::explicit(PathBuf::from(path)));
     }
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .filter(|value| !value.is_empty())
@@ -1007,16 +1093,14 @@ fn desktop_socket_path() -> Result<PathBuf, Box<dyn Error>> {
     let app_id = std::env::var_os("CODEX_LINUX_APP_ID")
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| OsString::from("codex-desktop"));
-    Ok(runtime
-        .join(app_id)
-        .join("app-server-bridge/app-server.sock"))
-}
-
-fn has_supported_codex_version(user_agent: &str) -> bool {
-    user_agent
-        .split(|character: char| {
-            !(character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '+'))
-        })
-        .filter_map(|candidate| semver::Version::parse(candidate).ok())
-        .any(|version| version.to_string() == EXPECTED_CODEX_VERSION)
+    let app_dir = runtime.join(app_id);
+    let bridge_dir = app_dir.join("app-server-bridge");
+    Ok(NativeEndpoint {
+        socket_path: bridge_dir.join("app-server.sock"),
+        kind: NativeEndpointKind::Derived {
+            runtime_dir: runtime,
+            app_dir,
+            bridge_dir,
+        },
+    })
 }

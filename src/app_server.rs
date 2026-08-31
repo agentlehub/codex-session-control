@@ -3,10 +3,10 @@
     reason = "native protocol stages return the approved structured ToolErrorData directly"
 )]
 
-use std::{future::Future, path::Path, time::Duration};
+use std::{future::Future, time::Duration};
 
 #[cfg(test)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Serialize, de::DeserializeOwned};
@@ -20,9 +20,13 @@ use crate::{
 };
 
 mod endpoint;
+mod endpoint_policy;
 mod protocol;
 
 use endpoint::DesktopEndpoint;
+use endpoint_policy::InitializedIdentity;
+#[cfg(test)]
+use endpoint_policy::extract_codex_version;
 use protocol::{
     classify_native_error, compact_snapshot_from_native, protocol_fixture, thread_list_from_native,
     thread_read_from_native,
@@ -206,11 +210,11 @@ impl AppServerConnection {
             )
             .await?;
 
-        let valid_codex_home = initialize_result
-            .get("codexHome")
-            .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty() && Path::new(value).is_absolute());
-        if !valid_codex_home {
+        let identity = InitializedIdentity::from_initialize(
+            initialize_result.get("codexHome").and_then(Value::as_str),
+            initialize_result.get("userAgent").and_then(Value::as_str),
+        );
+        if identity.ordinary_codex_home().is_none() {
             return Err(ToolErrorData::fixed(
                 ToolErrorCategory::TargetUnavailable,
                 "initialize",
@@ -218,10 +222,9 @@ impl AppServerConnection {
             ));
         }
 
-        let reported_version = initialize_result
-            .get("userAgent")
-            .and_then(Value::as_str)
-            .and_then(extract_codex_version)
+        let reported_version = identity
+            .reported_version()
+            .map(ToOwned::to_owned)
             .unwrap_or_else(|| "unknown".to_owned());
         if reported_version != tested_codex_version {
             self.compatibility_warning = Some(format!(
@@ -601,18 +604,6 @@ pub async fn with_native_stage_timeout<T>(
     tokio::time::timeout(NATIVE_STAGE_TIMEOUT, future)
         .await
         .map_err(|_| ToolErrorData::fixed(ToolErrorCategory::StageTimeout, stage, stage))?
-}
-
-fn extract_codex_version(user_agent: &str) -> Option<String> {
-    user_agent
-        .split(|character: char| {
-            !(character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '+'))
-        })
-        .find_map(|candidate| {
-            semver::Version::parse(candidate)
-                .ok()
-                .map(|version| version.to_string())
-        })
 }
 
 fn insert_optional<T: Serialize>(
