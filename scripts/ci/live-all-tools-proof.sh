@@ -26,10 +26,7 @@ leader_reaped=0
 test_status=
 ownership_failure=0
 cleanup_failure_code=
-cleanup_failure_reported=0
 pending_failure_code=
-production_failure_boundary=0
-rendered_failure_code=
 
 readonly term_grace_seconds=2
 readonly reap_grace_seconds=3
@@ -238,15 +235,7 @@ kill_owned_group_and_wait() {
 }
 
 record_failure() {
-  local code="$1"
-  if [[ "$production_failure_boundary" -eq 1 ]]; then
-    pending_failure_code="$code"
-  else
-    if [[ "$rendered_failure_code" != "$code" ]]; then
-      printf '%s\n' "$code" >&2
-      rendered_failure_code="$code"
-    fi
-  fi
+  pending_failure_code="$1"
 }
 
 cleanup_capture() {
@@ -254,13 +243,7 @@ cleanup_capture() {
     return 1
   fi
   if ! cleanup_owned_test; then
-    ownership_failure=1
     cleanup_failure_code=child_reap_failed
-    if [[ "$production_failure_boundary" -eq 0 ]] &&
-      [[ "$cleanup_failure_reported" -eq 0 ]]; then
-      record_failure "$cleanup_failure_code"
-      cleanup_failure_reported=1
-    fi
     return 1
   fi
   if [[ -n "$capture_root" ]] &&
@@ -268,11 +251,6 @@ cleanup_capture() {
     [[ -d "$capture_root" ]]; then
     if ! rm -rf -- "$capture_root" 2>/dev/null; then
       cleanup_failure_code=cleanup_failed
-      if [[ "$production_failure_boundary" -eq 0 ]] &&
-        [[ "$cleanup_failure_reported" -eq 0 ]]; then
-        record_failure "$cleanup_failure_code"
-        cleanup_failure_reported=1
-      fi
       return 1
     fi
   fi
@@ -290,12 +268,10 @@ finalize() {
   elif [[ -n "$pending_failure_code" ]]; then
     winning_code="$pending_failure_code"
   elif [[ "$source" == exit && "$status" -ne 0 ]]; then
-    winning_code="${rendered_failure_code:-tool_failed}"
+    winning_code=tool_failed
   fi
   if [[ -n "$winning_code" ]]; then
-    if [[ "$winning_code" != "$rendered_failure_code" ]]; then
-      printf '%s\n' "$winning_code" >&2
-    fi
+    printf '%s\n' "$winning_code" >&2
     exit 1
   fi
   exit "$status"
@@ -307,13 +283,6 @@ trap 'finalize 130 signal' INT
 trap 'finalize 143 signal' TERM
 
 capture_setup_failed() {
-  if [[ "$production_failure_boundary" -eq 1 ]]; then
-    record_failure tool_failed
-    return 1
-  fi
-  if ! cleanup_capture; then
-    return 1
-  fi
   record_failure tool_failed
   return 1
 }
@@ -563,7 +532,9 @@ probe_capture_setup_failure_for_self_test() {
   (
     local capture_root=
     local private_wait_capture=/dev/null
-    local production_failure_boundary=0
+    local pending_failure_code=
+    local cleanup_failure_code=
+    trap 'finalize "$?" exit' EXIT
     TMPDIR="$missing_tmpdir" new_capture_root
   )
 }
@@ -575,8 +546,6 @@ probe_capture_cleanup_failure_for_self_test() {
     capture_root="$cleanup_target"
     private_wait_capture=/dev/null
     cleanup_failure_code=
-    cleanup_failure_reported=0
-    production_failure_boundary=0
     # shellcheck disable=SC2317
     rm() {
       printf 'raw rm diagnostic for %s\n' "$*" >&2
@@ -668,14 +637,12 @@ assert_runtime_journal_preflight_for_self_test() {
   local stdout_capture="$self_root/runtime-preflight.stdout"
   local stderr_capture="$self_root/runtime-preflight.stderr"
   local candidate journal_path status
-  local saved_rendered_failure_code="$rendered_failure_code"
-  local production_failure_boundary=0
-  rendered_failure_code=
+  local pending_failure_code=
   new_capture_file "$stdout_capture"
   new_capture_file "$stderr_capture"
 
   for candidate in '' relative/runtime "$self_root/../runtime-authority"; do
-    rendered_failure_code=
+    pending_failure_code=
     journal_path=unchanged
     if runtime_journal_preflight \
       "$candidate" journal_path >"$stdout_capture" 2>"$stderr_capture"; then
@@ -686,36 +653,34 @@ assert_runtime_journal_preflight_for_self_test() {
     [[ "$status" -ne 0 ]]
     [[ -z "$journal_path" ]]
     [[ ! -s "$stdout_capture" ]]
-    [[ "$(<"$stderr_capture")" == journal_rejected ]]
+    [[ ! -s "$stderr_capture" ]]
+    [[ "$pending_failure_code" == journal_rejected ]]
   done
 
+  pending_failure_code=
   journal_path=
   runtime_journal_preflight /run/user/1000 journal_path \
     >"$stdout_capture" 2>"$stderr_capture"
   [[ "$journal_path" == /run/user/1000/codex-session-control/live-test/current.json ]]
   [[ ! -s "$stdout_capture" ]]
   [[ ! -s "$stderr_capture" ]]
-  rendered_failure_code="$saved_rendered_failure_code"
+  [[ -z "$pending_failure_code" ]]
 }
 
 run_finalizer_context_for_self_test() {
   local context="$1"
   local cleanup_outcome="$5"
-  local immediate_code="$7"
   capture_root="$2"
   private_wait_capture="$3"
   pending_failure_code="$4"
-  production_failure_boundary="$6"
-  rendered_failure_code=
   test_leader=424242
   test_pgid=424242
   leader_reaped=0
   ownership_failure=0
   cleanup_failure_code=
-  cleanup_failure_reported=0
   # shellcheck disable=SC2317
   cleanup_owned_test() {
-    if [[ "$cleanup_outcome" != failure ]]; then
+    if [[ "$cleanup_outcome" == success ]]; then
       test_leader=
       test_pgid=
       leader_reaped=0
@@ -725,17 +690,8 @@ run_finalizer_context_for_self_test() {
       "$capture_root" "$test_leader" 'sleep 30' >>"$private_wait_capture"
     return 1
   }
-  if [[ "$cleanup_outcome" == capture-failure ]]; then
-    # shellcheck disable=SC2317
-    rm() {
-      return 1
-    }
-  fi
   trap 'finalize "$?" exit' EXIT
   trap 'finalize 143 signal' TERM
-  if [[ "$immediate_code" != none ]]; then
-    record_failure "$immediate_code"
-  fi
   case "$context" in
     exit) exit 23 ;;
     signal)
@@ -748,22 +704,19 @@ run_finalizer_context_for_self_test() {
 assert_final_emission_for_self_test() {
   local self_root="$1"
   local definition scenario context pending cleanup_outcome expected expected_status
-  local retained boundary immediate_code
+  local retained
   local retained_root private_evidence stdout_capture stderr_capture status
 
   for definition in \
-    'bare-exit|exit|none|failure|child_reap_failed|1|1|1|none' \
-    'signal-cleanup-failure|signal|none|failure|child_reap_failed|1|1|1|none' \
-    'prior-deadline-cleanup-failure|exit|deadline_exceeded|failure|child_reap_failed|1|1|1|none' \
-    'prior-child-reap-cleanup-failure|exit|child_reap_failed|failure|child_reap_failed|1|1|1|none' \
-    'pending-deadline-cleanup-success|exit|deadline_exceeded|success|deadline_exceeded|1|0|1|none' \
-    'unexpected-nonzero-cleanup-success|exit|none|success|tool_failed|1|0|0|none' \
-    'immediate-tool-cleanup-success|exit|none|success|tool_failed|1|0|0|tool_failed' \
-    'persistent-same-cleanup-failure|exit|none|capture-failure|cleanup_failed|1|1|0|cleanup_failed' \
-    'signal-cleanup-success|signal|none|success|none|143|0|1|none'; do
+    'bare-exit|exit|none|failure|child_reap_failed|1|1' \
+    'signal-cleanup-failure|signal|none|failure|child_reap_failed|1|1' \
+    'prior-deadline-cleanup-failure|exit|deadline_exceeded|failure|child_reap_failed|1|1' \
+    'prior-child-reap-cleanup-failure|exit|child_reap_failed|failure|child_reap_failed|1|1' \
+    'pending-deadline-cleanup-success|exit|deadline_exceeded|success|deadline_exceeded|1|0' \
+    'unexpected-nonzero-cleanup-success|exit|none|success|tool_failed|1|0' \
+    'signal-cleanup-success|signal|none|success|none|143|0'; do
     IFS='|' read -r \
-      scenario context pending cleanup_outcome expected expected_status retained boundary \
-      immediate_code \
+      scenario context pending cleanup_outcome expected expected_status retained \
       <<<"$definition"
     if [[ "$pending" == none ]]; then
       pending=
@@ -786,7 +739,7 @@ assert_final_emission_for_self_test() {
     if (
       run_finalizer_context_for_self_test \
         "$context" "$retained_root" "$private_evidence" \
-        "$pending" "$cleanup_outcome" "$boundary" "$immediate_code"
+        "$pending" "$cleanup_outcome"
     ) >"$stdout_capture" 2>"$stderr_capture"; then
       status=0
     else
@@ -807,11 +760,7 @@ assert_final_emission_for_self_test() {
     fi
     if [[ "$retained" -eq 1 ]]; then
       [[ -d "$retained_root" ]]
-      if [[ "$cleanup_outcome" == failure ]]; then
-        [[ -s "$private_evidence" ]]
-      else
-        [[ -f "$private_evidence" ]]
-      fi
+      [[ -s "$private_evidence" ]]
       if ! rm -rf -- "$retained_root" 2>/dev/null; then
         record_failure cleanup_failed
         return 1
@@ -843,11 +792,9 @@ run_self_test() {
 }
 
 if [[ "${1-}" == --self-test ]] && [[ "$#" -eq 1 ]]; then
-  production_failure_boundary=1
   run_self_test
   exit 0
 fi
-production_failure_boundary=1
 if [[ "$#" -ne 0 ]]; then
   record_failure opt_in_rejected
   exit 1
