@@ -439,6 +439,10 @@ runtime_journal_preflight() {
     "$runtime/codex-session-control/live-test/current.json"
 }
 
+before_owned_anchor_continue() {
+  :
+}
+
 spawn_owned_anchor() {
   local stdout_path="$1"
   local stderr_path="$2"
@@ -471,14 +475,88 @@ spawn_owned_anchor() {
   test_pgid="$test_leader"
   test_status_path="$status_path"
   ownership_failure=0
-  if ! wait_until_leader_is_stopped \
-    "$test_leader" "$((SECONDS + 1))" ||
-    ! confirm_group_absent "$test_pgid" "$SECONDS" ||
-    ! kill -CONT "$test_leader" 2>/dev/null ||
-    ! wait_until_group_exists "$test_pgid" "$((SECONDS + 1))" ||
-    ! leader_has_owned_identity "$test_leader"; then
-    return 1
+  wait_until_leader_is_stopped \
+    "$test_leader" "$((SECONDS + 1))" || return "$?"
+  confirm_group_absent "$test_pgid" "$SECONDS" || return "$?"
+  before_owned_anchor_continue || return "$?"
+  if [[ -n "${deferred_signal-}" ]]; then
+    return 125
   fi
+  kill -CONT "$test_leader" 2>/dev/null || return "$?"
+  wait_until_group_exists "$test_pgid" "$((SECONDS + 1))" || return "$?"
+  leader_has_owned_identity "$test_leader" || return "$?"
+}
+
+assert_deferred_launch_signals_for_self_test() {
+  local self_root="$1"
+  local public_capture="$self_root/deferred-signal.public"
+  local leader_record="$self_root/deferred-signal.leader"
+  local row signal expected marker leader status
+  new_capture_file "$public_capture"
+  new_capture_file "$leader_record"
+  for row in HUP:129 INT:130 TERM:143; do
+    IFS=: read -r signal expected <<<"$row"
+    marker="$self_root/deferred-$signal-ran"
+    : >"$public_capture"
+    : >"$leader_record"
+    # The globals are intentionally isolated inside each finalizer boundary.
+    # shellcheck disable=SC2030,SC2031
+    if (
+      local deferred_signal='' launch_status
+      local TMPDIR="$self_root"
+      capture_root=
+      private_wait_capture=/dev/null
+      test_leader='' test_pgid='' test_status='' test_status_path=''
+      cleanup_failure_code='' pending_failure_code=''
+      new_capture_root
+      trap 'finalize "$?" exit' EXIT
+      trap 'deferred_signal=129' HUP
+      trap 'deferred_signal=130' INT
+      trap 'deferred_signal=143' TERM
+      # shellcheck disable=SC2317
+      before_owned_anchor_continue() {
+        kill "-$signal" "$BASHPID"
+      }
+      # The marker path is expanded by the inner shell.
+      # shellcheck disable=SC2016
+      if spawn_owned_anchor \
+        "$capture_root/anchor.stdout" \
+        "$capture_root/anchor.stderr" \
+        "$capture_root/anchor.status" \
+        /bin/sh -c 'printf "ran\n" >"$1"' marker "$marker"; then
+        launch_status=0
+      else
+        launch_status=$?
+      fi
+      printf '%s\n' "$test_leader" >"$leader_record"
+      trap 'finalize 129 signal' HUP
+      trap 'finalize 130 signal' INT
+      trap 'finalize 143 signal' TERM
+      if [[ -n "$deferred_signal" ]]; then
+        finalize "$deferred_signal" signal
+      fi
+      [[ "$launch_status" -eq 0 ]]
+    ) >"$public_capture" 2>&1; then
+      status=0
+    else
+      status=$?
+    fi
+    [[ "$status" -eq "$expected" ]]
+    [[ ! -s "$public_capture" ]]
+    [[ ! -e "$marker" ]]
+    leader="$(<"$leader_record")"
+    if compgen -G "$self_root/codex-session-control-live-proof.*" >/dev/null; then
+      return 1
+    fi
+    [[ -n "$leader" && ! -e "/proc/$leader" ]]
+    if ps -e -o pgid= 2>/dev/null | awk -v pgid="$leader" '$1 == pgid { found=1 } END { exit !found }'; then
+      return 1
+    fi
+  done
+  test_leader=
+  test_pgid=
+  test_status=
+  test_status_path=
 }
 
 assert_private_wait_and_group_cleanup_for_self_test() {
@@ -488,7 +566,7 @@ assert_private_wait_and_group_cleanup_for_self_test() {
   local anchor_stderr="$self_root/anchor.stderr"
   local anchor_status="$self_root/anchor.status"
   local killed_leader
-  local scenario leader marker deferred_signal helper
+  local scenario leader marker helper
   new_capture_file "$public_capture"
   new_capture_file "$anchor_stdout"
   new_capture_file "$anchor_stderr"
@@ -522,13 +600,9 @@ assert_private_wait_and_group_cleanup_for_self_test() {
   [[ ! -s "$public_capture" ]]
   [[ ! -s "$anchor_stdout" && ! -s "$anchor_stderr" ]]
 
-  for scenario in launch-signal delayed-group owned-launch; do
+  for scenario in delayed-group owned-launch; do
     : >"$public_capture"
     marker="$self_root/$scenario-ran"
-    if [[ "$scenario" == launch-signal ]]; then
-      deferred_signal=
-      trap 'deferred_signal=143' TERM
-    fi
     (
       if [[ "$scenario" != delayed-group ]]; then
         kill -STOP "$BASHPID"
@@ -539,16 +613,9 @@ assert_private_wait_and_group_cleanup_for_self_test() {
       exec setsid /bin/sh -c 'exec sleep 30'
     ) >/dev/null 2>&1 &
     leader=$!
-    if [[ "$scenario" == launch-signal ]]; then
-      kill -TERM "$BASHPID"
-    fi
     test_leader="$leader"
     test_pgid="$leader"
-    if [[ "$scenario" == launch-signal ]]; then
-      trap 'finalize 143 signal' TERM
-      [[ "$deferred_signal" -eq 143 ]]
-      wait_until_leader_is_stopped "$leader" "$((SECONDS + 1))"
-    elif [[ "$scenario" == owned-launch ]]; then
+    if [[ "$scenario" == owned-launch ]]; then
       wait_until_leader_is_stopped "$leader" "$((SECONDS + 1))"
       confirm_group_absent "$leader" "$SECONDS"
       kill -CONT "$leader"
@@ -947,6 +1014,7 @@ run_self_test() {
   assert_runtime_journal_preflight_for_self_test "$self_root"
   assert_final_emission_for_self_test "$self_root"
   assert_hard_kill_helper_fail_fast_for_self_test "$self_root"
+  assert_deferred_launch_signals_for_self_test "$self_root"
   assert_private_wait_and_group_cleanup_for_self_test "$self_root"
   cleanup_capture
   [[ ! -e "$self_root" ]]
@@ -1029,7 +1097,7 @@ spawn_live_test() {
   local stdout_path="$2"
   local stderr_path="$3"
   local status_path="$stdout_path.status"
-  local deferred_signal=
+  local deferred_signal='' launch_status
   new_capture_file "$stdout_path"
   new_capture_file "$stderr_path"
   new_capture_file "$status_path"
@@ -1041,19 +1109,24 @@ spawn_live_test() {
   trap 'deferred_signal=129' HUP
   trap 'deferred_signal=130' INT
   trap 'deferred_signal=143' TERM
-  if ! spawn_owned_anchor \
+  if spawn_owned_anchor \
     "$stdout_path" "$stderr_path" "$status_path" \
     env "${environment[@]}" \
     "$harness" "$live_test_name" \
     --exact --ignored --nocapture --test-threads=1; then
-    record_failure child_reap_failed
-    exit 1
+    launch_status=0
+  else
+    launch_status=$?
   fi
   trap 'finalize 129 signal' HUP
   trap 'finalize 130 signal' INT
   trap 'finalize 143 signal' TERM
   if [[ -n "$deferred_signal" ]]; then
     finalize "$deferred_signal" signal
+  fi
+  if [[ "$launch_status" -ne 0 ]]; then
+    record_failure child_reap_failed
+    exit 1
   fi
 }
 
