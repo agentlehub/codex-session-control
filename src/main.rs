@@ -1,18 +1,6 @@
-#[allow(
-    dead_code,
-    reason = "Task 11 owns deletion of the unreachable lifecycle-only runtime surface"
-)]
 mod app_server;
-#[allow(
-    dead_code,
-    reason = "Task 11 owns deletion of the unreachable lifecycle-only error surface"
-)]
 mod error;
 mod mcp;
-#[allow(
-    dead_code,
-    reason = "Task 11 owns deletion of the unreachable lifecycle-only models"
-)]
 mod model;
 #[cfg(test)]
 mod test_support;

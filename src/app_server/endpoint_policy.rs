@@ -140,6 +140,17 @@ impl InitializedIdentity {
         self.reported_version.as_deref()
     }
 
+    #[cfg_attr(
+        test,
+        allow(
+            unfulfilled_lint_expectations,
+            reason = "integration tests exercise this retained shared policy directly"
+        )
+    )]
+    #[expect(
+        dead_code,
+        reason = "recovery identity validation is shared with retained app-server integration tests"
+    )]
     pub(crate) fn recovery_home(&self, expected_version: &str) -> Result<&Path, &'static str> {
         let Some(codex_home) = self.codex_home.as_deref() else {
             return Err("identity_unverified");
@@ -187,6 +198,17 @@ pub(crate) fn owned_private_socket(owner: u32, mode: u32, euid: u32, is_socket: 
     owner == euid && is_socket && matches!(mode & 0o7777, 0o600 | 0o700)
 }
 
+#[cfg_attr(
+    test,
+    allow(
+        unfulfilled_lint_expectations,
+        reason = "integration tests exercise this retained shared policy directly"
+    )
+)]
+#[expect(
+    dead_code,
+    reason = "storage classification is shared with retained app-server integration tests"
+)]
 pub(crate) fn classify_thread_storage(
     codex_home: &Path,
     expected_id: &str,

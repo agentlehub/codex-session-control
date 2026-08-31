@@ -1,9 +1,7 @@
-use std::{
-    env,
-    ffi::OsString,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{env, ffi::OsString, fs, path::Path};
+
+#[cfg(test)]
+use std::path::PathBuf;
 
 use rustix::fs::{FileType, Stat};
 
@@ -42,6 +40,7 @@ impl DesktopEndpoint {
             })
     }
 
+    #[cfg(test)]
     pub(super) fn explicit(socket_path: PathBuf) -> Self {
         Self {
             resolved: ResolvedEndpoint::explicit(socket_path),

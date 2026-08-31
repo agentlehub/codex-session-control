@@ -41,13 +41,6 @@ pub(crate) const TESTED_CODEX_CLI_VERSION: &str = concat!(
     "codex-cli ",
     env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION")
 );
-#[cfg(test)]
-pub(crate) const TESTED_CODEX_CLI_VERSION_OUTPUT: &str = concat!(
-    "codex-cli ",
-    env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION"),
-    "\n"
-);
-
 type ClientWebSocket = WebSocketStream<UnixStream>;
 
 #[derive(Debug)]
@@ -317,32 +310,6 @@ impl AppServerConnection {
         params.insert("ancestorThreadId".to_owned(), json!(ancestor_thread_id));
         params.insert("sourceKinds".to_owned(), json!(["subAgentThreadSpawn"]));
         insert_optional(&mut params, "cursor", cursor)?;
-        let response: Value = self.request("thread/list", params).await?;
-        thread_list_from_native(&response)
-    }
-
-    pub async fn threads_list_for_update(
-        &mut self,
-        cursor: Option<&str>,
-    ) -> Result<(Vec<Thread>, Option<String>), ToolErrorData> {
-        let mut params = serde_json::Map::new();
-        insert_optional(&mut params, "cursor", cursor)?;
-        params.insert("archived".to_owned(), Value::Bool(false));
-        params.insert(
-            "sourceKinds".to_owned(),
-            json!([
-                "cli",
-                "vscode",
-                "exec",
-                "appServer",
-                "subAgent",
-                "subAgentReview",
-                "subAgentCompact",
-                "subAgentThreadSpawn",
-                "subAgentOther",
-                "unknown"
-            ]),
-        );
         let response: Value = self.request("thread/list", params).await?;
         thread_list_from_native(&response)
     }
