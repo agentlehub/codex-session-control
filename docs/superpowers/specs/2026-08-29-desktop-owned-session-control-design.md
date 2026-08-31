@@ -18,7 +18,7 @@ MCP host -> SessionControlMcp -> deterministic Desktop endpoint
 ## Prerequisites
 
 - Work only in `/home/korty/dev/agentlehub/codex-session-control` on `feat/desktop-owned-session-control`.
-- Before production edits, verify that the branch merge-base remains `origin/main` commit `88f2ac5b124abaa2a355ca88304e9439c692eb0a`, that approved design commit `da06acf2c229b5e0aa68ff45ab3aa87037aa4d52` is present, and that the worktree contains no unrelated dirt. Drift requires a target-inventory and specification re-review before deletion work.
+- This R0 review occurs in `/home/korty/dev/agentlehub/codex-session-control` on `feat/desktop-owned-session-control` against baseline `918c21773f26aa2e1cb74f193fb95ccccf87de7c`; the only expected dirt is this specification, its plan, and the two review traces. Later implementation requires the baseline as an ancestor and a clean tree or dirt explicitly scoped to its active slice.
 - Preserve the public contract anchored by `src/mcp/contract.rs` and `tests/mcp_contract.rs`.
 - Treat the approved brainstorming artifact named in `Source` as product policy.
 - Use Codex CLI 0.149.1 as the initial plugin-host compatibility target and the installed Desktop authority's bundled Codex version as the native protocol target.
@@ -45,7 +45,9 @@ This specification governs the CSC refactor through the internal CSC pull reques
 
 ### Phase 2: Desktop attached CLI
 
-After the internal CSC pull request is open, continue autonomously in `/home/korty/dev/codex-desktop-linux` under a separate Desktop specification and plan. Implement the generic attached-CLI enhancement on a dedicated branch and open its first pull request only against the operator's internal `fork` remote. Do not open an issue, pull request, or proposal against official upstream without later explicit authorization.
+Phase 2 starts only after the internal CSC pull request exists, in `/home/korty/dev/codex-desktop-linux` from reviewed `main` base `bd610e96e87bda672f384c79ce5bb87ea0d5a6ee` on `feat/csc-attached-cli-internal-pr`. It produces a generic attached-CLI seam usable later by Desktop/Hermes while deferring every Hermes-specific integration; its remotes are official `origin=https://github.com/ilysenko/codex-desktop-linux.git` and internal `fork=https://github.com/kortylokai-web/codex-desktop-linux.git`.
+
+Create one immutable `.autonomous/csc-attached-cli-internal-pr/phase-1-handoff.md`, then start or resume only with the supported autonomous runner. Untracked real non-symlink `_experiments/`, unrelated `.autonomous` sibling task state, and the owned runner task state are allowed but never inspected or staged; other source dirt stops. The fresh Desktop workstream first produces its own brainstorming, reviewed specification, and TDD-ready plan; it may open only an internal-fork pull request and must not contact official upstream.
 
 ## Scope
 
@@ -163,7 +165,7 @@ CSC may read filesystem metadata needed for validation. It must not parse, rewri
 
 - No explicit socket and no `XDG_RUNTIME_DIR`: `target_unavailable`.
 - Missing Desktop socket or absent parent: `target_unavailable`.
-- Malformed initialize identity: preserve the existing initialization-stage `target_unavailable` error.
+- Invalid `initialize.result.codexHome`: preserve the existing initialization-stage `target_unavailable` error; absent or unparseable `userAgent` remains warning-compatible.
 - Relative, malformed, symlinked, foreign-owned, wrong-type, or permissive endpoint: `authority_transport_failure`.
 - Refusal, WebSocket failure, EOF, or transport timeout: existing `authority_transport_failure`, unless mutation dispatch made the outcome ambiguous.
 - Native failures: preserve native category, code/message, tool name, target ID, and stage.
@@ -322,7 +324,9 @@ Final commands and state checks must come from fresh post-implementation evidenc
 - `plugins/codex-session-control/.mcp.json`
 - `plugins/codex-session-control/bin/.gitignore`
 - `scripts/install-local-plugin.sh`
+- `scripts/ci/live-all-tools-proof.sh`
 - `src/app_server/endpoint.rs`
+- `src/app_server/endpoint_policy.rs` only if the shared production endpoint/identity policy cannot remain clear in `endpoint.rs`
 - `tests/desktop_shared_socket_contract.rs`
 - `tests/plugin_packaging_contract.rs`
 - `docs/upgrading.md`
@@ -412,28 +416,107 @@ The fake native server records the WebSocket upgrade request and rejects anythin
 
 Native x86-64 and AArch64 CI each run the locked release build, installer staging tests, ELF assertion, direct stdio catalog test, and full Rust gate. Cross-compilation is not acceptance evidence.
 
-The live gate is exactly one ignored end-to-end test:
+### M4 live-safety contract
 
-```bash
-CODEX_SESSION_CONTROL_LIVE_ALL_TOOLS=1 \
-cargo test --locked --test app_server_integration \
-  live_desktop_authority_all_thirteen_tools_are_disposable \
-  -- --ignored --exact --nocapture --test-threads=1
+#### Authority and modes
+
+One ignored integration gate exercises the exact thirteen-tool catalog against disposable tasks. It accepts only normal `CODEX_SESSION_CONTROL_LIVE_ALL_TOOLS=1`, hard-kill with that opt-in plus `CODEX_SESSION_CONTROL_LIVE_HARD_KILL=1`, and recovery with that opt-in plus `CODEX_SESSION_CONTROL_LIVE_RECOVER=1`.
+
+Any other presence/value combination fails before journal mutation, child spawn, endpoint resolution, or connection. Recovery accepts no caller path, ID, title, timestamp, PID, or scan input.
+
+#### Fixed journal and durability
+
+The sole owner-private authority is fixed at `$XDG_RUNTIME_DIR/codex-session-control/live-test/`:
+
+```text
+lock
+current.json
+current.next
+runs/<generation>/workspace/
 ```
 
-It fails before mutation unless the opt-in equals `1`, the production endpoint validates, the initialized authority version is supported, and a new random run workspace contains no active or archived tasks. Before use, persist every created or forked ID into a run-scoped `owned-thread-ids.json` under a private `/tmp/codex-session-control-live-*` directory using temp-file, `fsync`, atomic rename, and parent-directory `fsync`. All mutating helpers accept only a test-only `OwnedThreadId`; unrecorded IDs are never mutation targets.
+An exclusive nonblocking lock covers each normal or recovery run.
 
-Drive the built CSC binary over stdio MCP, assert the exact catalog, then exercise all thirteen tools on the ledger-owned tasks. On normal error or panic, unconditionally stop/reap the MCP child, recover only IDs belonging to the exact unique workspace, and persist them. Then, over a fresh native connection, exact-read each ledger ID, validate exact ID equality, and classify storage only by initialized `codexHome` subtree (`sessions` or `archived_sessions`). Skip IDs already classified archived, archive only IDs classified active, then poll exact reads until every target is classified archived. Fail closed for missing, mismatched, or unclassifiable targets. `thread/list` stays in the recovery flow only for exact-workspace ownership and never as archive-state proof because preview-empty threads can be omitted there. Delete the run directory only after exact-read proof confirms all targets are archived. On cleanup failure, retain and report the exact ledger path and remaining IDs.
+Traverse and mutate descriptor-relatively with no-follow semantics. The production-validated runtime root, `live-test`, `runs`, generation, and workspace are same-EUID real directories with exact `0700`; lock, journal, and staging objects are same-EUID regular non-symlink files with exact `0600`. Bound reads and fail closed on unknown state/field, malformed or duplicate ID, invalid generation, unsafe metadata, symlink, or identity drift.
 
-Hard-kill recovery requires both `CODEX_SESSION_CONTROL_LIVE_ALL_TOOLS=1` and `CODEX_SESSION_CONTROL_LIVE_RECOVER_LEDGER=/absolute/path/owned-thread-ids.json`. Never scan `/tmp`, titles, timestamps, or global before/after diffs for ownership.
+`current.json` is the only durable authority, with only these states:
 
-Run reviews in this order:
+```text
+Idle
+Active { generation, run_device, run_inode, workspace_device, workspace_inode, owned_thread_ids }
+CleanupComplete { generation, run_device, run_inode, workspace_device, workspace_inode }
+```
 
-1. Specification compliance.
-2. Dedicated DRY/YAGNI review.
-3. Code quality.
+Normal mode alone bootstraps a wholly absent fixed root and requires `Idle`; recovery requires complete fixed authority and never discovers an arbitrary path.
 
-The DRY/YAGNI review inventories every new production module, helper, dependency, installer branch, compatibility path, and test layer. Each addition must have one concrete responsibility not already covered by retained code or a smaller deletion-oriented design. Delete redundant abstractions, speculative extension points, duplicate manifest/config sources, unused fallback machinery, equivalent tests, and compatibility code outside the approved current architecture. Test count or changed-line coverage alone never justifies a test.
+Before the first task mutation, validate the generation/workspace and durably write empty `Active`. A prospective owned-ID update writes and syncs `current.next`, atomically replaces `current.json`, then syncs its parent before memory changes or authority returns. A post-replace failure returns no authority; recovery re-durably persists valid `Active` before use.
+
+Only exact archive proof for every owned ID may durably write `CleanupComplete`:
+
+- it authorizes only idempotent local deletion;
+- recovery then performs zero MCP/native requests;
+- it validates recorded direct children and metadata, removes validated empty artifacts, and durably returns to `Idle`.
+
+Unexpected entries, nonempty workspace, metadata drift, or reused inode retains retryable state and fails closed.
+
+#### Exact-workspace recovery
+
+Collect every workspace page into one private prospective set before any journal change or archive authority. Require nonempty unique IDs, byte-for-byte stored absolute `cwd`, unique valid cursors, finite page/row/memory limits, and rejection of empty, malformed, repeated, or cyclic pages. Any invalid later page discards the whole result; only the complete set may enter one durable update.
+
+This closes the mutation-success/journal-failure window without title, time, or global-state inference. Recovery never reruns a public tool.
+
+#### Endpoint, identity, archive, and no replay
+
+Recovery is connect-only: it never launches, restarts, probes, reclaims, or replaces Desktop/app-server authority, and never spawns the CSC MCP child. Every direct connection freshly uses the production endpoint resolver and metadata policy, then the production initialized-identity policy before enumeration, read, or archive.
+
+One pure I/O-free identity-evidence classifier uses the fresh connection's authority-reported `initialize.result.codexHome` as the sole home evidence: home is `Invalid`, `AbsoluteUnnormalized`, or `NormalizedAbsolute`; version is `Exact`, `Mismatch`, or `Unverified`. Production hard-fails only invalid home, accepts either absolute home, and retains exact/mismatch/unverified warning behavior.
+
+Recovery grants cleanup authority only to `NormalizedAbsolute + Exact`; structural or unverified evidence maps to `identity_unverified`, normalized mismatch maps to `version_unsupported`, and structural/unverified evidence wins. Rejection closes the connection, retains the journal, and performs zero enumeration, read, archive, or local cleanup mutation.
+
+An exact read must return the expected private ID and direct active `sessions` or archived `archived_sessions` storage under that same connection's `NormalizedAbsolute` authority-reported home. Archived evidence dispatches nothing; proven active evidence dispatches archive at most once per target per invocation, then only bounded exact reads may prove archival. Unknown, rejected, or transport evidence stops and retains the journal.
+
+No endpoint connect, initialize, native request, failed read, archive dispatch, `thread/resume`, mutation, or whole tool retries. Bounded post-success reads reconcile a completed archive; a later recovery begins from a new exact read.
+
+#### Child ownership and boundedness
+
+The normal/hard-kill harness owns the CSC child immediately after spawn, before pipe extraction, and keeps it in its containment group. Every exit path closes stdin, uses remaining time, kills a live direct child, bounded-waits, checks the inner wait, and clears ownership only after confirmed reap. Unconfirmed reap blocks native cleanup and emits only the fixed reap code.
+
+Startup has one absolute deadline. Each pre-cleanup MCP request/notification has one absolute serialization, write, flush, response, and framing deadline; `threads_wait` has one 125-second deadline and derives native `timeoutMs` from its remaining time minus five seconds. Frame reading bounds retained memory and drains overflow before a later frame.
+
+Cleanup/recovery uses one monotonic `CleanupBudget`; pagination, endpoint work, handshake, I/O, archive observations, sleeps, kill, and reap may only consume it. No inner operation extends or resets it.
+
+#### Fixed diagnostics
+
+One small `LiveCode` renderer may emit only:
+
+```text
+hard_kill_ready
+opt_in_rejected
+journal_rejected
+endpoint_rejected
+identity_unverified
+version_unsupported
+child_spawn_failed
+child_reap_failed
+tool_failed
+deadline_exceeded
+archive_proof_failed
+cleanup_failed
+```
+
+`hard_kill_ready` is a success handshake; every other token is one fixed failure class. It carries no dynamic value, and cleanup failure wins over a run error or suppressed panic. Child stderr is null or privately bounded, protocol stdout is bounded-parser input only, and the ignored test suppresses/restores the panic hook around live work.
+
+#### Manual normal and hard-kill proof
+
+One versioned `scripts/ci/live-all-tools-proof.sh` owns normal, hard-kill, and recovery orchestration. Its non-live `--self-test` validates private capture, fixed handshake recognition, deterministic statuses, and cleanup without Desktop/task mutation.
+
+With separate explicit authority, the runner proves normal all-tool cleanup to `Idle`, kills a private-group hard-kill run after `hard_kill_ready` and requires exit 137 plus group disappearance, invokes fixed-journal recovery, and proves no tool replay, exact archival, complete local cleanup, and final `Idle`. Retained evidence is fixed codes and pass/fail/process-exit facts only.
+
+#### M4 acceptance
+
+Implementation has exactly three sequential TDD slices. The only retained ignored gate and the versioned runner preserve separate normal and hard-kill/recovery manual gates; a missing or failing gate leaves M4 incomplete.
+
+Every planned type, helper, module, and test needs one current necessity that a smaller contract-preserving alternative cannot meet. No dependency, trait, actor, mock server, background task, generic framework, workflow engine, or speculative controller is authorized.
 
 Reader-facing workflow checks must prove that README, current docs, contribution guidance, and issue forms do not instruct users to invoke removed CSC commands. `docs/upgrading.md` may name a historical 0.3.x command only when explicitly labeled as one verified manual cleanup option. The bug form must request evidence that exists in the new product: host surface, plugin version/visibility, Desktop shared-socket availability, exact stderr or MCP error, and reproduction steps.
 
@@ -456,7 +539,7 @@ Fix accepted findings and rerun affected gates. Only fresh post-change results c
 13. `thread_message_send` resumes a persisted `notLoaded` exact-ID target on the same connection before start.
 14. Every failed or invalid resume path sends zero prompts.
 15. Successful persisted messaging sends the original prompt exactly once.
-16. The canonical full-SemVer pipeline pins and recaptures the exact Desktop authority `0.150.0-alpha.12.2` fixture while preserving public mismatch warnings.
+16. The canonical full-SemVer pipeline pins and recaptures the exact Desktop authority `0.150.0-alpha.12.2` fixture; one pure identity-evidence classifier preserves production invalid-home failure and exact/mismatch/unverified warning behavior.
 17. The plugin uses legacy manifests and forwards exactly the three required variables; the v1 format remains excluded by a negative regression test.
 18. One installer builds locked and atomically stages one mode-0755 native binary.
 19. No download logic, checksum catalog, release selector, separately installed executable outside the plugin bundle, or architecture dispatcher remains.
@@ -467,9 +550,9 @@ Fix accepted findings and rerun affected gates. Only fresh post-change results c
 24. Manual CLI/Desktop lifecycle evidence proves install, disable, re-enable, update, removal, and new-task/session visibility boundaries.
 25. Native removal removes Codex registration and tools without deleting the clone or claiming termination of already-running task processes.
 26. Documentation gives the implementation-verified five-step manual 0.3.x cutover and contains no migration-code claim.
-27. Live validation exercises all tools only on run-ledger-owned disposable tasks and archives exactly those tasks on success or recoverable failure.
-28. Every added production or test construct survives a dedicated DRY/YAGNI review with a concrete unique responsibility; unjustified additions are removed.
+27. The one fixed, owner-private, generation-checked journal permits only exact-workspace recovery using the fresh connection's normalized authority-reported home plus exact supported version, same-connection storage proof, exact archive proof, and zero cleanup mutation on rejected evidence.
+28. Every added type, helper, module, or test has a one-sentence current necessity; no smaller contract-preserving alternative exists.
 29. No current reader-facing workflow or issue form advertises a removed CSC command; the bug form requests evidence available from the plugin-contained product.
-30. `./scripts/check.sh`, specification-compliance review, DRY/YAGNI review, and code-quality review pass with fresh evidence in that order.
+30. Focused M4 evidence, `./scripts/check.sh`, specification-compliance review, DRY/YAGNI/KISS review, and code-quality review pass with fresh evidence in that order; normal and hard-kill/recovery proof remain separately authorized manual gates.
 31. Phase 1 stops after the internal CSC branch push and pull request; no CSC merge, tag, release, or publish occurs.
-32. Phase 2 opens only an internal Desktop-fork pull request and never contacts official upstream without later explicit authorization.
+32. Phase 2 uses one immutable handoff and the supported runner start/resume interface, then opens only an internal Desktop-fork pull request without official-upstream action.

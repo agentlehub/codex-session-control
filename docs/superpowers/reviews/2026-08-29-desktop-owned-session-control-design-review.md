@@ -1,5 +1,8 @@
 # Desktop-Owned Session Control Design Review Trace
 
+**Status:** passed
+**Current review scope:** M4 R0
+
 ## Review Surface
 
 Reviewed: `docs/superpowers/specs/2026-08-29-desktop-owned-session-control-design.md`
@@ -71,3 +74,8 @@ Saved because: the first readiness review found material packaging, protocol-ver
 ## Final State
 
 passed
+
+## M4 R0 Design Review
+
+**Status:** passed
+**Baseline:** `918c21773f26aa2e1cb74f193fb95ccccf87de7c`; **Reviewed artifact:** specification SHA-256 `b88c4073561fad20db6fdcaa4620a5b6fdce236d67a2cbd36dc727bba5b1fb18`; **Review type:** specification compliance; **R6:** passed; **Simplicity R1:** passed; **Quality R2:** passed; **Findings:** none; **Approval:** approved.

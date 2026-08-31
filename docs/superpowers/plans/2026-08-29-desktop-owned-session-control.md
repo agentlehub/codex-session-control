@@ -15,25 +15,14 @@
 
 ## Prerequisites
 
-### Repository and authority gate
+### R0 and per-slice repository checks
 
 - Work only in `/home/korty/dev/agentlehub/codex-session-control` on `feat/desktop-owned-session-control`.
-- Before dispatching any production worker, run:
-
-  ```bash
-  cd /home/korty/dev/agentlehub/codex-session-control
-  test "$(git branch --show-current)" = feat/desktop-owned-session-control
-  test "$(git merge-base HEAD origin/main)" = 88f2ac5b124abaa2a355ca88304e9439c692eb0a
-  git merge-base --is-ancestor da06acf2c229b5e0aa68ff45ab3aa87037aa4d52 HEAD
-  git merge-base --is-ancestor b7b9d94 HEAD
-  test -z "$(git status --short)"
-  ```
-
-  Expected: every command exits `0`; the status output is empty.
-- If the branch, merge-base, approved design commit, or clean-state assertion fails, stop. Inventory the drift, repair or re-review the specification and this plan, and obtain a coherent approved boundary before deleting code.
-- Preserve `src/mcp/contract.rs` and `tests/mcp_contract.rs` as the public contract authorities. No tool name, order, title, description, annotation, schema, default, result, error, stage, dispatch evidence, or cross-thread policy may drift.
-- Source readiness is anchored by `docs/superpowers/reviews/2026-08-29-desktop-owned-session-control-design-review.md`, whose final state is `passed` after the `b7b9d94` support-module repair. Any new `BLOCKER`/`MAJOR` material routes back to specification repair before implementation.
-- The implementation base for every review is `88f2ac5b124abaa2a355ca88304e9439c692eb0a`; documentation commits `da06acf2c229b5e0aa68ff45ab3aa87037aa4d52`, `109adc71ede97073751c4a1693c51652a10d5c90`, and `b7b9d94` are source artifacts, not behavior to reimplement.
+- R0 is based on `918c21773f26aa2e1cb74f193fb95ccccf87de7c`; its expected dirt is exactly this plan, the specification, and both review traces.
+- Before implementation and before every slice, confirm the branch, that `918c217` is an ancestor, merge-base `88f2ac5b124abaa2a355ca88304e9439c692eb0a`, `git status --short`, and `git diff --name-only`.
+- A slice starts only from a clean tree or dirt explicitly limited to that slice. Branch/base drift or unrelated dirt stops for inventory and fresh review; it does not authorize a repair outside the slice.
+- Keep `src/mcp/contract.rs` and `tests/mcp_contract.rs` as the public contract authorities. No tool name, order, title, description, annotation, schema, default, result, error, stage, dispatch evidence, or cross-thread policy may drift.
+- Historical M1-M3 evidence remains context, not behavior to reimplement. The implementation base for every review is `88f2ac5b124abaa2a355ca88304e9439c692eb0a`.
 
 ### Tools and runtime data
 
@@ -55,7 +44,7 @@
 - Verify `/opt/codex-desktop/resources/codex --version` reports `codex-cli 0.150.0-alpha.12.2` before fixture recapture.
 - Native Linux x86-64 (`ubuntu-24.04`) and AArch64 (`ubuntu-24.04-arm`) runners must be available. Cross-compilation is not acceptance evidence.
 - The local plugin compatibility contract uses isolated `HOME` and `CODEX_HOME`; never point packaging tests at the operator's normal Codex state.
-- Live validation may create and mutate only tasks represented by test-only `OwnedThreadId` values already persisted in that run's private ledger.
+- Live validation may create and mutate only disposable tasks durably owned by the fixed private journal.
 
 ### Execution authority
 
@@ -96,23 +85,23 @@
 | 13 | `thread_message_send` resumes the exact persisted `notLoaded` thread on the same connection before `turn/start`. | 5 |
 | 14 | Resume error, malformed result, ID drift, still-unloaded state, and active race send zero prompts. | 5 |
 | 15 | Successful persisted messaging sends the original prompt exactly once through `turn/start`. | 5 |
-| 16 | Canonical full SemVer pins `0.150.0-alpha.12.2`, fixture/schema evidence is recaptured from the exact Desktop binary, and mismatch warnings remain. | 1 |
+| 16 | Canonical full SemVer pins `0.150.0-alpha.12.2`, fixture/schema evidence is recaptured from the exact Desktop binary, and the pure classifier preserves invalid-home failure plus exact/mismatch/unverified warnings. | 1, 3 |
 | 17 | Legacy manifests are exact, forward only the three approved variables, and retain a Codex 0.149.1 v1 negative control. | 9 |
 | 18 | One installer performs a locked release build and atomically stages one regular mode-0755 current-host executable. | 9 |
 | 19 | Static and runtime packaging tests prove no download, checksum catalog, release selector, standalone install, or architecture dispatcher. | 9, 11 |
-| 20 | Both native CI architectures build, inspect, stage, execute, and list tools from their native ELF. | 12 |
+| 20 | The exact Task 17 candidate SHA has two successful named native CI jobs that build, inspect, stage, execute, and list tools from their native ELF. | 12, 17 |
 | 21 | New CLI sessions and Desktop tasks expose the identical 13 tools. | 9, 14 |
 | 22 | A generic client initializes and lists the exact catalog through the stable checkout-relative binary from another cwd, with no Hermes mode. | 9 |
 | 23 | Same-version and version-bump restaging refresh cache content without updater or legacy-state mutation. | 9, 14 |
 | 24 | Manual CLI/Desktop evidence covers install, disable, re-enable, update, removal, and session/task boundaries. | 14 |
 | 25 | Native removal removes registration/tools while retaining the clone and staged binary and making no old-process termination claim. | 9, 14 |
 | 26 | `docs/upgrading.md` contains the implementation-proven five-step 0.3.x cutover and no migration-code claim. | 13, 14 |
-| 27 | The sole ignored live gate exercises all 13 tools only on ledger-owned disposable tasks and archives exactly those IDs after success or recoverable failure. | 15 |
-| 28 | A dedicated whole-implementation inventory justifies or deletes every added module, helper, dependency, installer branch, compatibility path, and test layer. | 19 |
+| 27 | The fixed journal accepts only exact-workspace recovery with the fresh connection's normalized authority-reported home plus exact version, same-connection storage proof, zero mutation on rejection, and local deletion only after exact archive proof. | 15-16 |
+| 28 | Every M4 type, helper, module, and test has its listed current necessity or is deleted. | 15-16, 19 |
 | 29 | Reader-facing files and bug form advertise only current plugin/stdio evidence and no removed CSC command. | 13, 17 |
-| 30 | Fresh `./scripts/check.sh`, specification-compliance, DRY/YAGNI, and code-quality gates pass in that order on the final tree. | 17-20 |
+| 30 | Focused M4 evidence, `./scripts/check.sh`, specification-compliance, DRY/YAGNI/KISS, and code-quality gates pass with fresh evidence; manual normal and hard-kill/recovery gates remain separate. | 16-20 |
 | 31 | The branch is pushed and an internal CSC pull request is open; no merge/tag/release/publish occurs. | 21 |
-| 32 | A fresh resumable Phase 2 creates and reviews its separate Desktop spec/plan, executes it through verification and ordered reviews, and opens an internal-fork PR without official-upstream action. | 22 |
+| 32 | One immutable Phase 2 handoff and the supported runner create/review a generic future Desktop/Hermes seam with no Hermes integration, then open an internal-fork PR without official-upstream action. | 22 |
 
 ## File Structure and Worker Ownership
 
@@ -131,16 +120,14 @@ Route architecture-sensitive endpoint/version discovery and every review to `gpt
 | Deletion worker | Delete `src/install.rs`, `src/install/`, `src/desktop.rs`, `src/desktop/`, `src/cli.rs`, `src/cli_output.rs`, `src/diagnostics.rs`, old service/marketplace assets, `install.sh`, old systemd contract, old CLI tests, and release/publish workflows; modify `src/model.rs` and `src/error.rs`. Provide whole-tree dependency-usage evidence to the version/dependency owner before `Cargo.toml`/`Cargo.lock` pruning. | 11 |
 | CI/check worker | Modify `scripts/check.sh`, `.github/workflows/ci.yml`, and non-version CI/check assertions in `tests/workflow_contract.rs`. Own exactly two native architecture gates and deletion-aware local checks. | 12 |
 | Documentation worker | Create `docs/upgrading.md`; modify `.github/ISSUE_TEMPLATE/bug.yml`, `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `docs/architecture.md`, `docs/desktop.md`, `docs/security.md`, and `docs/troubleshooting.md`. Own current plugin/stdio guidance and the evidence-backed cutover. | 13 |
-| Live-validation worker | Modify `tests/app_server_integration.rs`, `tests/app_server_integration/cases.rs`, and `tests/app_server_integration/live_harness.rs`; delete `tests/app_server_integration/normal_home.rs`, `tests/app_server_integration/normal_home_paths.rs`, and `tests/app_server_integration/protocol_support.rs` after moving only its retained `NativeConnection` seam into `live_harness.rs`. Own the sole ignored all-tool gate, durable ownership ledger, hard-kill recovery, and cleanup proof. | 15 |
-
-`tests/app_server_integration/protocol_support.rs` is an exact deletion target. Move only the existing `NativeConnection` type and correlated request loop into `live_harness.rs`; keep `connect`, `initialize`, and `codexHome` ownership handling implemented in `live_harness.rs` itself.
+| M4 sequential owner | In three non-overlapping slices, own the integration harness, the shared production endpoint/identity seam where required, and one versioned manual runner. Keep the fixed journal, exact recovery, bounded child cleanup, and fixed diagnostics within the specification boundary. | 15-16 |
 
 ### Execution waves
 
 1. Wave A: Task 1, then Task 2, then Task 3. Task 4 reviews the combined foundation.
 2. Wave B: Tasks 5-7 are sequential because they share the client/MCP/process test seam. Task 8 reviews the retained runtime.
 3. Wave C: Task 9 is isolated packaging work. Task 10 reviews it before any old installer or lifecycle evidence is deleted.
-4. Wave D: Task 15 replaces the old live integration root while its source assets still exist; Task 16 reviews that coherent live-safety slice.
+4. Wave D: Tasks 15-16 execute the three M4 slices sequentially while their source assets still exist, with the required intermediate review after Slice 2.
 5. Wave E: Tasks 11-13 then delete obsolete source/assets and update checks/docs; Task 14 reviews the coherent subtractive product and reader surface.
 6. Final: Tasks 17-20 are one ordered whole-tree verification/review chain. Task 21 delivers Phase 1. Task 22 crosses only the phase boundary.
 
@@ -149,9 +136,9 @@ Route architecture-sensitive endpoint/version discovery and every review to `gpt
 - **M1 — Foundation:** Task 4 covers Tasks 1-3 from implementation base through canonical versioning, endpoint security, `/rpc`, and the complete client seam migration. One combined reviewer checks specification compliance first, then DRY/YAGNI pressure, then code quality.
 - **M2 — Retained runtime:** Task 8 covers Tasks 5-7 since M1: persisted resume, direct stdio, restart recovery, wait disconnect, and no replay. One combined reviewer uses the same order.
 - **M3 — Packaging:** Task 10 covers Task 9 only, before old packaging is deleted. It must prove the replacement covers the retained contracts rather than merely matching file shape.
-- **M4 — Live safety:** Task 16 covers Task 15 and its interaction with the retained runtime and package-built executable. The execution waves deliberately run this before lifecycle assets disappear.
+- **M4 — Live safety:** Task 16 reviews the three sequential Task 15 slices against the specification contract and retained runtime/package-built executable before lifecycle assets disappear.
 - **M5 — Subtractive product:** Task 14 covers Tasks 11-13 after M4: lifecycle deletion, dependency pruning, native CI/checks, documentation, and issue form.
-- **Final — Whole implementation:** Tasks 18, 19, and 20 are one mandatory three-pass review over `88f2ac5b124abaa2a355ca88304e9439c692eb0a..HEAD`: dedicated specification compliance, then dedicated DRY/YAGNI, then dedicated code quality. A code change in any final pass resets the chain to Task 17 so the final recorded evidence is ordered `check.sh` -> specification compliance -> DRY/YAGNI -> code quality.
+- **Final — Whole implementation:** Tasks 18, 19, and 20 are one mandatory three-pass review over `88f2ac5b124abaa2a355ca88304e9439c692eb0a..HEAD`: dedicated specification compliance, then dedicated DRY/YAGNI/KISS, then dedicated code quality. A code change in any final pass resets the chain to Task 17 so the final recorded evidence is ordered `check.sh` -> specification compliance -> DRY/YAGNI/KISS -> code quality.
 
 Intermediate reviews are dependency gates, not operator pauses. The orchestrator fixes valid findings, reruns affected evidence, repeats a material review after Critical/Important findings, and continues directly when no material issue remains.
 
@@ -580,7 +567,9 @@ Intermediate reviews are dependency gates, not operator pauses. The orchestrator
   }
   ```
 
-  Define the private real signatures `fn AppServerConnection::new(websocket: ClientWebSocket) -> Self` and `async fn AppServerConnection::initialize(&mut self, product_version: &str, tested_codex_version: &str) -> Result<(), ToolErrorData>` by moving the existing inline connection construction and initialize/initialized exchange without semantic changes. The production `EndpointSource::Desktop` calls `DesktopEndpoint::resolve()` every time. `Fixed` is compiled only for unit tests and still calls fresh metadata validation before every connection. Keep request correlation, timeouts, dispatch-state-before-write, native error mapping, warning text, and existing connection methods unchanged. Replace exact saved-home equality with a requirement that initialize contains a nonempty absolute `codexHome`; malformed or missing `codexHome` remains `TargetUnavailable` at `initialize`. Preserve current user-agent version extraction: an absent/unparseable version becomes the existing `unknown` mismatch warning rather than a new hard failure.
+  Define the private real signatures `fn AppServerConnection::new(websocket: ClientWebSocket) -> Self` and `async fn AppServerConnection::initialize(&mut self, product_version: &str, tested_codex_version: &str) -> Result<(), ToolErrorData>` by moving the existing inline connection construction and initialize/initialized exchange without semantic changes. The production `EndpointSource::Desktop` calls `DesktopEndpoint::resolve()` every time. `Fixed` is compiled only for unit tests and still calls fresh metadata validation before every connection. Keep request correlation, timeouts, dispatch-state-before-write, native error mapping, warning text, and existing connection methods unchanged. Add one pure identity-evidence classifier over this connection's `initialize.result`: home is `Invalid`, `AbsoluteUnnormalized`, or `NormalizedAbsolute`; version is `Exact`, `Mismatch`, or `Unverified`. Production hard-fails only invalid home, accepts both absolute-home variants, and keeps exact/mismatch/unknown warnings unchanged; do not add an expected-home field or another authority source.
+
+  Extend retained transport cases to prove missing/relative home fails, an absolute unnormalized home succeeds, exact version has no warning, mismatch warns, and missing/malformed `userAgent` warns `unknown` while a normal tool succeeds. The conditional policy file is shared as pure source only; endpoint I/O and error adapters stay outside it.
 
 - [ ] **Step 4: Migrate production dispatch and every test call site**
 
@@ -1290,6 +1279,7 @@ Intermediate reviews are dependency gates, not operator pauses. The orchestrator
   fn native_ci_builds_stages_and_executes_both_supported_architectures() {
       let ci = workflow("ci.yml");
       assert_required(&ci, &[
+          "workflow_dispatch", "native-contract (${{ matrix.machine }})",
           "ubuntu-24.04", "ubuntu-24.04-arm", "./scripts/check.sh",
           "cargo build --release --locked",
           "cargo test --locked --test plugin_packaging_contract",
@@ -1333,13 +1323,16 @@ Intermediate reviews are dependency gates, not operator pauses. The orchestrator
   cargo test --workspace --all-features --locked
   ```
 
-  Use one native CI job with an explicit matrix containing `{runner: ubuntu-24.04, machine: X86-64}` and `{runner: ubuntu-24.04-arm, machine: AArch64}`. Each matrix run installs identical prerequisites, installs verified actionlint, runs `./scripts/check.sh`, builds release locked, runs focused installer staging in isolated state, inspects the staged regular mode-0755 ELF with `readelf`, executes the staged binary over stdio, and runs exact catalog coverage. No systemd job or publishing workflow remains.
+  Retain `workflow_dispatch` and one native CI matrix named `native-contract (${{ matrix.machine }})`, with exactly `{runner: ubuntu-24.04, machine: X86-64}` and `{runner: ubuntu-24.04-arm, machine: AArch64}`. Each generated job runs identical acceptance steps: verified actionlint, `./scripts/check.sh`, locked release build, focused isolated installer staging, staged regular mode-0755 ELF inspection, direct stdio execution, and exact catalog coverage. No systemd job or publishing workflow remains.
 
   The matrix and acceptance commands have one shared definition:
 
   ```yaml
+  on:
+    workflow_dispatch:
   jobs:
     native-contract:
+      name: native-contract (${{ matrix.machine }})
       strategy:
         matrix:
           include:
@@ -1499,7 +1492,7 @@ Intermediate reviews are dependency gates, not operator pauses. The orchestrator
   - `docs/desktop.md`: upstream `shared-app-server-socket`, exact environment contract, Plugins UI lifecycle, new-task boundary; no personal fork or attachment descriptor.
   - `docs/security.md`: same-user endpoint predicates, path redaction, no authority ownership, no TCP, no scanning, no legacy state.
   - `docs/troubleshooting.md`: Desktop/socket/plugin visibility/stderr/MCP errors, restaging and new session/task; no status/service commands.
-  - `CONTRIBUTING.md`: exact contract preservation, TDD, native architecture gates, disposable live-task ledger, no service/release assumptions.
+  - `CONTRIBUTING.md`: exact contract preservation, TDD, native architecture gates, disposable live-test safety, no service/release assumptions.
   - `SECURITY.md`: supported source state without inventing a release number; private reporting; redact socket paths, environment values, credentials, and task content.
   - `.github/ISSUE_TEMPLATE/bug.yml`: only evidence available from the plugin-contained product.
 
@@ -1596,420 +1589,181 @@ Intermediate reviews are dependency gates, not operator pauses. The orchestrator
 - [ ] Reject compatibility shims, old-state readers, installer cleanup, release/download remnants, command aliases, global executables, duplicate manifests, unsupported-version claims, guessed cleanup commands, or documentation that promises hot-loading/process termination.
 - [ ] Fix valid findings, rerun affected gates, repeat after Critical/Important findings, and continue only with no material finding.
 
-### Task 15: Failure-Safe Ignored Live All-Tool Ledger
+### Task 15: M4 — Three Sequential TDD Slices
 
-**Owner:** Live-validation worker
-**Files:**
-- Modify: `tests/app_server_integration.rs`
-- Modify: `tests/app_server_integration/cases.rs`
-- Modify: `tests/app_server_integration/live_harness.rs`
-- Delete: `tests/app_server_integration/normal_home.rs`
-- Delete: `tests/app_server_integration/normal_home_paths.rs`
-- Delete: `tests/app_server_integration/protocol_support.rs`
+**Owner:** M4 sequential owner
+**Contract:** Implement only the specification's M4 live-safety contract. The three slices are sequential; no overlapping worker may touch M4 files.
 
-- [ ] **Step 1: Write RED ledger and opt-in contracts before live mutation code**
+- [ ] **Step 1: Establish the M4 budget and shared evidence rule**
 
-  Add nonignored tests named:
+  Add no dependency, trait, actor, transport abstraction, mock server, background monitor, channel protocol, lifecycle framework, workflow engine, or commit parser. Every addition below needs its listed present-tense necessity; delete it when a smaller retained boundary suffices.
 
-  ```rust
-  ledger_persists_each_owned_id_with_file_and_directory_fsync
-  ledger_persists_workspace_before_first_creation
-  live_gate_requires_exact_opt_in_before_mutation
-  recovery_requires_exact_opt_in_and_absolute_ledger
-  cleanup_retains_ledger_until_archive_proof
-  already_archived_exact_ledger_target_skips_archive_and_converges
-  active_exact_ledger_target_archives_once_then_converges
-  invalid_exact_read_evidence_fails_closed_and_retains_ledger
-  ```
+- [ ] **Step 2: Slice 1 — Fixed journal, durable ownership, and exact-workspace recovery**
 
-  Add exactly one ignored test:
+  Authorized files:
 
-  ```rust
-  #[tokio::test]
-  #[ignore = "requires explicit disposable-task opt-in and a live Desktop authority"]
-  async fn live_desktop_authority_all_thirteen_tools_are_disposable()
-      -> Result<(), Box<dyn Error>>
-  {
-      cases::live_desktop_authority_all_thirteen_tools_are_disposable().await
-  }
-  ```
+  - `tests/app_server_integration.rs`
+  - `tests/app_server_integration/cases.rs`
+  - `tests/app_server_integration/live_harness.rs`
 
-  Do not add a compile-fail/source-inspection test for `OwnedThreadId`. Its safety is the typed API itself: every mutating helper accepts `&OwnedThreadId`, construction remains private to durable ledger recording/recovery, and Tasks 16 and 19 inspect that invariant directly. A permanent test layer that merely proves arbitrary strings do not compile would not earn its place.
+  RED first, then minimal GREEN, for these distinct behavioral risks:
 
-- [ ] **Step 2: Run RED without mutating live state**
+  1. `journal_grants_authority_only_after_durable_replace`
+  2. `journal_rejects_unsafe_or_mismatched_authority`
+  3. `live_mode_matrix_is_total_and_recovery_is_fixed_authority`
+  4. `workspace_recovery_validates_all_pages_before_one_journal_write`
+  5. `workspace_pagination_rejects_cycles_and_exhaustion`
 
-  Run:
+  Implement the fixed lock/journal/staging authority, generation/device/inode binding, prospective-ID durability, `Idle -> Active -> CleanupComplete -> Idle`, all-pages atomic exact-workspace recovery, and retryable idempotent local deletion. Run these commands first as RED and again after the minimal implementation as GREEN:
 
-  ```bash
-  cargo test --locked --test app_server_integration ledger_ -- --nocapture
-  cargo test --locked --test app_server_integration live_gate_requires_exact_opt_in_before_mutation -- --exact
-  cargo test --locked --test app_server_integration already_archived_exact_ledger_target_skips_archive_and_converges -- --exact
-  cargo test --locked --test app_server_integration active_exact_ledger_target_archives_once_then_converges -- --exact
-  cargo test --locked --test app_server_integration invalid_exact_read_evidence_fails_closed_and_retains_ledger -- --exact
-  cargo test --locked --test app_server_integration \
-    live_desktop_authority_all_thirteen_tools_are_disposable -- --ignored --exact --nocapture
-  ```
+  RED then GREEN filters: `cargo test --locked --test app_server_integration journal_ -- --nocapture`; `cargo test --locked --test app_server_integration live_mode_matrix_is_total_and_recovery_is_fixed_authority -- --exact`; `cargo test --locked --test app_server_integration workspace_ -- --nocapture`.
 
-  Expected: focused reconciliation contracts fail pre-fix (`already_archived...` expects zero archive calls, `active...` expects one archive then exact-read convergence, `invalid...` expects zero archive plus retained ledger/run dir and no deletion), ledger contracts fail because ledger types are absent, and ignored live test exits before mutation because `CODEX_SESSION_CONTROL_LIVE_ALL_TOOLS` is not exactly `1`.
+  Compile and scope: `cargo test --locked --test app_server_integration --no-run`; `slice1_base=<task15-slice1-base>`.
 
-- [ ] **Step 3: Implement an ownership type and crash-durable ledger**
+  Pre-commit scope proof (tracked/index + untracked, fail-closed): `set -euo pipefail; slice1_changes="$(git diff --name-only "$slice1_base" && git ls-files --others --exclude-standard)"; slice1_allowlist=$'tests/app_server_integration.rs\ntests/app_server_integration/cases.rs\ntests/app_server_integration/live_harness.rs'; slice1_outside=$(comm -23 <(printf '%s\n' "$slice1_changes" | LC_ALL=C sort -u) <(printf '%s\n' "$slice1_allowlist" | LC_ALL=C sort)); if [[ -n "$slice1_outside" ]]; then printf 'Slice 1 scope violation:\n%s\n' "$slice1_outside" >&2; exit 1; fi; git diff --check "$slice1_base"`.
+  Expected: the filters fail in RED and pass in GREEN; compilation succeeds; the path inspection lists only the three authorized files. Then make one ordinary path-scoped Conventional Commit, set `slice1_head=$(git rev-parse HEAD)`, and run `git diff --name-only "$slice1_base..$slice1_head"` plus `git diff --check "$slice1_base..$slice1_head"` to prove this slice.
 
-  Keep ownership construction private to successful create/fork responses already tied to the unique workspace:
+- [ ] **Step 3: Slice 2 — Shared endpoint/identity policy and exact archive reconciliation**
 
-  ```rust
-  #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-  #[serde(transparent)]
-  struct OwnedThreadId(String);
+  Authorized files:
 
-  #[derive(Debug, Deserialize, Serialize)]
-  #[serde(rename_all = "camelCase", deny_unknown_fields)]
-  struct LedgerDocument {
-      workspace: PathBuf,
-      owned_thread_ids: Vec<OwnedThreadId>,
-  }
+  - `src/app_server.rs`
+  - `src/app_server/endpoint.rs`
+  - `src/app_server/endpoint_policy.rs` only if the shared seam earns a file
+  - the three Slice 1 integration files
 
-  struct OwnedThreadLedger {
-      run_dir: PathBuf,
-      path: PathBuf,
-      document: LedgerDocument,
-  }
+  RED first, then minimal GREEN, for these distinct behavioral risks:
 
-  impl OwnedThreadLedger {
-      fn create(run_dir: PathBuf, workspace: PathBuf) -> io::Result<Self> {
-          let path = run_dir.join("owned-thread-ids.json");
-          let ledger = Self {
-              run_dir,
-              path,
-              document: LedgerDocument {
-                  workspace,
-                  owned_thread_ids: Vec::new(),
-              },
-          };
-          ledger.persist()?;
-          Ok(ledger)
-      }
+  6. `archive_classifier_accepts_only_exact_identity_and_storage`
+  7. `archive_reconciliation_dispatches_at_most_once_after_exact_active_read`
+  8. `direct_cleanup_requires_safe_endpoint_and_exact_initialized_identity`
 
-      fn record(&mut self, id: String) -> io::Result<OwnedThreadId> {
-          let owned = OwnedThreadId(id);
-          self.document.owned_thread_ids.push(owned.clone());
-          self.persist()?;
-          Ok(owned)
-      }
+  Conditionally create `src/app_server/endpoint_policy.rs` only for the pure shared classifier. Recovery accepts only `NormalizedAbsolute + Exact` from the same fresh initialized connection; storage classification uses that connection's authority-reported home, structural/unverified evidence is `identity_unverified`, normalized mismatch is `version_unsupported`, structural/unverified wins, and rejection retains authority with zero enumeration/read/archive/local-cleanup mutation. Test 6 table-covers all home/version evidence and exact active/archived path shapes; test 8 proves each rejection code and zero list/read/archive/local-cleanup mutation.
 
-      fn persist(&self) -> io::Result<()> {
-          let bytes = serde_json::to_vec(&self.document).map_err(io::Error::other)?;
-          atomic_write_fsync(&self.path, bytes)
-      }
-  }
+  Run these commands first as RED and again after the minimal implementation as GREEN:
 
-  fn atomic_write_fsync(path: &Path, bytes: Vec<u8>) -> io::Result<()> {
-      let parent = path.parent().ok_or_else(|| io::Error::other("ledger has no parent"))?;
-      let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-      staged.as_file_mut().set_permissions(fs::Permissions::from_mode(0o600))?;
-      staged.write_all(&bytes)?;
-      staged.as_file_mut().sync_all()?;
-      staged.persist(path).map_err(|error| error.error)?;
-      File::open(parent)?.sync_all()
-  }
-  ```
+  RED then GREEN filters: `cargo test --locked --test app_server_integration archive_classifier_accepts_only_exact_identity_and_storage -- --exact`; `cargo test --locked --test app_server_integration archive_reconciliation_dispatches_at_most_once_after_exact_active_read -- --exact`; `cargo test --locked --test app_server_integration direct_cleanup_requires_safe_endpoint_and_exact_initialized_identity -- --exact`.
 
-  Create `/tmp/codex-session-control-live-*` mode `0700`; create the new random workspace, prove it is absent from active and archived lists, and durably write its exact path plus an empty ID list to `owned-thread-ids.json` before the first create. Every later write uses a same-directory temporary regular file, file `fsync`, atomic rename, and parent-directory `fsync`. Every mutating helper accepts `&OwnedThreadId`, never `&str`. Never infer ownership from title, timestamp, `/tmp` scan, or global before/after diff.
+  Compile and scope: `cargo test --locked --test app_server_integration --no-run`; `slice2_base=<task15-slice2-base>`.
 
-- [ ] **Step 4: Drive the built CSC binary and implement unconditional cleanup**
+  Pre-commit scope proof (tracked/index + untracked, optional seam path, fail-closed): `set -euo pipefail; slice2_changes="$(git diff --name-only "$slice2_base" && git ls-files --others --exclude-standard)"; slice2_allowlist=$'src/app_server.rs\nsrc/app_server/endpoint.rs\ntests/app_server_integration.rs\ntests/app_server_integration/cases.rs\ntests/app_server_integration/live_harness.rs'; if printf '%s\n' "$slice2_changes" | grep -qx 'src/app_server/endpoint_policy.rs'; then slice2_allowlist="${slice2_allowlist}"$'\nsrc/app_server/endpoint_policy.rs'; fi; slice2_outside=$(comm -23 <(printf '%s\n' "$slice2_changes" | LC_ALL=C sort -u) <(printf '%s\n' "$slice2_allowlist" | LC_ALL=C sort)); if [[ -n "$slice2_outside" ]]; then printf 'Slice 2 scope violation:\n%s\n' "$slice2_outside" >&2; exit 1; fi; git diff --check "$slice2_base"`.
+  Expected: the filters fail in RED and pass in GREEN; compilation succeeds; the path inspection lists only authorized Slice 2 files. Then make one ordinary path-scoped Conventional Commit, set `slice2_head=$(git rev-parse HEAD)`, and run `git diff --name-only "$slice2_base..$slice2_head"` plus `git diff --check "$slice2_base..$slice2_head"` to prove this slice.
 
-  Before mutation require exact opt-in, a production-valid endpoint, supported initialized version, and a new random workspace absent from both active and archived lists. Spawn `target/debug/codex-session-control` over stdio MCP, assert exact catalog, then exercise every tool on ledger-owned tasks: create, fork, list, read, wait, message, title, goal get/set/pause/resume/clear, and interrupt.
+- [ ] **Step 4: Slice 3 — Child containment, bounded I/O, fixed codes, and manual runner**
 
-  Structure cleanup outside the operation result so both errors and panics reach the same cleanup boundary:
+  Authorized files:
 
-  ```rust
-  let run_result = AssertUnwindSafe(run_all_thirteen_tools(&mut harness, &mut ledger))
-      .catch_unwind()
-      .await;
-  let cleanup_result = async {
-      harness.stop_and_reap_mcp_child().await?;
-      ledger.recover_exact_workspace_ids(&mut harness).await?;
-      harness.archive_and_verify(&ledger.document.owned_thread_ids).await
-  }.await;
-  match cleanup_result {
-      Ok(()) => ledger.remove_proven_clean_run_dir()?,
-      Err(error) => return Err(ledger.cleanup_failure(error).into()),
-  }
-  match run_result {
-      Ok(result) => result,
-      Err(payload) => std::panic::resume_unwind(payload),
-  }
-  ```
+  - the three integration files
+  - `scripts/ci/live-all-tools-proof.sh` (new)
+  - `scripts/ci/disposable-systemd-user-contract.sh` only to remove stale live invocations or align compilation before its later planned deletion
 
-  `recover_exact_workspace_ids` reads the exact workspace path durably stored in the ledger before mutation, queries only that workspace, records any create/fork result lost between native acceptance and response handling through the same atomic ledger path, and never searches titles, timestamps, other workspaces, or global diffs. `archive_and_verify` opens a fresh `/rpc` native connection, exact-reads each ledger ID, validates the returned ID, and classifies storage by initialized `codexHome` subtree (`sessions` or `archived_sessions`) only. It skips already-archived IDs, archives only IDs proven active, and then polls exact-read until each target is classified archived. If an exact read is missing, reports a mismatched ID, or yields unclassifiable storage, cleanup fails closed and reports the exact ledger path with remaining IDs. `thread/list` remains an ownership-recovery helper only; it cannot prove archive state for preview-empty threads.
+  RED first, then minimal GREEN, for these distinct behavioral risks:
 
-  Hard-kill recovery is a separate entry branch and requires both:
+  9. `child_is_owned_immediately_and_every_exit_path_reaps`
+  10. `child_timeout_kills_and_confirms_reap`
+  11. `deadline_scopes_are_bounded_and_do_not_extend_each_other`
+  12. `live_codes_are_the_only_output_and_cleanup_has_precedence`
 
-  ```rust
-  let opted_in = std::env::var_os("CODEX_SESSION_CONTROL_LIVE_ALL_TOOLS")
-      .as_deref() == Some(OsStr::new("1"));
-  let recovery_ledger = std::env::var_os("CODEX_SESSION_CONTROL_LIVE_RECOVER_LEDGER")
-      .map(PathBuf::from)
-      .filter(|path| path.is_absolute())
-      .filter(|path| path.file_name() == Some(OsStr::new("owned-thread-ids.json")));
-  if !opted_in || recovery_ledger.is_none() {
-      return Err("hard-kill recovery requires exact opt-in and an absolute ledger path".into());
-  }
-  ```
+  Contain the child from spawn through confirmed reap, bound startup/request/framing/shutdown/reap, preserve one non-extensible cleanup budget, render only fixed `LiveCode` tokens, retain one ignored thirteen-tool gate, and add the runner's non-live `--self-test`. Run these commands first as RED and again after the minimal implementation as GREEN:
 
-  Move only the current direct native seam into `live_harness.rs` before deleting its old module:
+  RED then GREEN filters: `cargo test --locked --test app_server_integration child_ -- --nocapture`; `cargo test --locked --test app_server_integration deadline_scopes_are_bounded_and_do_not_extend_each_other -- --exact`; `cargo test --locked --test app_server_integration live_codes_are_the_only_output_and_cleanup_has_precedence -- --exact`.
 
-  ```rust
-  type NativeWebSocket = WebSocketStream<UnixStream>;
+  Compile, self-test, and scope: `cargo test --locked --test app_server_integration --no-run`; `./scripts/ci/live-all-tools-proof.sh --self-test`; `slice3_base=<task15-slice3-base>`.
 
-  pub(super) struct NativeConnection {
-      websocket: NativeWebSocket,
-      next_id: u64,
-      codex_home: Option<PathBuf>,
-  }
+  Pre-commit scope proof (tracked/index + untracked, optional stale-script path, fail-closed): `set -euo pipefail; slice3_changes="$(git diff --name-only "$slice3_base" && git ls-files --others --exclude-standard)"; slice3_allowlist=$'tests/app_server_integration.rs\ntests/app_server_integration/cases.rs\ntests/app_server_integration/live_harness.rs\nscripts/ci/live-all-tools-proof.sh'; if printf '%s\n' "$slice3_changes" | grep -qx 'scripts/ci/disposable-systemd-user-contract.sh'; then slice3_allowlist="${slice3_allowlist}"$'\nscripts/ci/disposable-systemd-user-contract.sh'; fi; slice3_outside=$(comm -23 <(printf '%s\n' "$slice3_changes" | LC_ALL=C sort -u) <(printf '%s\n' "$slice3_allowlist" | LC_ALL=C sort)); if [[ -n "$slice3_outside" ]]; then printf 'Slice 3 scope violation:\n%s\n' "$slice3_outside" >&2; exit 1; fi; git diff --check "$slice3_base"`.
+  Expected: the filters fail in RED and pass in GREEN; compilation and the non-live self-test succeed; the path inspection lists only authorized Slice 3 files. Then make one ordinary path-scoped Conventional Commit, set `slice3_head=$(git rev-parse HEAD)`, and run `git diff --name-only "$slice3_base..$slice3_head"` plus `git diff --check "$slice3_base..$slice3_head"` to prove this slice.
 
-  impl NativeConnection {
-      async fn connect(socket: &Path) -> Result<Self, Box<dyn Error>> {
-          let stream = UnixStream::connect(socket).await?;
-          let (websocket, _) = client_async("ws://localhost/rpc", stream).await?;
-          Ok(Self {
-              websocket,
-              next_id: 1,
-              codex_home: None,
-          })
-      }
+  The runner self-test is a mode, not another Rust test. The ignored-gate name is retained, not added. No additional M4-focused test name is allowed unless an existing one is removed or consolidated after proving a distinct uncovered regression.
 
-      pub(super) async fn initialize(&mut self) -> Result<(), Box<dyn Error>> {
-          let initialized = self
-              .request(
-                  "initialize",
-                  json!({
-                      "clientInfo": {
-                          "name": "codex_session_control_live_test",
-                          "title": "Codex Session Control Live Test",
-                          "version": env!("CARGO_PKG_VERSION"),
-                      },
-                      "capabilities": {
-                          "experimentalApi": true,
-                          "mcpServerOpenaiFormElicitation": false,
-                          "requestAttestation": false,
-                          "optOutNotificationMethods": [],
-                      },
-                  }),
-              )
-              .await?;
-          let codex_home = initialized
-              .get("codexHome")
-              .and_then(Value::as_str)
-              .filter(|home| Path::new(home).is_absolute())
-              .map(PathBuf::from)
-              .ok_or_else(|| io::Error::other("initialize omitted an absolute Codex home"))?;
-          let user_agent = initialized
-              .get("userAgent")
-              .and_then(Value::as_str)
-              .ok_or_else(|| io::Error::other("initialize omitted a user agent"))?;
-          if !has_supported_codex_version(user_agent) {
-              return Err(
-                  io::Error::other("Desktop authority is not on the supported version").into(),
-              );
-          }
-          self.codex_home = Some(codex_home);
-          self.websocket
-              .send(Message::text(json!({"method": "initialized"}).to_string()))
-              .await?;
-          Ok(())
-      }
+- [ ] **Step 5: Keep the named construct budget**
 
-      pub(super) fn initialized_codex_home(&self) -> Option<&Path> {
-          self.codex_home.as_deref()
-      }
+  | Type | Current necessity |
+  | --- | --- |
+  | `RecoveryJournal` | It is the single owner of fixed locking, durable transitions, and owned-ID authority. |
+  | `JournalState` | It closes the serialized `Idle`, `Active`, and `CleanupComplete` states with generation checks. |
+  | `CleanupBudget` | It prevents serial cleanup or recovery work from extending one monotonic deadline. |
+  | `OwnedMcpChild` | It retains process ownership from spawn through confirmed reap on every exit path. |
+  | `LiveCode` | It is the sole renderer for the fixed public output boundary. |
+  | Conditional shared endpoint/identity error | It exists only if existing typed errors cannot share a pure production/harness policy without raw errors. |
 
-      pub(super) async fn request(
-          &mut self,
-          method: &str,
-          params: impl serde::Serialize,
-      ) -> Result<Value, Box<dyn Error>> {
-          let id = self.next_id;
-          self.next_id += 1;
-          self.websocket
-              .send(Message::text(
-                  json!({"id": id, "method": method, "params": params}).to_string(),
-              ))
-              .await?;
-          tokio::time::timeout(Duration::from_secs(10), async {
-              loop {
-                  let frame = self
-                      .websocket
-                      .next()
-                      .await
-                      .ok_or_else(|| io::Error::other("app-server disconnected"))?
-                      .map_err(io::Error::other)?;
-                  let Message::Text(text) = frame else {
-                      continue;
-                  };
-                  let value: Value = serde_json::from_str(text.as_str())?;
-                  if value.get("id").and_then(Value::as_u64) != Some(id) {
-                      continue;
-                  }
-                  if let Some(error) = value.get("error") {
-                      return Err(io::Error::other(format!("{method} failed: {error}")));
-                  }
-                  return value
-                      .get("result")
-                      .cloned()
-                      .ok_or_else(|| io::Error::other(format!("{method} omitted result")));
-              }
-          })
-          .await
-          .map_err(|_| io::Error::other(format!("{method} timed out")))?
-          .map_err(Into::into)
-      }
-  }
-  ```
+  | Helper responsibility | Current necessity |
+  | --- | --- |
+  | Strict journal open/update | It centralizes descriptor-relative validation and crash-durable replacement for the one authority. |
+  | Complete workspace-page validation | It prevents a partial page result from granting ownership or archive authority. |
+  | Exact storage classification | It turns one exact native read into an active, archived, or rejected decision. |
+  | Archive action | It enforces zero dispatch for archived proof and one dispatch after exact active proof. |
+  | Shared endpoint/identity validation | It prevents harness authority selection or initialization checks from drifting from production. |
+  | Shutdown-and-reap | It funnels every child exit path through bounded confirmed ownership release. |
+  | Fixed diagnostic emission | It prevents any alternative renderer from exposing runtime values. |
 
-  `initialized_codex_home()` is the only storage-root accessor. Exact storage classification is in `exact_thread_storage` in `tests/app_server_integration/cases.rs`: it validates returned `thread.id` equality, strips and classifies by the first normalized path component under initialized `codexHome` as `sessions` or `archived_sessions`, rejects any non-normal remainder and nested storage markers, and requires at least one rollout-relative component before classification.
+### Task 16: M4 Review and Manual Evidence
 
-  This is the current 10-second correlated-result loop moved intact: it ignores notifications and unrelated IDs, returns the exact matching result, surfaces the matching native error, and fails on EOF/timeout. Remove `mod protocol_support;` and delete `tests/app_server_integration/protocol_support.rs`; do not retain its fake `ResponsesEndpoint`, TCP provider, fake authority, service/process ownership, normal-home, remote CLI, or projection helpers.
+**Covers:** the three Task 15 slices
+**Review contract:** the specification's M4 live-safety contract
 
-- [ ] **Step 5: Run nonmutating focused GREEN/PASS commands and compile the ignored gate**
-
-  Run:
-
-  ```bash
-  cargo test --locked --test app_server_integration ledger_ -- --nocapture
-  cargo test --locked --test app_server_integration already_archived_exact_ledger_target_skips_archive_and_converges -- --exact
-  cargo test --locked --test app_server_integration active_exact_ledger_target_archives_once_then_converges -- --exact
-  cargo test --locked --test app_server_integration invalid_exact_read_evidence_fails_closed_and_retains_ledger -- --exact
-  cargo test --locked --test app_server_integration live_gate_requires_exact_opt_in_before_mutation -- --exact
-  cargo test --locked --test app_server_integration recovery_requires_exact_opt_in_and_absolute_ledger -- --exact
-  cargo test --locked --test app_server_integration --no-run
-  ```
-
-  Expected: nonignored safety tests PASS with exact behaviors: already-archived path does not archive; active path archives once then converges via exact read; invalid read path dispatches zero archive, retains ledger and run dir, and does not authorize deletion; ignored live gate compiles and no live task is created.
-
-- [ ] **Step 6: Run the authorized live gate**
-
-  Run only after the Desktop/manual prerequisite and exact empty-workspace preflight:
-
-  ```bash
-  CODEX_SESSION_CONTROL_LIVE_ALL_TOOLS=1 \
-  cargo test --locked --test app_server_integration \
-    live_desktop_authority_all_thirteen_tools_are_disposable \
-    -- --ignored --exact --nocapture --test-threads=1
-  ```
-
-  Expected: PASS; exact 13 tools exercised; every created/forked ID durably recorded before later mutation; MCP child reaped; ledger IDs archived; run directory deleted only after proof. On failure, preserve the printed ledger path and remaining IDs. Recovery uses the same command plus `CODEX_SESSION_CONTROL_LIVE_RECOVER_LEDGER=/absolute/path/owned-thread-ids.json`; it never scans.
-
-- [ ] **Step 7: Commit**
-
-  ```bash
-  git add -A -- tests/app_server_integration.rs tests/app_server_integration/cases.rs \
-    tests/app_server_integration/live_harness.rs \
-    tests/app_server_integration/normal_home.rs \
-    tests/app_server_integration/normal_home_paths.rs \
-    tests/app_server_integration/protocol_support.rs
-  git commit -m "test(live): ledger all disposable tool targets"
-  ```
-
-### Task 16: Review Milestone M4 — Live Safety
-
-**Covers:** Task 15
-**Review contract:** `## Review Milestones` -> `M4`
-
-- [ ] Dispatch one combined reviewer over Task 15; check exact live-safety specification first, then DRY/YAGNI, then code quality.
-- [ ] Require a path-by-path proof for opt-in before mutation, empty unique workspace, atomic/fsynced record-before-use, `OwnedThreadId` compile-time boundary, exact 13-tool exercise, child stop/reap before cleanup, fresh native exact-ID active/archived reconciliation with idempotence, retained ledger on failure, and two-variable hard-kill recovery.
-- [ ] Reject any global scan, title/timestamp ownership, untyped mutating target, pre-existing task mutation, cleanup-by-diff, automatic ledger deletion on failed cleanup, or second ignored live end-to-end gate.
-- [ ] Fix valid findings, rerun all nonmutating safety tests and the live gate when its behavior changed, repeat after Critical/Important findings, and continue only with no material finding.
+- [ ] After Slices 1-2, review their exact commits: specification compliance first, then DRY/YAGNI/KISS for speculative generality, overengineering, and accidental complexity, then code quality. Fix valid findings in ordinary path-scoped commits and rerun affected evidence; do not create review-only commits.
+- [ ] Verify every added construct against Task 15's necessity table. Delete any construct with a smaller contract-preserving alternative.
+- [ ] Re-run every exact Task 15 focused filter in M4 sequence before any manual proof:
+  - Slice 1 filters: `cargo test --locked --test app_server_integration journal_ -- --nocapture`; `cargo test --locked --test app_server_integration live_mode_matrix_is_total_and_recovery_is_fixed_authority -- --exact`; `cargo test --locked --test app_server_integration workspace_ -- --nocapture`.
+  - Slice 2 filters: `cargo test --locked --test app_server_integration archive_classifier_accepts_only_exact_identity_and_storage -- --exact`; `cargo test --locked --test app_server_integration archive_reconciliation_dispatches_at_most_once_after_exact_active_read -- --exact`; `cargo test --locked --test app_server_integration direct_cleanup_requires_safe_endpoint_and_exact_initialized_identity -- --exact`.
+  - Slice 3 filters: `cargo test --locked --test app_server_integration child_ -- --nocapture`; `cargo test --locked --test app_server_integration deadline_scopes_are_bounded_and_do_not_extend_each_other -- --exact`; `cargo test --locked --test app_server_integration live_codes_are_the_only_output_and_cleanup_has_precedence -- --exact`.
+  - `cargo test --locked --test app_server_integration --no-run`
+  - `./scripts/ci/live-all-tools-proof.sh --self-test`
+- Slice scope proofs (record concrete SHAs): `set -euo pipefail; slice1_base=<task15-slice1-base>; slice1_head=<task15-slice1-head>; slice1_changes="$(git diff --name-only "$slice1_base..$slice1_head" && git ls-files --others --exclude-standard)"; slice1_allowlist=$'tests/app_server_integration.rs\ntests/app_server_integration/cases.rs\ntests/app_server_integration/live_harness.rs'; slice1_outside=$(comm -23 <(printf '%s\n' "$slice1_changes" | LC_ALL=C sort -u) <(printf '%s\n' "$slice1_allowlist" | LC_ALL=C sort)); if [[ -n "$slice1_outside" ]]; then printf 'Slice 1 scope violation:\n%s\n' "$slice1_outside" >&2; exit 1; fi; git diff --check "$slice1_base..$slice1_head"`; `set -euo pipefail; slice2_base=<task15-slice2-base>; slice2_head=<task15-slice2-head>; slice2_changes="$(git diff --name-only "$slice2_base..$slice2_head" && git ls-files --others --exclude-standard)"; slice2_allowlist=$'src/app_server.rs\nsrc/app_server/endpoint.rs\ntests/app_server_integration.rs\ntests/app_server_integration/cases.rs\ntests/app_server_integration/live_harness.rs'; if printf '%s\n' "$slice2_changes" | grep -qx 'src/app_server/endpoint_policy.rs'; then slice2_allowlist="${slice2_allowlist}"$'\nsrc/app_server/endpoint_policy.rs'; fi; slice2_outside=$(comm -23 <(printf '%s\n' "$slice2_changes" | LC_ALL=C sort -u) <(printf '%s\n' "$slice2_allowlist" | LC_ALL=C sort)); if [[ -n "$slice2_outside" ]]; then printf 'Slice 2 scope violation:\n%s\n' "$slice2_outside" >&2; exit 1; fi; git diff --check "$slice2_base..$slice2_head"`; `set -euo pipefail; slice3_base=<task15-slice3-base>; slice3_head=<task15-slice3-head>; slice3_changes="$(git diff --name-only "$slice3_base..$slice3_head" && git ls-files --others --exclude-standard)"; slice3_allowlist=$'tests/app_server_integration.rs\ntests/app_server_integration/cases.rs\ntests/app_server_integration/live_harness.rs\nscripts/ci/live-all-tools-proof.sh'; if printf '%s\n' "$slice3_changes" | grep -qx 'scripts/ci/disposable-systemd-user-contract.sh'; then slice3_allowlist="${slice3_allowlist}"$'\nscripts/ci/disposable-systemd-user-contract.sh'; fi; slice3_outside=$(comm -23 <(printf '%s\n' "$slice3_changes" | LC_ALL=C sort -u) <(printf '%s\n' "$slice3_allowlist" | LC_ALL=C sort)); if [[ -n "$slice3_outside" ]]; then printf 'Slice 3 scope violation:\n%s\n' "$slice3_outside" >&2; exit 1; fi; git diff --check "$slice3_base..$slice3_head"`; printf 'Expected: all scope checks pass\n'
+- [ ] Run `./scripts/check.sh` and require exit `0`.
+- [ ] **[MANUAL]** Only with separate explicit authority and an already-running supported Desktop, run `./scripts/ci/live-all-tools-proof.sh`. Expected: exit `0` after normal proof, hard-kill/recovery proof, exact archive proof, complete local cleanup, and final `Idle`; neither manual gate is implied by the self-test.
+- [ ] Review specification compliance, DRY/YAGNI/KISS, and code quality in that order. Any change invalidates affected evidence and every later review. M4 remains incomplete if either manual proof is missing or fails.
 
 ### Task 17: Fresh Whole-Tree Verification
 
-**Owner:** Primary orchestrator; workers may run bounded commands and write raw output to `/tmp/csc-phase1-verification/`, but the orchestrator alone judges integration.
-**Files:** No production edits; fixes return to the owning task and receive a path-scoped commit.
+**Owner:** Primary orchestrator
+**Files:** No production edits; a defect returns to its owning task for a path-scoped Conventional Commit.
 
-- [ ] Run `git fetch origin main`, then re-run the exact branch/base/clean gate. Clean means no unrelated dirt; tracked implementation changes must already be committed. If the fetched merge-base differs from `88f2ac5b124abaa2a355ca88304e9439c692eb0a`, stop for target inventory and source re-review.
-- [ ] Run focused gates in the specification's order:
-
-  ```bash
-  cargo test --locked --bin codex-session-control app_server::endpoint::tests::
-  cargo test --locked --bin codex-session-control app_server::tests::transport::websocket_upgrade_uses_exact_rpc_path -- --exact
-  cargo test --locked --bin codex-session-control app_server::tests::transport::
-  cargo test --locked --bin codex-session-control mcp::tests::mutation_mapping::not_loaded_message_
-  cargo test --locked --bin codex-session-control mcp::tests::outcome_unknown::
-  cargo test --locked --test workflow_contract tested_codex_version -- --nocapture
-  cargo test --locked --test mcp_contract public_catalog_is_exact -- --exact
-  cargo test --locked --test desktop_shared_socket_contract
-  cargo test --locked --test plugin_packaging_contract
-  ```
-
-  Expected: every command PASS.
-- [ ] Run deletion and reader-surface evidence:
+- [ ] Complete local evidence on the committed candidate:
 
   ```bash
-  for path in \
-    src/install.rs src/install src/desktop.rs src/desktop \
-    src/cli.rs src/cli_output.rs src/diagnostics.rs \
-    assets/systemd/codex-session-control.service.in assets/marketplace \
-    install.sh scripts/ci/disposable-systemd-user-contract.sh \
-    tests/cli_contract.rs tests/cli_contract \
-    tests/app_server_integration/normal_home.rs \
-    tests/app_server_integration/normal_home_paths.rs \
-    tests/app_server_integration/protocol_support.rs \
-    .github/workflows/release.yml .github/workflows/publish.yml
-  do
-    test ! -e "$path"
-  done
-  rg -n \
-    'codex-session-control (setup|status|enable|disable|update|uninstall|codex|mcp-server)|external-app-server-attachment|app-server-attachment\.json|codex-session-control\.service' \
-    README.md CONTRIBUTING.md SECURITY.md docs/architecture.md docs/desktop.md \
-    docs/security.md docs/troubleshooting.md docs/upgrading.md .github/ISSUE_TEMPLATE
-  ```
-
-  Expected: absence loop exits `0`; search returns only explicitly historical cleanup text in `docs/upgrading.md`.
-- [ ] Run canonical full checks last:
-
-  ```bash
-  git diff --check origin/main...HEAD
+  git fetch origin main
+  test "$(git remote get-url origin)" = git@github-agent:agentlehub/codex-session-control.git
+  test "$(git branch --show-current)" = feat/desktop-owned-session-control
+  test "$(git merge-base HEAD origin/main)" = 88f2ac5b124abaa2a355ca88304e9439c692eb0a
+  test -z "$(git status --porcelain)"
+  git log --oneline origin/main..HEAD
+  git diff --name-status 88f2ac5b124abaa2a355ca88304e9439c692eb0a..HEAD
+  git diff --check 88f2ac5b124abaa2a355ca88304e9439c692eb0a..HEAD
   ./scripts/check.sh
   ```
 
-  Expected: both exit `0`, including format, shell, manifest, actionlint, clippy `-D warnings`, and all locked tests.
-- [ ] Push the committed candidate normally to the internal feature branch and dispatch the native workflow before final review:
+  Expected: every command exits `0`; rerun the exact Task 15 filters, `cargo test --locked --test app_server_integration --no-run`, and runner `--self-test` before the full check.
+
+- [ ] Capture the exact candidate SHA, normally push the existing feature branch to designated internal `origin`, and bind one manually dispatched CI run:
 
   ```bash
+  candidate="$(git rev-parse HEAD)"
   git push --set-upstream origin feat/desktop-owned-session-control
-  candidate_sha="$(git rev-parse HEAD)"
-  gh workflow run ci.yml --repo agentlehub/codex-session-control \
-    --ref feat/desktop-owned-session-control
-  run_id=
-  for attempt in 1 2 3 4 5 6 7 8 9 10; do
-    run_id="$(gh run list --repo agentlehub/codex-session-control \
-      --workflow ci.yml --branch feat/desktop-owned-session-control \
-      --event workflow_dispatch --limit 1 --json databaseId,headSha \
-      --jq ".[] | select(.headSha == \"$candidate_sha\") | .databaseId")"
-    test -z "$run_id" || break
-    sleep 2
-  done
-  test -n "$run_id"
-  gh run watch "$run_id" --repo agentlehub/codex-session-control --exit-status
-  gh run view "$run_id" --repo agentlehub/codex-session-control \
-    --json url,headSha,jobs
+  test "$(git ls-remote --heads origin refs/heads/feat/desktop-owned-session-control | awk '{print $1}')" = "$candidate"
+  run_url="$(gh workflow run ci.yml --repo agentlehub/codex-session-control --ref feat/desktop-owned-session-control)"
+  case "$run_url" in "https://github.com/agentlehub/codex-session-control/actions/runs/"[0-9]*) ;; *) exit 1 ;; esac
+  run_id="$(basename "$run_url")"
+  gh run watch "$run_id" --repo agentlehub/codex-session-control --interval 10 --exit-status
+  gh run view "$run_id" --repo agentlehub/codex-session-control --json event,headBranch,headSha,status,conclusion,jobs,url | jq -e --arg candidate "$candidate" '(.event == "workflow_dispatch") and (.headBranch == "feat/desktop-owned-session-control") and (.headSha == $candidate) and (.status == "completed") and (.conclusion == "success") and ([.jobs[] | {name,status,conclusion}] | sort_by(.name)) == ([{name:"native-contract (AArch64)",status:"completed",conclusion:"success"},{name:"native-contract (X86-64)",status:"completed",conclusion:"success"}] | sort_by(.name))'
   ```
 
-  Expected: normal push and workflow dispatch succeed; the run's `headSha` equals the candidate SHA; native x86-64 and AArch64 jobs are green. Record the run URL, job evidence, and exact SHA for the pull request Verification section; do not accept cross-compile evidence.
-- [ ] If any command or CI job fails, return to its owning task, diagnose root cause before editing, add/retain the narrow regression, commit the targeted fix, and restart Task 17 from the top. Do not enter final review with stale evidence.
+  Expected: one returned URL/ID, the exact candidate branch/SHA, and exactly the two successful stable native jobs. Record that candidate and run ID for Tasks 18-21; if no URL/ID is returned, stop and never select a latest run. The operator-designated internal repository is public, so this candidate branch is publicly visible; it is not official-upstream or release publication.
 
+- [ ] A tracked repair invalidates its hosted evidence and every later review: make one narrow commit, restart this task with a new normal push and dispatch, then repeat Tasks 18-20 in order. Do not force-push, merge, tag, release, publish, or contact official upstream.
 ### Task 18: Final Whole-Implementation Review Pass 1 — Specification Compliance
 
 **Covers:** All implementation tasks from `88f2ac5b124abaa2a355ca88304e9439c692eb0a` through current `HEAD`
 **Review contract:** `## Review Milestones` -> `Final`
 
-- [ ] Dispatch one dedicated specification-compliance reviewer. Give it the approved spec, linked spec review trace, this plan, full diff, commit list, focused/full verification output, hosted native CI evidence, manual lifecycle evidence, and live ledger evidence.
+- [ ] Dispatch one dedicated specification-compliance reviewer for the exact Task 17 candidate SHA. Give it the approved spec, linked spec review trace, this plan, full diff, commit list, focused/full verification output, Task 17 hosted native CI evidence, manual lifecycle evidence, and M4 live evidence.
 - [ ] Require a numbered verdict against all 32 acceptance criteria and explicit inspection of rejected architectures: no CSC authority/lifecycle, no fallback/scanning/TCP, no contract drift, no mutation replay, no v1 manifest, no standalone distribution, no attached-CLI code, and no external publication.
 - [ ] A missing requirement, scope addition, contradiction, unproven manual gate, or Critical/Important finding blocks the pass. Fix valid findings, rerun Task 17, and repeat this review.
 - [ ] Save the final concise report at `/tmp/csc-phase1-spec-compliance.md` for transfer into the internal PR evidence. Mark this task complete only on PASS.
 
-### Task 19: Final Whole-Implementation Review Pass 2 — Dedicated DRY/YAGNI
+### Task 19: Final Whole-Implementation Review Pass 2 — Dedicated DRY/YAGNI/KISS
 
-**Covers:** The same whole implementation, only after Task 18 passes
+**Covers:** The same exact Task 17 candidate, only after Task 18 passes
 **Review contract:** `## Review Milestones` -> `Final`
 
 - [ ] Dispatch a different reviewer with one required inventory table containing every added production module, production helper, dependency/build-dependency/dev-dependency, installer branch, compatibility path, test module/helper/layer, manifest source, and CI branch.
@@ -2024,42 +1778,41 @@ Intermediate reviews are dependency gates, not operator pauses. The orchestrator
     src Cargo.toml scripts/install-local-plugin.sh tests
   ```
 
-- [ ] Delete redundant abstraction, speculative extension point, duplicate manifest/config authority, unused fallback, equivalent test permutation, release-era compatibility, and test layer justified only by count/coverage. Test count or changed LOC is never a keep reason.
+- [ ] Apply KISS with a deletion bias: delete speculative generality, overengineering, accidental complexity, redundant abstraction, duplicate authority, unused fallback, equivalent test permutation, release-era compatibility, and tests justified only by count/coverage.
 - [ ] Any accepted deletion or code change resets the final chain: commit path-scoped, rerun Task 17, rerun Task 18, then repeat Task 19. Save the final PASS report at `/tmp/csc-phase1-dry-yagni.md`.
 
 ### Task 20: Final Whole-Implementation Review Pass 3 — Code Quality
 
-**Covers:** The same whole implementation, only after Tasks 18 and 19 pass
+**Covers:** The same exact Task 17 candidate, only after Tasks 18 and 19 pass
 **Review contract:** `## Review Milestones` -> `Final`
 
 - [ ] Dispatch a third reviewer for correctness, readability, error attribution/redaction, race safety, Unix metadata semantics, async/process cleanup, shell quoting/atomicity, test stability, CI determinism, and polished documentation. It must not reopen approved product decisions without contradictory evidence.
-- [ ] Fix every valid Critical/Important finding and valid Minor finding. A code or documentation change resets the chain to Task 17 so specification and DRY/YAGNI pass again before code quality is repeated.
+- [ ] Fix every valid Critical/Important finding and valid Minor finding. A code or documentation change resets the chain to Task 17 so specification and DRY/YAGNI/KISS pass again before code quality is repeated.
 - [ ] Save the final PASS report at `/tmp/csc-phase1-code-quality.md`.
 - [ ] Mark the final milestone complete only when the final tree has fresh evidence in exact order: `./scripts/check.sh` PASS, Task 18 PASS, Task 19 PASS, Task 20 PASS.
 
-### Task 21: Push the Branch and Open the Internal CSC Pull Request
+### Task 21: Revalidate the Candidate and Open the Internal CSC Pull Request
 
 **Owner:** Primary orchestrator
 **Files:** `.github/PULL_REQUEST_TEMPLATE.md` is read-only input; do not modify it.
 
-- [ ] Verify exact delivery target and final state:
+- [ ] Revalidate the Task 17-recorded candidate/run ID, exact delivery target, and final state without selecting a latest run:
 
   ```bash
-  git fetch origin main
-  git remote get-url origin
   test "$(git remote get-url origin)" = git@github-agent:agentlehub/codex-session-control.git
   test "$(git branch --show-current)" = feat/desktop-owned-session-control
   test "$(git merge-base HEAD origin/main)" = 88f2ac5b124abaa2a355ca88304e9439c692eb0a
   test -z "$(git status --short)"
-  git log --oneline origin/main..HEAD
+  test "$(git rev-parse HEAD)" = "$candidate"
+  test "$(git ls-remote --heads origin refs/heads/feat/desktop-owned-session-control | awk '{print $1}')" = "$candidate"
+  gh run view "$run_id" --repo agentlehub/codex-session-control --json event,headBranch,headSha,status,conclusion,jobs,url
   ```
 
-  Expected: internal origin, exact branch/base, clean tree, scoped Conventional Commits.
+  Expected: the internal bindings, remote branch, exact hosted run, and all three review reports name the same candidate SHA. Do not push again on this unchanged success path.
 - [ ] Build `/tmp/csc-phase1-pr.md` using every section and checklist item from `.github/PULL_REQUEST_TEMPLATE.md`. Summary explains Desktop authority ownership and deletion-oriented architecture; Verification includes fresh focused/full/native/manual/live/review evidence; Impact includes the five-step upgrade and Phase 2 follow-up; no credentials, task data, full socket paths, or environment values.
-- [ ] Push normally and create the internal PR:
+- [ ] Create the internal PR without a second push:
 
   ```bash
-  git push --set-upstream origin feat/desktop-owned-session-control
   gh pr create \
     --repo agentlehub/codex-session-control \
     --base main \
@@ -2068,31 +1821,28 @@ Intermediate reviews are dependency gates, not operator pauses. The orchestrator
     --body-file /tmp/csc-phase1-pr.md
   ```
 
-  Expected: normal push succeeds; `gh` returns an internal CSC PR URL.
-- [ ] Inspect the created PR and hosted checks with `gh pr view --json url,baseRefName,headRefName,commits,statusCheckRollup`. Repair the branch and update the same PR only through another normal push if a hosted check exposes a real defect. Any tracked code, test, configuration, workflow, or documentation change after Task 20 resets the final chain: rerun Task 17, then Tasks 18-20 in order, before pushing the repair.
+  Expected: `gh` returns an internal CSC PR URL.
+- [ ] Inspect the created PR and its merge-ref checks with `gh pr view --json url,baseRefName,headRefName,commits,statusCheckRollup`; they are delivery checks, not a replacement for Task 17's exact-candidate native proof. A tracked defect resets Task 17, then Tasks 18-20 in order, before the resulting normal repair push.
 - [ ] Stop Phase 1 with the internal PR open. Do not merge, force-push, tag, release, publish, or update a registry.
 
-### Task 22: Launch and Complete the Resumable Phase 2 Desktop Workstream
+### Task 22: Start the Phase 2 Desktop Workstream
 
-**Owner:** Primary orchestrator launches; autonomous fresh-session executor completes
+**Owner:** Primary orchestrator launches; a fresh autonomous session owns Desktop delivery.
 **Files:** No CSC production/test changes and no Desktop code in this task.
 
-- [ ] Validate the Desktop checkout read-only before writing the handoff or autonomous ledger. The known baseline is repository root `/home/korty/dev/codex-desktop-linux`, branch `main`, current base `bd610e96e87bda672f384c79ce5bb87ea0d5a6ee`, `origin=https://github.com/ilysenko/codex-desktop-linux.git`, `fork=https://github.com/kortylokai-web/codex-desktop-linux.git`, and exactly one pre-existing status entry: untracked `_experiments/`. Fetch both remotes, inspect upstream drift, shared-socket implementation, and internal-fork reachability, then choose and record the reviewed current base for the Phase 2 branch. A changed upstream SHA is not automatically a blocker, but it requires a fresh target/source inventory before branching. A path/remote mismatch or any unexpected dirt is a prerequisite failure, not authority to use another checkout silently.
-
-  `_experiments/` is user-owned protected residue: require that it remains an untracked real directory, never read it broadly, and never add, modify, delete, move, clean, or commit it. `.autonomous/` is currently not ignored; after validation, treat only `.autonomous/csc-attached-cli-internal-pr/` as runner-owned local residue. Never stage or commit either path, never use broad `git add -A`, and exclude both paths when judging Phase 2 source dirt. Any other untracked or tracked change stops the runner for classification.
-- [ ] Only after that gate passes, record the internal CSC PR URL, exact head SHA, final verification/review evidence, approved decisions, protected-residue rules, and the fact that Phase 1 is unmerged in `/home/korty/dev/codex-desktop-linux/.autonomous/csc-attached-cli-internal-pr/phase-1-handoff.md`. Create this file with `apply_patch`; it contains no credentials, environment values, task content, or full socket paths.
-- [ ] Use the `autonomous-skill` runner from the validated Desktop checkout to create a durable fresh-session ledger and auto-continue until the mission checklist is complete:
+- [ ] Start only after the internal CSC PR exists. Read-only validate `/home/korty/dev/codex-desktop-linux` and its physical Git root, `main`, reviewed base `bd610e96e87bda672f384c79ce5bb87ea0d5a6ee`, official `origin=https://github.com/ilysenko/codex-desktop-linux.git`, internal `fork=https://github.com/kortylokai-web/codex-desktop-linux.git`, and source dirt. The only allowed dirt is protected `_experiments/`, unrelated `.autonomous` sibling task state, and the owned runner task state; a base, path, remote, branch, or other dirt mismatch stops for fresh review.
+- [ ] Treat untracked real non-symlink `_experiments/` and all allowed `.autonomous` task state as opaque protected residue. Do not inspect either broadly or add, modify, delete, move, clean, or commit it; never stage `_experiments/` or `.autonomous/`, and do not create a worktree.
+- [ ] Create exactly one immutable `.autonomous/csc-attached-cli-internal-pr/phase-1-handoff.md` with `apply_patch`. Record the CSC PR URL and exact head SHA, Desktop boundary, allowed-dirt/protected-residue rule, generic future Desktop/Hermes seam with no Hermes integration, mission/non-goals, fresh brainstorming/specification/plan requirement, ordered verification/reviews, internal-fork-only delivery, and no official-upstream action. It is self-contained human context, not executable authority.
+- [ ] Start only through the supported runner:
 
   ```bash
   cd /home/korty/dev/codex-desktop-linux
   ~/.codex/skills/autonomous-skill/scripts/run-session.sh \
-    --task-name csc-attached-cli-internal-pr \
-    --network \
-    "Read .autonomous/csc-attached-cli-internal-pr/phase-1-handoff.md. Complete the attached-CLI enhancement end to end against this checkout only. Use this existing checkout directly; do not create a worktree. Treat _experiments/ as opaque user-owned residue and never read it broadly or add, modify, delete, move, clean, or commit it. Never stage or commit .autonomous/. First use superpowers:brainstorming, then superpowers:writing-specs, then superpowers:writing-plans; independently review and approve the spec and plan under the operator's preauthorized autonomous decision set. Then execute the approved plan with TDD and subagent-driven development, verify current source and hosted checks, run final reviews in strict order: specification compliance, dedicated DRY/YAGNI, code quality. Push a normal feature branch and open a pull request only against this repository's validated internal fork remote. Do not merge, force-push, tag, release, publish, contact official upstream, or alter the unmerged CSC pull request. Mark the autonomous task complete only when the internal Desktop PR exists and its URL, exact head SHA, verification, and three ordered review results are recorded in progress.md."
+    --task-name csc-attached-cli-internal-pr --network \
+    "Read .autonomous/csc-attached-cli-internal-pr/phase-1-handoff.md and execute it exactly."
   ```
 
-  The runner owns `.autonomous/csc-attached-cli-internal-pr/task_list.md`, `progress.md`, `session.id`, and `session.log`. Its initializer must include explicit checklist items for repository/remote/branch gates, approved spec, approved TDD-ready plan, implementation, fresh verification, specification review, dedicated DRY/YAGNI inventory/deletion pass, code-quality review, normal push, and internal-fork PR inspection. The primary orchestrator waits for runner completion and reads those four files plus the created PR; it does not treat initializer or planning completion as mission completion.
-- [ ] If the runner or host is interrupted, resume the exact ledger/session instead of initializing another task:
+- [ ] Resume only through the supported runner:
 
   ```bash
   cd /home/korty/dev/codex-desktop-linux
@@ -2101,13 +1851,13 @@ Intermediate reviews are dependency gates, not operator pauses. The orchestrator
     --continue --resume-last --network
   ```
 
-- [ ] Phase 2 must create/review its own Desktop specification and plan before Desktop code, then execute that plan through the internal Desktop `fork` PR. Do not write Desktop implementation code in the CSC checkout or this Phase 1 plan. Do not open an official-upstream issue, proposal, or PR without later explicit authorization.
+- [ ] If the runner rejects or cannot resume its own state, stop. Do not parse, reconstruct, repair, or constrain its internals and do not replace it with a repository-specific controller. The Desktop workstream owns its fresh brainstorming, reviewed specification, TDD-ready plan, implementation, tests, ordered reviews, normal internal-fork push, and internal PR; it must not merge or contact official upstream.
 
 ## Verification
 
 Completion requires one coherent evidence set for the final tree:
 
-1. Repository gate: exact branch, merge-base `88f2ac5b124abaa2a355ca88304e9439c692eb0a`, approved design ancestor, clean state.
+1. Repository gate: exact branch, `918c217` ancestry, merge-base `88f2ac5b124abaa2a355ca88304e9439c692eb0a`, clean or explicitly scoped slice state.
 2. Version gate: canonical full-SemVer tables, exact `0.150.0-alpha.12.2` pin, generated README marker, fixture captured from `/opt/codex-desktop/resources/codex`.
 3. Runtime gate: endpoint predicate suite, exact `/rpc`, complete client call-site migration, persisted resume, restart recovery, in-flight wait failure, and no-replay suites.
 4. Public process gate: direct no-argument stdio, exactly 13 tools, MCP-only stdout, stderr diagnostics, no child processes, EOF exit.
@@ -2115,8 +1865,8 @@ Completion requires one coherent evidence set for the final tree:
 6. Deletion gate: every obsolete path absent, no legacy source symbols/commands, dependency tree pruned from evidence rather than guesswork.
 7. Native gate: x86-64 and AArch64 hosted jobs each run full checks, build release, stage and inspect native ELF, execute it, and list the exact catalog.
 8. Reader gate: five-step verified upgrade, current plugin/stdio guidance, available bug evidence, no removed current command.
-9. Live gate: exact opt-in, private fsynced ledger, `OwnedThreadId`, all 13 tools, cleanup proof, retained ledger on failure, explicit hard-kill recovery.
-10. Final order: `git diff --check` -> `./scripts/check.sh` -> specification compliance -> dedicated DRY/YAGNI -> code quality.
+9. Live gate: exact mode matrix, fixed private journal, all 13 tools, fresh connect-only recovery, exact archive proof, bounded child reap, fixed codes, and separate normal plus hard-kill/recovery proof.
+10. Final order: local checks -> exact-SHA native CI -> specification compliance -> dedicated DRY/YAGNI/KISS -> code quality.
 11. Delivery gate: clean normal push and internal CSC PR only; no merge, force-push, tag, release, publish, registry, or official-upstream action.
 
 No result from before the final change counts as completion evidence.
