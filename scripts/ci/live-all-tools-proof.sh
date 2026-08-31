@@ -25,6 +25,8 @@ test_pgid=
 leader_reaped=0
 test_status=
 ownership_failure=0
+cleanup_failure_code=
+cleanup_failure_reported=0
 
 readonly term_grace_seconds=2
 readonly reap_grace_seconds=3
@@ -233,36 +235,47 @@ kill_owned_group_and_wait() {
 }
 
 cleanup_capture() {
-  local capture_cleanup_failed=0
+  if [[ -n "$cleanup_failure_code" ]]; then
+    return 1
+  fi
   if ! cleanup_owned_test; then
     ownership_failure=1
+    cleanup_failure_code=child_reap_failed
+    if [[ "$cleanup_failure_reported" -eq 0 ]]; then
+      printf '%s\n' "$cleanup_failure_code" >&2
+      cleanup_failure_reported=1
+    fi
+    return 1
   fi
   if [[ -n "$capture_root" ]] &&
     [[ "$capture_root" == "${TMPDIR:-/tmp}"/codex-session-control-live-proof.* ]] &&
     [[ -d "$capture_root" ]]; then
     if ! rm -rf -- "$capture_root" 2>/dev/null; then
-      capture_cleanup_failed=1
+      cleanup_failure_code=cleanup_failed
+      if [[ "$cleanup_failure_reported" -eq 0 ]]; then
+        printf '%s\n' "$cleanup_failure_code" >&2
+        cleanup_failure_reported=1
+      fi
+      return 1
     fi
   fi
   capture_root=
   private_wait_capture=/dev/null
-  if [[ "$capture_cleanup_failed" -ne 0 ]]; then
-    printf '%s\n' cleanup_failed >&2
-    return 1
-  fi
 }
 
-handle_signal() {
+finalize() {
   local status="$1"
   trap - EXIT HUP INT TERM
-  cleanup_capture
+  if ! cleanup_capture; then
+    exit 1
+  fi
   exit "$status"
 }
 
-trap cleanup_capture EXIT
-trap 'handle_signal 129' HUP
-trap 'handle_signal 130' INT
-trap 'handle_signal 143' TERM
+trap 'finalize "$?"' EXIT
+trap 'finalize 129' HUP
+trap 'finalize 130' INT
+trap 'finalize 143' TERM
 
 capture_setup_failed() {
   if ! cleanup_capture; then
@@ -367,7 +380,7 @@ assert_private_wait_and_group_cleanup_for_self_test() {
   test_leader=$!
   test_pgid="$test_leader"
   leader_reaped=0
-  wait_until_group_exists "$test_pgid" "$((SECONDS + 1))"
+  wait_until_group_exists "$test_pgid" "$((SECONDS + reap_grace_seconds))"
   killed_leader="$test_leader"
   killed_pgid="$test_pgid"
   kill_owned_group_and_wait >"$public_capture" 2>&1
@@ -393,10 +406,10 @@ assert_private_wait_and_group_cleanup_for_self_test() {
   test_leader=$!
   test_pgid="$test_leader"
   leader_reaped=0
-  wait_until_group_exists "$test_pgid" "$((SECONDS + 1))"
+  wait_until_group_exists "$test_pgid" "$((SECONDS + reap_grace_seconds))" || return 1
   cleanup_leader="$test_leader"
   cleanup_pgid="$test_pgid"
-  cleanup_owned_test >"$public_capture" 2>&1
+  cleanup_owned_test >"$public_capture" 2>&1 || return 1
   [[ -z "$test_leader" && -z "$test_pgid" ]]
   if grep -Fq "$cleanup_leader" "$public_capture"; then
     return 1
@@ -533,9 +546,13 @@ probe_capture_cleanup_failure_for_self_test() {
   local cleanup_target="$1"
   local saved_capture_root="$capture_root"
   local saved_private_wait_capture="$private_wait_capture"
+  local saved_cleanup_failure_code="$cleanup_failure_code"
+  local saved_cleanup_failure_reported="$cleanup_failure_reported"
   local status
   capture_root="$cleanup_target"
   private_wait_capture=/dev/null
+  cleanup_failure_code=
+  cleanup_failure_reported=0
   rm() {
     printf 'raw rm diagnostic for %s\n' "$*" >&2
     return 1
@@ -548,6 +565,8 @@ probe_capture_cleanup_failure_for_self_test() {
   unset -f rm
   capture_root="$saved_capture_root"
   private_wait_capture="$saved_private_wait_capture"
+  cleanup_failure_code="$saved_cleanup_failure_code"
+  cleanup_failure_reported="$saved_cleanup_failure_reported"
   return "$status"
 }
 
@@ -619,6 +638,77 @@ assert_runtime_journal_preflight_for_self_test() {
   [[ ! -s "$stderr_capture" ]]
 }
 
+run_failed_finalizer_context_for_self_test() {
+  local context="$1"
+  capture_root="$2"
+  private_wait_capture="$3"
+  test_leader=424242
+  test_pgid=424242
+  leader_reaped=0
+  ownership_failure=0
+  cleanup_failure_code=
+  cleanup_failure_reported=0
+  # shellcheck disable=SC2317
+  cleanup_owned_test() {
+    printf 'private path=%s pid=%s command=%s\n' \
+      "$capture_root" "$test_leader" 'sleep 30' >>"$private_wait_capture"
+    return 1
+  }
+  trap 'finalize "$?"' EXIT
+  trap 'finalize 143' TERM
+  case "$context" in
+    exit) exit 23 ;;
+    signal)
+      kill -TERM "$BASHPID"
+      exit 99
+      ;;
+  esac
+}
+
+assert_trap_finalizer_failure_for_self_test() {
+  local self_root="$1"
+  local context retained_root private_evidence stdout_capture stderr_capture status
+
+  for context in exit signal; do
+    retained_root="$self_root/finalizer-$context"
+    private_evidence="$retained_root/private-wait"
+    stdout_capture="$self_root/finalizer-$context.stdout"
+    stderr_capture="$self_root/finalizer-$context.stderr"
+    if ! mkdir -m 0700 "$retained_root" 2>/dev/null; then
+      printf '%s\n' tool_failed >&2
+      return 1
+    fi
+    new_capture_file "$private_evidence"
+    new_capture_file "$stdout_capture"
+    new_capture_file "$stderr_capture"
+
+    if (
+      run_failed_finalizer_context_for_self_test \
+        "$context" "$retained_root" "$private_evidence"
+    ) >"$stdout_capture" 2>"$stderr_capture"; then
+      status=0
+    else
+      status=$?
+    fi
+
+    [[ "$status" -eq 1 ]]
+    [[ ! -s "$stdout_capture" ]]
+    [[ "$(<"$stderr_capture")" == child_reap_failed ]]
+    [[ -d "$retained_root" ]]
+    [[ -s "$private_evidence" ]]
+    if grep -Fq "$retained_root" "$stderr_capture" ||
+      grep -Fq 424242 "$stderr_capture" ||
+      grep -Fq 'sleep 30' "$stderr_capture"; then
+      return 1
+    fi
+    if ! rm -rf -- "$retained_root" 2>/dev/null; then
+      printf '%s\n' cleanup_failed >&2
+      return 1
+    fi
+    [[ ! -e "$retained_root" ]]
+  done
+}
+
 run_self_test() {
   local self_root capture
   new_capture_root
@@ -632,6 +722,7 @@ run_self_test() {
   assert_live_mode_environment_for_self_test "$self_root"
   assert_capture_failure_boundaries_for_self_test "$self_root"
   assert_runtime_journal_preflight_for_self_test "$self_root"
+  assert_trap_finalizer_failure_for_self_test "$self_root"
   assert_hard_kill_helper_fail_fast_for_self_test "$self_root"
   assert_private_wait_and_group_cleanup_for_self_test "$self_root"
   cleanup_capture
