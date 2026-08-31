@@ -1197,30 +1197,19 @@ assert_startup_environment_is_sanitized_for_self_test() {
   local capture="$self_root/startup-environment.capture"
   local startup_hook="$self_root/startup-environment-hook"
   local runner="${BASH_SOURCE[0]}"
-  local status
   new_capture_file "$capture"
   new_capture_file "$startup_hook"
   # shellcheck disable=SC2016
   printf '%s\n' \
     'printf "startup_sentinel=%s\n" "${BASH_ENV-absent}" >&2' >"$startup_hook"
-  if /usr/bin/env \
+  /usr/bin/env \
     _CSC_LIVE_SELF_TEST_CHILD=1 \
     BASH_ENV="$startup_hook" \
     ENV="$startup_hook" \
     SHELLOPTS=xtrace \
     BASHOPTS=extdebug \
-    "$runner" --self-test >"$capture" 2>&1; then
-    status=0
-  else
-    status=$?
-  fi
-  [[ "$status" -eq 0 ]]
+    "$runner" --self-test >"$capture" 2>&1 || return 1
   [[ "$(<"$capture")" == self_test_status=0 ]]
-  if grep -Fq startup_sentinel "$capture" ||
-    grep -Fq "$self_root" "$capture" ||
-    grep -Eq '^\+' "$capture"; then
-    return 1
-  fi
 }
 
 run_self_test() {
