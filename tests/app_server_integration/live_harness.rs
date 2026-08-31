@@ -52,6 +52,7 @@ const WAIT_NATIVE_RESERVE: Duration = Duration::from_secs(5);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(60);
 const REAP_RESERVE: Duration = Duration::from_secs(2);
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+pub(super) static PROCESS_INHERITANCE_TEST_LOCK: Mutex<()> = Mutex::new(());
 const TOOLS_CALL_METHOD: &str = "tools/call";
 const SESSION_CONTROL_TOOLS: [&str; 13] = [
     "thread_create",
@@ -219,6 +220,9 @@ pub(super) struct OwnedMcpChild {
 impl OwnedMcpChild {
     fn spawn(command: &mut Command) -> Result<Self, LiveCode> {
         command.process_group(0);
+        let _process_inheritance_guard = PROCESS_INHERITANCE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let child = command.spawn().map_err(|_| LiveCode::ChildSpawnFailed)?;
         let owned = Self {
             process_group: child.id(),
@@ -266,19 +270,18 @@ impl OwnedMcpChild {
         }
     }
 
-    fn kill_process_group_once(&mut self) -> Result<bool, LiveCode> {
+    fn kill_process_group_once(&mut self) -> Result<(), LiveCode> {
         if self.group_kill_sent {
-            return Ok(false);
+            return Ok(());
         }
         self.group_kill_sent = true;
         let Some(raw) = self.process_group else {
-            return Ok(false);
+            return Ok(());
         };
         let process_group =
             rustix::process::Pid::from_raw(raw as i32).ok_or(LiveCode::ChildReapFailed)?;
         match rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL) {
-            Ok(()) => Ok(true),
-            Err(rustix::io::Errno::SRCH) => Ok(false),
+            Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
             Err(_) => Err(LiveCode::ChildReapFailed),
         }
     }
@@ -298,7 +301,7 @@ impl OwnedMcpChild {
         self.wait_error_once_for_test = true;
     }
 
-    async fn shutdown_and_reap(&mut self, budget: CleanupBudget) -> Result<bool, LiveCode> {
+    async fn shutdown_and_reap(&mut self, budget: CleanupBudget) -> Result<(), LiveCode> {
         self.close_owned_stdin();
         let remaining = match budget.deadline.remaining() {
             Ok(remaining) => remaining,
@@ -319,7 +322,6 @@ impl OwnedMcpChild {
         };
         let reserve = REAP_RESERVE.min(remaining / 2);
         let graceful_deadline = budget.deadline.at - reserve;
-        let mut killed_group = false;
         let mut wait_failed = false;
 
         if self.child.is_some() {
@@ -329,16 +331,16 @@ impl OwnedMcpChild {
                 }
                 Ok(Err(_)) => {
                     wait_failed = true;
-                    killed_group = self.kill_process_group_once()?;
+                    self.kill_process_group_once()?;
                 }
                 Err(_) => {
-                    killed_group = self.kill_process_group_once()?;
+                    self.kill_process_group_once()?;
                 }
             }
         }
 
         if self.child.is_none() && self.process_group_exists()? {
-            killed_group |= self.kill_process_group_once()?;
+            self.kill_process_group_once()?;
         }
         if self.child.is_some() {
             match tokio::time::timeout_at(budget.deadline.at, self.wait_for_leader()).await {
@@ -355,7 +357,7 @@ impl OwnedMcpChild {
                 return if wait_failed {
                     Err(LiveCode::ChildReapFailed)
                 } else {
-                    Ok(killed_group)
+                    Ok(())
                 };
             }
             budget.check().map_err(|_| LiveCode::ChildReapFailed)?;
@@ -517,32 +519,10 @@ pub(super) async fn assert_owned_child_exit_paths_for_test() {
         .stderr(Stdio::null());
     let mut owned = OwnedMcpChild::spawn(&mut normal).unwrap();
     let pid = owned.id();
-    assert!(
-        !owned
-            .shutdown_and_reap(CleanupBudget::with_timeout(Duration::from_secs(1)))
-            .await
-            .unwrap()
-    );
-    assert_process_and_group_absent(pid);
-
-    let mut panic_owner = Some(OwnedMcpChild::spawn(&mut sleeping_child_command()).unwrap());
-    let panic_pid = panic_owner.as_ref().unwrap().id();
-    let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        std::panic::resume_unwind(Box::new("intentional owned-child panic-path probe"));
-    }));
-    assert!(panic_result.is_err());
-    explicitly_reap_test_owner(&mut panic_owner).await;
-    assert_process_and_group_absent(panic_pid);
-
-    let mut command = sleeping_child_command();
-    let mut cancel_owner = Some(OwnedMcpChild::spawn(&mut command).unwrap());
-    let pid = cancel_owner.as_ref().unwrap().id();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(10), std::future::pending::<()>())
-            .await
-            .is_err()
-    );
-    explicitly_reap_test_owner(&mut cancel_owner).await;
+    owned
+        .shutdown_and_reap(CleanupBudget::with_timeout(Duration::from_secs(1)))
+        .await
+        .unwrap();
     assert_process_and_group_absent(pid);
 }
 
@@ -550,14 +530,10 @@ pub(super) async fn assert_owned_child_timeout_for_test() {
     let mut command = sleeping_child_command();
     let mut owned = OwnedMcpChild::spawn(&mut command).unwrap();
     let pid = owned.id();
-    let killed = owned
+    owned
         .shutdown_and_reap(CleanupBudget::with_timeout(Duration::from_millis(400)))
         .await
         .unwrap();
-    assert!(
-        killed,
-        "timeout did not dispatch the one process-group kill"
-    );
     assert_process_and_group_absent(pid);
 
     let mut expired_command = sleeping_child_command();

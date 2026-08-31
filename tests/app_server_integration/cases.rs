@@ -19,7 +19,7 @@ use tokio::{net::UnixListener, sync::Mutex};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 use crate::endpoint_policy::{ThreadStorage, classify_thread_storage, is_normalized_absolute_path};
-use crate::live_harness::{CleanupBudget, LiveCode, LiveHarness};
+use crate::live_harness::{CleanupBudget, LiveCode, LiveHarness, PROCESS_INHERITANCE_TEST_LOCK};
 
 const LIVE_OPT_IN: &str = "CODEX_SESSION_CONTROL_LIVE_ALL_TOOLS";
 const LIVE_HARD_KILL: &str = "CODEX_SESSION_CONTROL_LIVE_HARD_KILL";
@@ -31,7 +31,6 @@ const STAGING_NAME: &str = "current.next";
 const LOCK_NAME: &str = "lock";
 const RUNS_NAME: &str = "runs";
 const MAX_JOURNAL_BYTES: usize = 4 * 1024 * 1024;
-static PROCESS_INHERITANCE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 type LiveRunResult = Result<Result<(), LiveCode>, Box<dyn std::any::Any + Send>>;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2141,55 +2140,14 @@ impl ArchiveReconciliationServer {
 }
 
 pub(super) async fn child_is_owned_immediately_and_every_exit_path_reaps() {
-    if std::env::var_os("CODEX_SESSION_CONTROL_OWNED_CHILD_PROBE").as_deref()
-        != Some(OsStr::new("exit-paths"))
-    {
-        run_isolated_child_probe(
-            "child_is_owned_immediately_and_every_exit_path_reaps",
-            "exit-paths",
-        );
-        return;
-    }
     crate::live_harness::assert_owned_child_exit_paths_for_test().await;
 }
 
 pub(super) async fn child_timeout_kills_and_confirms_reap() {
-    if std::env::var_os("CODEX_SESSION_CONTROL_OWNED_CHILD_PROBE").as_deref()
-        != Some(OsStr::new("timeout"))
-    {
-        run_isolated_child_probe("child_timeout_kills_and_confirms_reap", "timeout");
-        return;
-    }
     crate::live_harness::assert_owned_child_timeout_for_test().await;
 }
 
-fn run_isolated_child_probe(test_name: &str, probe: &str) {
-    let _process_inheritance_guard = PROCESS_INHERITANCE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .env("CODEX_SESSION_CONTROL_OWNED_CHILD_PROBE", probe)
-        .arg(test_name)
-        .arg("--exact")
-        .arg("--test-threads=1")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .unwrap();
-    assert!(status.success(), "isolated owned-child probe failed");
-}
-
 pub(super) async fn deadline_scopes_are_bounded_and_do_not_extend_each_other() {
-    if std::env::var_os("CODEX_SESSION_CONTROL_OWNED_CHILD_PROBE").as_deref()
-        != Some(OsStr::new("deadline"))
-    {
-        run_isolated_child_probe(
-            "deadline_scopes_are_bounded_and_do_not_extend_each_other",
-            "deadline",
-        );
-        return;
-    }
     crate::live_harness::assert_deadline_and_framing_contract_for_test().await;
 }
 

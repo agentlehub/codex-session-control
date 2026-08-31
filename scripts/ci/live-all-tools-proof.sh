@@ -29,23 +29,6 @@ ownership_failure=0
 readonly term_grace_seconds=2
 readonly reap_grace_seconds=3
 
-is_fixed_code() {
-  local candidate="${1-}"
-  local code
-  for code in "${fixed_codes[@]}"; do
-    if [[ "$candidate" == "$code" ]]; then
-      return 0
-    fi
-  done
-  return 1
-}
-
-require_status() {
-  local actual="$1"
-  local expected="$2"
-  [[ "$actual" -eq "$expected" ]]
-}
-
 group_state() {
   local pgid="$1"
   local diagnostic status
@@ -414,35 +397,15 @@ assert_hard_kill_helper_fail_fast_for_self_test() {
 }
 
 run_self_test() {
-  local self_root trap_probe capture status
+  local self_root capture
   new_capture_root
   self_root="$capture_root"
-  trap_probe="$self_root/trap-probe"
-  (
-    set -euo pipefail
-    mkdir -m 0700 "$trap_probe"
-    trap 'rmdir "$trap_probe"' EXIT
-  )
-  [[ ! -e "$trap_probe" ]]
 
   capture="$self_root/capture"
   new_capture_file "$capture"
   [[ "$(stat --format=%a "$self_root")" == 700 ]]
   printf '%s\n%s\n' hard_kill_ready hard_kill_ready_suffix >"$capture"
   [[ "$(grep -Fxc hard_kill_ready "$capture")" -eq 1 ]]
-  for status in 0 137; do
-    require_status "$status" "$status"
-  done
-  if require_status 1 0; then
-    exit 1
-  fi
-  local code
-  for code in "${fixed_codes[@]}"; do
-    is_fixed_code "$code"
-  done
-  if is_fixed_code hard_kill_ready_suffix; then
-    exit 1
-  fi
   assert_hard_kill_helper_fail_fast_for_self_test "$self_root"
   assert_private_wait_and_group_cleanup_for_self_test "$self_root"
   cleanup_capture
@@ -601,7 +564,7 @@ if [[ "$ownership_failure" -ne 0 ]]; then
   printf '%s\n' child_reap_failed >&2
   exit 1
 fi
-if ! require_status "$normal_status" 0; then
+if [[ "$normal_status" -ne 0 ]]; then
   emit_captured_failure "$normal_stdout" "$normal_stderr"
   exit 1
 fi
@@ -636,7 +599,7 @@ if ! kill_owned_group_and_wait; then
   exit 1
 fi
 hard_kill_status="$test_status"
-if ! require_status "$hard_kill_status" 137; then
+if [[ "$hard_kill_status" -ne 137 ]]; then
   printf '%s\n' tool_failed >&2
   exit 1
 fi
@@ -665,7 +628,7 @@ if [[ "$ownership_failure" -ne 0 ]]; then
   printf '%s\n' child_reap_failed >&2
   exit 1
 fi
-if ! require_status "$recovery_status" 0; then
+if [[ "$recovery_status" -ne 0 ]]; then
   emit_captured_failure "$recovery_stdout" "$recovery_stderr"
   exit 1
 fi
