@@ -305,6 +305,74 @@ record_failure() {
   pending_failure_code="$1"
 }
 
+wait_for_test_inner() {
+  local leader="$test_leader"
+  local state
+  ownership_failure=0
+  while true; do
+    if [[ -s "$test_status_path" ]]; then
+      break
+    fi
+    if leader_is_waitable "$leader"; then
+      state=0
+    else
+      state=$?
+    fi
+    case "$state" in
+      0) break ;;
+      1) sleep 0.05 || {
+        ownership_failure=1
+        return
+      } ;;
+      *)
+        reap_absent_anchor || ownership_failure=1
+        return
+        ;;
+    esac
+  done
+  cleanup_owned_test_inner || ownership_failure=1
+}
+
+wait_for_test() {
+  {
+    wait_for_test_inner >>"$private_wait_capture" 2>&1
+  } 2>/dev/null
+}
+
+record_captured_failure() {
+  local stdout_path="$1"
+  local stderr_path="$2"
+  local code
+  for code in "${fixed_codes[@]}"; do
+    if grep -Fxq "$code" "$stdout_path" "$stderr_path" 2>/dev/null; then
+      record_failure "$code"
+      return
+    fi
+  done
+  record_failure tool_failed
+}
+
+wait_for_hard_kill_ready() {
+  local deadline="$1"
+  until grep -Fxq hard_kill_ready "$hard_kill_stdout"; do
+    if [[ -s "$test_status_path" ]] || leader_anchor_is_absent "$hard_kill_leader"; then
+      wait_for_test
+      hard_kill_status="$test_status"
+      if [[ "$ownership_failure" -ne 0 ]]; then
+        record_failure child_reap_failed
+      else
+        record_captured_failure "$hard_kill_stdout" "$hard_kill_stderr"
+      fi
+      return 1
+    fi
+    if ((SECONDS >= deadline)); then
+      record_failure deadline_exceeded
+      return 1
+    fi
+    sleep 0.1
+  done
+}
+
 cleanup_capture() {
   if [[ -n "$cleanup_failure_code" ]]; then
     return 1
@@ -773,6 +841,43 @@ assert_hard_kill_helper_fail_fast_for_self_test() {
   [[ ! -s "$public_capture" ]]
 }
 
+assert_hard_kill_early_failure_for_self_test() {
+  local self_root="$1"
+  local stdout_path="$self_root/early-hard-kill.stdout"
+  local stderr_path="$self_root/early-hard-kill.stderr"
+  local status_path="$stdout_path.status"
+  local deadline helper_status leader
+  local test_leader='' test_pgid='' test_status='' test_status_path=''
+  local ownership_failure=0 pending_failure_code='' hard_kill_status=''
+  local hard_kill_stdout="$stdout_path" hard_kill_stderr="$stderr_path"
+  local hard_kill_leader
+  new_capture_file "$stdout_path"
+  new_capture_file "$stderr_path"
+  new_capture_file "$status_path"
+  spawn_owned_anchor \
+    "$stdout_path" "$stderr_path" "$status_path" \
+    /bin/sh -c 'printf "tool_failed\n" >&2; exit 23'
+  leader="$test_leader"
+  hard_kill_leader="$leader"
+  deadline=$((SECONDS + 1))
+  if wait_for_hard_kill_ready "$deadline"; then
+    helper_status=0
+  else
+    helper_status=$?
+  fi
+  if [[ -n "$test_leader" ]]; then
+    cleanup_owned_test || return 1
+    hard_kill_status="$test_status"
+  fi
+  [[ "$helper_status" -eq 1 && "$pending_failure_code" == tool_failed &&
+    "$hard_kill_status" -eq 23 && "$ownership_failure" -eq 0 &&
+    -z "$test_leader" && -z "$test_pgid" ]]
+  [[ -n "$leader" && ! -e "/proc/$leader" ]]
+  if ps -e -o pgid= 2>/dev/null | awk -v pgid="$leader" '$1 == pgid { found=1 } END { exit !found }'; then
+    return 1
+  fi
+}
+
 assert_live_mode_environment_for_self_test() {
   local self_root="$1"
   local capture="$self_root/live-mode-environment"
@@ -1058,6 +1163,7 @@ run_self_test() {
   assert_runtime_journal_preflight_for_self_test "$self_root"
   assert_final_emission_for_self_test "$self_root"
   assert_hard_kill_helper_fail_fast_for_self_test "$self_root"
+  assert_hard_kill_early_failure_for_self_test "$self_root"
   assert_deferred_launch_signals_for_self_test "$self_root"
   assert_private_wait_and_group_cleanup_for_self_test "$self_root"
   cleanup_capture
@@ -1172,53 +1278,6 @@ spawn_live_test() {
   fi
 }
 
-wait_for_test_inner() {
-  local leader="$test_leader"
-  local state
-  ownership_failure=0
-  while true; do
-    if [[ -s "$test_status_path" ]]; then
-      break
-    fi
-    if leader_is_waitable "$leader"; then
-      state=0
-    else
-      state=$?
-    fi
-    case "$state" in
-      0) break ;;
-      1) sleep 0.05 || {
-        ownership_failure=1
-        return
-      } ;;
-      *)
-        reap_absent_anchor || ownership_failure=1
-        return
-        ;;
-    esac
-  done
-  cleanup_owned_test_inner || ownership_failure=1
-}
-
-wait_for_test() {
-  {
-    wait_for_test_inner >>"$private_wait_capture" 2>&1
-  } 2>/dev/null
-}
-
-record_captured_failure() {
-  local stdout_path="$1"
-  local stderr_path="$2"
-  local code
-  for code in "${fixed_codes[@]}"; do
-    if grep -Fxq "$code" "$stdout_path" "$stderr_path" 2>/dev/null; then
-      record_failure "$code"
-      return
-    fi
-  done
-  record_failure tool_failed
-}
-
 readonly normal_stdout="$capture_root/normal.stdout"
 readonly normal_stderr="$capture_root/normal.stderr"
 spawn_live_test normal "$normal_stdout" "$normal_stderr"
@@ -1244,19 +1303,11 @@ readonly hard_kill_stderr="$capture_root/hard-kill.stderr"
 spawn_live_test hard-kill "$hard_kill_stdout" "$hard_kill_stderr"
 hard_kill_leader="$test_leader"
 handshake_deadline=$((SECONDS + 180))
-until grep -Fxq hard_kill_ready "$hard_kill_stdout"; do
-  if leader_anchor_is_absent "$hard_kill_leader"; then
-    wait_for_test
-    hard_kill_status="$test_status"
-    record_captured_failure "$hard_kill_stdout" "$hard_kill_stderr"
-    exit 1
-  fi
-  if ((SECONDS >= handshake_deadline)); then
-    record_failure deadline_exceeded
-    exit 1
-  fi
-  sleep 0.1
-done
+if wait_for_hard_kill_ready "$handshake_deadline"; then
+  :
+else
+  exit 1
+fi
 if ! kill_owned_group_and_wait; then
   record_failure tool_failed
   exit 1
