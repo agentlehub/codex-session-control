@@ -205,14 +205,13 @@ wait_until_group_exists() {
 }
 
 reap_absent_anchor() {
-  private_wait_for_leader "$test_leader" || {
-    test_leader=
-    test_pgid=
-    return 1
-  }
+  local deadline=$((SECONDS + reap_grace_seconds))
+  private_wait_for_leader "$test_leader" || true
   test_leader=
-  test_pgid=
   consume_saved_test_status || true
+  if confirm_group_absent "$test_pgid" "$deadline"; then
+    test_pgid=
+  fi
   return 1
 }
 
@@ -225,27 +224,26 @@ reap_and_release_owned_test() {
     state=$?
   fi
   [[ "$state" -eq 0 || "$state" -eq 2 ]] || return 1
-  if ! private_wait_for_leader "$test_leader"; then
-    test_leader=
-    test_pgid=
-    return 1
-  fi
-  if group_state "$test_pgid"; then
-    state=0
-  else
-    state=$?
-  fi
+  private_wait_for_leader "$test_leader" || return 1
   test_leader=
-  test_pgid=
   consume_saved_test_status || status_state=1
-  [[ "$state" -eq 1 && "$status_state" -eq 0 ]]
+  confirm_group_absent "$test_pgid" "$deadline" || return 1
+  test_pgid=
+  [[ "$status_state" -eq 0 ]]
 }
 
 cleanup_owned_test_inner() {
   local state deadline
-  if [[ -z "$test_leader" || -z "$test_pgid" ]]; then
+  if [[ -z "$test_leader" ]]; then
+    if [[ -z "$test_pgid" ]]; then
+      return 0
+    fi
+    deadline=$((SECONDS + reap_grace_seconds))
+    confirm_group_absent "$test_pgid" "$deadline" || return 1
+    test_pgid=
     return 0
   fi
+  [[ -n "$test_pgid" ]] || return 1
 
   if leader_anchor_is_absent "$test_leader"; then
     reap_absent_anchor
@@ -289,6 +287,7 @@ cleanup_owned_test() {
 }
 
 kill_owned_group_and_wait() {
+  local deadline=$((SECONDS + reap_grace_seconds))
   {
     {
       if leader_anchor_is_absent "$test_leader"; then
@@ -296,7 +295,7 @@ kill_owned_group_and_wait() {
         return 1
       fi
       signal_group KILL "$test_pgid" || return 1
-      reap_and_release_owned_test "$((SECONDS + reap_grace_seconds))"
+      reap_and_release_owned_test "$deadline"
     } >>"$private_wait_capture" 2>&1
   } 2>/dev/null
 }
@@ -764,7 +763,7 @@ assert_private_wait_and_group_cleanup_for_self_test() {
       # shellcheck disable=SC2317
       kill() { unexpected_signal=1; return 1; }
       # shellcheck disable=SC2317
-      group_state() { unexpected_signal=1; return 2; }
+      group_state() { return 1; }
       if "$helper"; then
         return 1
       fi
@@ -774,6 +773,52 @@ assert_private_wait_and_group_cleanup_for_self_test() {
     )
     [[ ! -s "$public_capture" ]]
   done
+
+  (
+    local observations=0 unexpected_signal=0
+    local test_leader=424242 test_pgid=424242 test_status='' test_status_path=''
+    # shellcheck disable=SC2317
+    wait_until_leader_is_waitable() { return 0; }
+    # shellcheck disable=SC2317
+    private_wait_for_leader() { test_status=23; return 0; }
+    # shellcheck disable=SC2317
+    group_state() {
+      [[ -z "$test_leader" ]] || return 2
+      ((observations += 1))
+      ((observations < 3)) && return 0
+      return 1
+    }
+    # shellcheck disable=SC2317
+    signal_group() { unexpected_signal=1; return 2; }
+    reap_and_release_owned_test "$((SECONDS + 1))" || return 1
+    [[ "$observations" -eq 3 && "$test_status" -eq 23 &&
+      -z "$test_leader" && -z "$test_pgid" && "$unexpected_signal" -eq 0 ]]
+  )
+
+  (
+    local observations=0 unexpected_signal=0
+    local test_leader=424242 test_pgid=424242 test_status='' test_status_path=''
+    # shellcheck disable=SC2317
+    wait_until_leader_is_waitable() { return 0; }
+    # shellcheck disable=SC2317
+    private_wait_for_leader() { test_status=23; return 0; }
+    # shellcheck disable=SC2317
+    group_state() {
+      [[ -z "$test_leader" ]] || return 2
+      ((observations += 1))
+      return 2
+    }
+    # shellcheck disable=SC2317
+    signal_group() { unexpected_signal=1; return 2; }
+    if reap_and_release_owned_test "$SECONDS"; then
+      return 1
+    fi
+    if cleanup_owned_test_inner; then
+      return 1
+    fi
+    [[ "$observations" -ge 2 && "$test_status" -eq 23 &&
+      -z "$test_leader" && "$test_pgid" -eq 424242 && "$unexpected_signal" -eq 0 ]]
+  )
   test_leader=
   test_pgid=
   test_status=
@@ -1301,7 +1346,7 @@ hard_kill_leader="$test_leader"
 handshake_deadline=$((SECONDS + 180))
 wait_for_hard_kill_ready "$handshake_deadline" || exit 1
 if ! kill_owned_group_and_wait; then
-  record_failure tool_failed
+  record_failure child_reap_failed
   exit 1
 fi
 hard_kill_status="$test_status"
