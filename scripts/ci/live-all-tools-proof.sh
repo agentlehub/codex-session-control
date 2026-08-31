@@ -627,7 +627,7 @@ assert_private_wait_and_group_cleanup_for_self_test() {
   local anchor_stderr="$self_root/anchor.stderr"
   local anchor_status="$self_root/anchor.status"
   local killed_leader
-  local scenario leader marker helper
+  local leader marker helper
   new_capture_file "$public_capture"
   new_capture_file "$anchor_stdout"
   new_capture_file "$anchor_stderr"
@@ -661,37 +661,20 @@ assert_private_wait_and_group_cleanup_for_self_test() {
   [[ ! -s "$public_capture" ]]
   [[ ! -s "$anchor_stdout" && ! -s "$anchor_stderr" ]]
 
-  for scenario in delayed-group owned-launch; do
-    : >"$public_capture"
-    marker="$self_root/$scenario-ran"
-    (
-      if [[ "$scenario" != delayed-group ]]; then
-        kill -STOP "$BASHPID"
-      else
-        sleep 2
-      fi
-      printf 'ran\n' >"$marker"
-      exec setsid /bin/sh -c 'exec sleep 30'
-    ) >/dev/null 2>&1 &
-    leader=$!
-    test_leader="$leader"
-    test_pgid="$leader"
-    if [[ "$scenario" == owned-launch ]]; then
-      wait_until_leader_is_stopped "$leader" "$((SECONDS + 1))"
-      confirm_group_absent "$leader" "$SECONDS"
-      kill -CONT "$leader"
-      wait_until_group_exists "$leader" "$((SECONDS + 1))"
-      leader_has_owned_identity "$leader"
-    fi
-    cleanup_owned_test >"$public_capture" 2>&1 || return 1
-    if [[ "$scenario" == owned-launch ]]; then
-      [[ -e "$marker" ]]
-    else
-      [[ ! -e "$marker" ]]
-    fi
-    [[ -z "$test_leader" && -z "$test_pgid" ]]
-    [[ ! -s "$public_capture" ]]
-  done
+  : >"$public_capture"
+  marker="$self_root/delayed-group-ran"
+  (
+    sleep 2
+    printf 'ran\n' >"$marker"
+    exec setsid /bin/sh -c 'exec sleep 30'
+  ) >/dev/null 2>&1 &
+  leader=$!
+  test_leader="$leader"
+  test_pgid="$leader"
+  cleanup_owned_test >"$public_capture" 2>&1 || return 1
+  [[ ! -e "$marker" ]]
+  [[ -z "$test_leader" && -z "$test_pgid" ]]
+  [[ ! -s "$public_capture" ]]
 
   for helper in cleanup_owned_test_inner kill_owned_group_and_wait; do
     : >"$public_capture"

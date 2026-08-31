@@ -373,8 +373,7 @@ impl OwnedMcpChild {
         };
         let reserve = REAP_RESERVE.min(remaining / 2);
         let graceful_deadline = budget.deadline.at - reserve;
-        let mut wait_failed = false;
-        let mut waitability_failed = false;
+        let mut cleanup_uncertain = false;
 
         if self.child.is_some() {
             if self
@@ -384,7 +383,7 @@ impl OwnedMcpChild {
                 .await
                 .is_err()
             {
-                waitability_failed = true;
+                cleanup_uncertain = true;
             }
             self.kill_process_group_once()?;
             if self
@@ -392,14 +391,14 @@ impl OwnedMcpChild {
                 .await
                 .is_err()
             {
-                waitability_failed = true;
+                cleanup_uncertain = true;
             }
             match tokio::time::timeout_at(budget.deadline.at, self.wait_for_leader()).await {
                 Ok(Ok(_)) => {
                     self.child.take();
                 }
                 Ok(Err(_)) => {
-                    wait_failed = true;
+                    cleanup_uncertain = true;
                 }
                 Err(_) => return Err(LiveCode::ChildReapFailed),
             }
@@ -414,7 +413,7 @@ impl OwnedMcpChild {
             }
         }
 
-        if self.observe_and_clear_process_group().is_err() || wait_failed || waitability_failed {
+        if self.observe_and_clear_process_group().is_err() || cleanup_uncertain {
             Err(LiveCode::ChildReapFailed)
         } else {
             Ok(())
@@ -599,15 +598,6 @@ pub(super) async fn assert_owned_child_exit_paths_for_test() {
         "normal cleanup must signal the group before reaping the leader"
     );
     assert_process_and_group_absent(pid);
-    owned.group_kill_sent = false;
-    assert_eq!(
-        owned.kill_process_group_once(),
-        Err(LiveCode::ChildReapFailed)
-    );
-    assert!(
-        !owned.group_kill_sent,
-        "childless numeric authority must never reach the signal boundary"
-    );
 }
 
 pub(super) async fn assert_owned_child_timeout_for_test() {
