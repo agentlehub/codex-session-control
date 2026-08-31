@@ -329,6 +329,34 @@ live_test_environment() {
   esac
 }
 
+runtime_journal_preflight() {
+  local runtime="$1"
+  local result_name="$2"
+  local remainder component
+  printf -v "$result_name" '%s' ''
+  if [[ -z "$runtime" || "$runtime" != /* ]]; then
+    printf '%s\n' journal_rejected >&2
+    return 1
+  fi
+
+  remainder="${runtime#/}"
+  while [[ "$remainder" == */* ]]; do
+    component="${remainder%%/*}"
+    if [[ -z "$component" || "$component" == . || "$component" == .. ]]; then
+      printf '%s\n' journal_rejected >&2
+      return 1
+    fi
+    remainder="${remainder#*/}"
+  done
+  if [[ -z "$remainder" || "$remainder" == . || "$remainder" == .. ]]; then
+    printf '%s\n' journal_rejected >&2
+    return 1
+  fi
+
+  printf -v "$result_name" '%s' \
+    "$runtime/codex-session-control/live-test/current.json"
+}
+
 assert_private_wait_and_group_cleanup_for_self_test() {
   local self_root="$1"
   local public_capture="$self_root/public"
@@ -561,6 +589,36 @@ assert_capture_failure_boundaries_for_self_test() {
   [[ "$(<"$cleanup_stderr")" == cleanup_failed ]]
 }
 
+assert_runtime_journal_preflight_for_self_test() {
+  local self_root="$1"
+  local stdout_capture="$self_root/runtime-preflight.stdout"
+  local stderr_capture="$self_root/runtime-preflight.stderr"
+  local candidate journal_path status
+  new_capture_file "$stdout_capture"
+  new_capture_file "$stderr_capture"
+
+  for candidate in '' relative/runtime "$self_root/../runtime-authority"; do
+    journal_path=unchanged
+    if runtime_journal_preflight \
+      "$candidate" journal_path >"$stdout_capture" 2>"$stderr_capture"; then
+      status=0
+    else
+      status=$?
+    fi
+    [[ "$status" -ne 0 ]]
+    [[ -z "$journal_path" ]]
+    [[ ! -s "$stdout_capture" ]]
+    [[ "$(<"$stderr_capture")" == journal_rejected ]]
+  done
+
+  journal_path=
+  runtime_journal_preflight /run/user/1000 journal_path \
+    >"$stdout_capture" 2>"$stderr_capture"
+  [[ "$journal_path" == /run/user/1000/codex-session-control/live-test/current.json ]]
+  [[ ! -s "$stdout_capture" ]]
+  [[ ! -s "$stderr_capture" ]]
+}
+
 run_self_test() {
   local self_root capture
   new_capture_root
@@ -573,6 +631,7 @@ run_self_test() {
   [[ "$(grep -Fxc hard_kill_ready "$capture")" -eq 1 ]]
   assert_live_mode_environment_for_self_test "$self_root"
   assert_capture_failure_boundaries_for_self_test "$self_root"
+  assert_runtime_journal_preflight_for_self_test "$self_root"
   assert_hard_kill_helper_fail_fast_for_self_test "$self_root"
   assert_private_wait_and_group_cleanup_for_self_test "$self_root"
   cleanup_capture
@@ -593,8 +652,11 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly script_dir
 repository_root="$(cd -- "$script_dir/../.." && pwd)"
 readonly repository_root
-: "${XDG_RUNTIME_DIR:?}"
-readonly journal="$XDG_RUNTIME_DIR/codex-session-control/live-test/current.json"
+journal=
+if ! runtime_journal_preflight "${XDG_RUNTIME_DIR-}" journal; then
+  exit 1
+fi
+readonly journal
 
 new_capture_root
 readonly cargo_messages="$capture_root/cargo.jsonl"
