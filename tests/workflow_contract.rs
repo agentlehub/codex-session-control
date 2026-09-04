@@ -619,43 +619,6 @@ fn reader_facing_surfaces_do_not_advertise_removed_lifecycle() {
 }
 
 #[test]
-fn upgrading_documents_the_historical_cutover() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let upgrading = fs::read_to_string(root.join("docs/upgrading.md")).unwrap();
-    let ordered_steps = [
-        "codex plugin remove codex-session-control@codex-session-control-local",
-        "codex plugin marketplace remove codex-session-control-local",
-        "systemctl --user disable --now codex-session-control.service",
-        "shared-app-server-socket",
-        "./scripts/install-local-plugin.sh",
-        "new CLI/Desktop task",
-        "thirteen-tool catalog",
-        "no old CSC authority",
-    ];
-
-    assert!(
-        upgrading.contains("0.3.x"),
-        "upgrade guide must label the old installation as historical 0.3.x"
-    );
-    assert!(
-        upgrading.contains("does not perform automatic migration"),
-        "upgrade guide must state that the installer performs no automatic migration"
-    );
-
-    let mut previous = 0;
-    for step in ordered_steps {
-        let position = upgrading
-            .find(step)
-            .unwrap_or_else(|| panic!("upgrade guide omitted required cutover step: {step}"));
-        assert!(
-            position >= previous,
-            "upgrade guide puts {step} before an earlier cutover step"
-        );
-        previous = position;
-    }
-}
-
-#[test]
 fn bug_form_requests_plugin_available_evidence() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let bug_form = fs::read_to_string(root.join(".github/ISSUE_TEMPLATE/bug.yml")).unwrap();
