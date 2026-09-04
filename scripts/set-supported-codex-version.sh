@@ -23,7 +23,7 @@ repository_root="$(cd -- "$script_dir/.." && pwd)"
 version_file="$repository_root/supported-codex-version.txt"
 readme="$repository_root/README.md"
 marker='<!-- generated: supported-codex-version -->'
-replacement="- Native app-server protocol validated against Codex \`$version\`. $marker"
+replacement="- The supported community Desktop build, running with \`shared-app-server-socket\` enabled and bundled Codex \`$version\` $marker"
 
 marker_count="$(awk -v marker="$marker" '
   {

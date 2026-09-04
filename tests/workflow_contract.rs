@@ -73,13 +73,13 @@ fn tested_codex_version_has_one_canonical_source() {
     assert_eq!(
         marked_lines,
         [format!(
-            "- Native app-server protocol validated against Codex `{version}`. {marker}"
+            "- The supported community Desktop build, running with `shared-app-server-socket` enabled and bundled Codex `{version}` {marker}"
         )],
         "README must expose exactly one generated tested-version line"
     );
     assert!(
-        readme.contains("- Codex CLI `0.149.1` on `PATH` is the plugin-host target."),
-        "README must separately state the Codex CLI plugin-host target"
+        readme.contains("- Codex CLI `0.149.1` on `PATH`, used to register the plugin"),
+        "README must separately state the Codex CLI registration requirement"
     );
 
     let fixture_raw =
@@ -172,10 +172,10 @@ fn tested_codex_version_setter_updates_only_generated_version_data() {
             format!("{accepted_version}\n")
         );
         let old_line = format!(
-            "- Native app-server protocol validated against Codex `{expected_version}`. {marker}"
+            "- The supported community Desktop build, running with `shared-app-server-socket` enabled and bundled Codex `{expected_version}` {marker}"
         );
         let new_line = format!(
-            "- Native app-server protocol validated against Codex `{accepted_version}`. {marker}"
+            "- The supported community Desktop build, running with `shared-app-server-socket` enabled and bundled Codex `{accepted_version}` {marker}"
         );
         expected_readme = expected_readme.replace(&old_line, &new_line);
         assert_eq!(
