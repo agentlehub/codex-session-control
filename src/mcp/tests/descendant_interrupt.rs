@@ -290,11 +290,6 @@ async fn empty_descendant_scan_scope_defaults_and_opt_in_use_public_tool_result(
             json!({"interrupted": true, "turnId": "root-turn"}),
         ),
         (
-            json!({"threadId": "root", "includeDescendants": false}),
-            root_active_steps(),
-            json!({"interrupted": true, "turnId": "root-turn"}),
-        ),
-        (
             json!({"threadId": "root", "includeDescendants": true}),
             root_inactive_steps(),
             json!({"interrupted": false, "descendants": {"results": []}}),

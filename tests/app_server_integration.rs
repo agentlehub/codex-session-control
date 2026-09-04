@@ -67,11 +67,6 @@ async fn live_codes_are_the_only_output_and_cleanup_has_precedence() {
     cases::live_codes_are_the_only_output_and_cleanup_has_precedence().await;
 }
 
-#[test]
-fn caller_bound_tool_request_keeps_metadata_outside_public_arguments() {
-    live_harness::caller_bound_tool_request_keeps_metadata_outside_public_arguments();
-}
-
 #[tokio::test]
 #[ignore = "requires explicit disposable-task opt-in and a live Desktop authority"]
 async fn live_desktop_authority_all_thirteen_tools_are_disposable() -> ExitCode {

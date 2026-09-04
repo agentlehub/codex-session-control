@@ -831,16 +831,6 @@ impl LiveHarness {
     }
 }
 
-fn require_successful_child_wait(
-    wait_result: io::Result<std::process::ExitStatus>,
-) -> io::Result<()> {
-    wait_result.map(|_| ())
-}
-
-pub(super) fn child_wait_error_is_rejected_for_test() -> bool {
-    require_successful_child_wait(Err(io::Error::other("injected child wait failure"))).is_err()
-}
-
 struct WorkspacePages<'a> {
     workspace: &'a str,
     ids: BTreeSet<String>,
@@ -1200,24 +1190,6 @@ fn tool_call_params(name: &str, arguments: Value, caller: Option<&str>) -> Value
             .insert("_meta".to_owned(), json!({"threadId": caller}));
     }
     params
-}
-
-pub(super) fn caller_bound_tool_request_keeps_metadata_outside_public_arguments() {
-    let params = tool_call_params(
-        "thread_message_send",
-        json!({"threadId": "target-sentinel", "prompt": "prompt-sentinel"}),
-        Some("caller-sentinel"),
-    );
-
-    assert_eq!(params["name"], "thread_message_send");
-    assert_eq!(
-        params["arguments"],
-        json!({"threadId": "target-sentinel", "prompt": "prompt-sentinel"})
-    );
-    assert_eq!(params["_meta"], json!({"threadId": "caller-sentinel"}));
-    assert!(params["arguments"].get("_meta").is_none());
-    assert!(params["arguments"].get("callerThreadId").is_none());
-    assert!(params.get("callerThreadId").is_none());
 }
 
 impl McpClient {

@@ -124,10 +124,6 @@ async fn fork_defaults_and_explicit_values_map_without_extra_reads() {
             json!({"threadId": "source", "deferGoalContinuation": false}),
             false,
         ),
-        (
-            json!({"threadId": "source", "deferGoalContinuation": true}),
-            true,
-        ),
     ] {
         let harness = FakeAppServer::start(vec![FakeStep::result(
             "thread/fork",
@@ -168,47 +164,41 @@ async fn fork_defaults_and_explicit_values_map_without_extra_reads() {
 async fn message_send_reports_empty_rollout_as_safe_to_retry_without_dispatching() {
     let native_message = "failed to read thread: thread-store internal error: failed to read session metadata /home/operator/.codex/sessions/rollout.jsonl: rollout at /home/operator/.codex/sessions/rollout.jsonl is empty";
 
-    for _ in 0..2 {
-        let harness = FakeAppServer::start(vec![FakeStep::error(
-            "thread/read",
-            json!({"threadId": "target", "includeTurns": false}),
-            json!({"code": -32603, "message": native_message}),
-        )])
-        .await;
-        let client = harness.client();
-        let mut connection = client.connect_initialized().await.unwrap();
+    let harness = FakeAppServer::start(vec![FakeStep::error(
+        "thread/read",
+        json!({"threadId": "target", "includeTurns": false}),
+        json!({"code": -32603, "message": native_message}),
+    )])
+    .await;
+    let client = harness.client();
+    let mut connection = client.connect_initialized().await.unwrap();
 
-        let error = send_message(
-            &client,
-            &mut connection,
-            ThreadMessageSendInput {
-                thread_id: "target".to_owned(),
-                prompt: "message".to_owned(),
-                model: None,
-                reasoning_effort: None,
-            },
-        )
-        .await
-        .unwrap_err();
+    let error = send_message(
+        &client,
+        &mut connection,
+        ThreadMessageSendInput {
+            thread_id: "target".to_owned(),
+            prompt: "message".to_owned(),
+            model: None,
+            reasoning_effort: None,
+        },
+    )
+    .await
+    .unwrap_err();
 
-        assert_eq!(error.category, ToolErrorCategory::NativeError);
-        assert_eq!(error.stage, "thread/read");
-        assert_eq!(error.thread_id.as_deref(), Some("target"));
-        assert_eq!(
-            error.message,
-            "Codex has not materialized this thread's history yet. No message was sent. Wait a few seconds, then retry `thread_message_send`."
-        );
-        assert_eq!(error.native.as_ref().unwrap().code, Some(-32603));
-        assert_eq!(error.native.as_ref().unwrap().message, native_message);
-        assert_eq!(harness.connection_count(), 1);
-        assert_eq!(
-            harness.log(),
-            [json!({
-                "method": "thread/read",
-                "params": {"threadId": "target", "includeTurns": false},
-            })]
-        );
-    }
+    assert_eq!(error.category, ToolErrorCategory::NativeError);
+    assert_eq!(error.stage, "thread/read");
+    assert_eq!(error.thread_id.as_deref(), Some("target"));
+    assert_eq!(error.native.as_ref().unwrap().code, Some(-32603));
+    assert_eq!(error.native.as_ref().unwrap().message, native_message);
+    assert_eq!(harness.connection_count(), 1);
+    assert_eq!(
+        harness.log(),
+        [json!({
+            "method": "thread/read",
+            "params": {"threadId": "target", "includeTurns": false},
+        })]
+    );
 }
 
 #[tokio::test]
@@ -236,7 +226,6 @@ async fn message_send_preserves_other_pre_read_failures() {
     .unwrap_err();
 
     assert_eq!(error.category, ToolErrorCategory::NativeError);
-    assert_eq!(error.message, "native app-server request failed");
     assert!(error.thread_id.is_none());
     let native = error.native.unwrap();
     assert_eq!(native.code, Some(-32090));

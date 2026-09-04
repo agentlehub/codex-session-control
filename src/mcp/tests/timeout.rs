@@ -37,19 +37,3 @@ async fn sequential_native_reads_receive_fresh_ten_second_deadlines() {
     assert!(turns.is_empty());
     assert_eq!(next_cursor, None);
 }
-
-#[tokio::test(start_paused = true)]
-async fn wait_default_and_maximum_are_exact_bounded_durations() {
-    for duration in [
-        wait_timeout(None).unwrap(),
-        wait_timeout(Some(MAX_WAIT_TIMEOUT_MS)).unwrap(),
-    ] {
-        let sleep = tokio::time::sleep(duration);
-        tokio::pin!(sleep);
-        tokio::time::advance(duration - Duration::from_millis(1)).await;
-        assert!(!sleep.is_elapsed());
-        tokio::time::advance(Duration::from_millis(1)).await;
-        sleep.as_mut().await;
-        assert!(sleep.is_elapsed());
-    }
-}

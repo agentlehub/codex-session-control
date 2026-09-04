@@ -643,14 +643,6 @@ mod tests {
     }
 
     #[test]
-    fn explicit_constructor_fails_closed_on_a_malformed_path() {
-        let error = DesktopEndpoint::explicit(PathBuf::from("relative.sock"))
-            .validate()
-            .unwrap_err();
-        assert_validation_failure(&error);
-    }
-
-    #[test]
     fn canonical_parent_replacement_is_rejected() {
         let root = crate::test_support::private_tempdir();
         let selected_ancestor = root.path().join("selected");

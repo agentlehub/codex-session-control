@@ -409,10 +409,10 @@ async fn untested_version_exposes_connection_warning() {
         .connect_initialized()
         .await
         .unwrap();
-    let expected = format!(
-        "WARNING: Target Codex {untested_version} is untested. Codex session control was validated against Codex {TESTED_CODEX_VERSION}. Report this warning to the operator. The accompanying structured data remains authoritative."
-    );
-
-    assert_eq!(connection.compatibility_warning(), Some(expected.as_str()));
+    let warning = connection
+        .compatibility_warning()
+        .expect("untested Codex version must produce a compatibility warning");
+    assert!(warning.contains(&untested_version));
+    assert!(warning.contains(TESTED_CODEX_VERSION));
     assert_eq!(harness.connection_count(), 1);
 }

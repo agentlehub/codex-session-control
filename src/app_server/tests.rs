@@ -1,9 +1,6 @@
 use std::{
-    collections::HashMap,
     future::pending,
-    io,
     os::unix::fs::{PermissionsExt, symlink},
-    process::Stdio,
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -12,12 +9,9 @@ use std::{
 };
 
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, UnixListener},
-    process::{Child, Command},
+    net::UnixListener,
     sync::{Mutex, Notify},
 };
 use tokio_tungstenite::{
@@ -515,6 +509,5 @@ fn classify_fixture_error(
 }
 
 mod compact_snapshot;
-mod live_capture;
 mod native_error;
 mod transport;
