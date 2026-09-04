@@ -1,29 +1,33 @@
 # Architecture
 
-Codex Session Control is one stateless stdio MCP process for each host task.
-The checkout-local plugin starts
-`plugins/codex-session-control/bin/codex-session-control` with no arguments.
-It does not own a Codex app-server, a socket, process lifecycle, configuration
-state, or a network endpoint.
+Codex Session Control is a local, stateless stdio MCP plugin. Each host task
+starts one plugin process, which connects its operations to the app-server
+already owned by the supported community Desktop build. Codex/Desktop owns
+authentication, configuration, and task data; Codex Session Control creates no
+second login or task database.
 
 ```text
 Codex CLI task ────────┐
-Codex Desktop task ────┼── stdio MCP ── private Unix socket ── Desktop app-server
-Generic stdio host ────┘
+Codex Desktop task ────┼── stdio MCP ── private Unix socket ── supported community Desktop app-server
+Generic stdio host ────┘                                    (not OpenAI's official ChatGPT Desktop app)
 ```
 
 ## Endpoint and connection model
 
 Every independent tool operation freshly resolves and validates the Desktop
-endpoint, opens the Unix WebSocket at exact `/rpc`, and initializes the
-connection. An explicit bridge socket takes precedence; otherwise the endpoint
-is derived from the runtime directory and Desktop application ID. The process
-does not scan for endpoints, use TCP, or read legacy installation state.
+endpoint, opens a fresh connection to the validated private Unix socket, and
+initializes the connection. An explicit bridge socket takes precedence;
+otherwise the endpoint is derived from the runtime directory and Desktop
+application ID. The process does not scan for endpoints, use TCP, or read legacy
+installation state.
 
 The endpoint directory and socket must be private and owned by the current
 Linux user. Unsafe, missing, or changed metadata prevents the operation from
-connecting. A Desktop restart is recovered by the next independent operation,
-which resolves a fresh endpoint instead of reusing an old connection.
+connecting. After a Desktop or socket restart, an existing plugin process
+reconnects on its next operation; it does not require a new task or CLI session.
+
+Tool-catalog changes take effect in new tasks and CLI sessions. Open tasks and
+sessions retain the tools and plugin process they already loaded.
 
 ## Operation semantics
 
