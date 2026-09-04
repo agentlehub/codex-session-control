@@ -26,7 +26,7 @@ Requirements:
 - Linux on x86-64 or AArch64
 - Rust 1.95 or newer with Cargo, plus `jq` and `readelf` from binutils
 - Codex CLI `0.149.1` on `PATH`, used to register the plugin
-- The supported community Desktop build, running with `shared-app-server-socket` enabled and bundled Codex `0.150.0-alpha.12.2` <!-- generated: supported-codex-version -->
+- The supported community Desktop build, running with `shared-app-server-socket` enabled and bundled Codex `0.150.0-alpha.12.2`
 
 Clone this repository and install the local plugin:
 
@@ -94,7 +94,7 @@ This leaves the checkout and staged binary in place. It does not delete Codex co
 
 ## Support
 
-If something is not working, check [Troubleshooting](docs/troubleshooting.md) first. If that does not solve the problem, open a [bug report](https://github.com/agentlehub/codex-session-control/issues/new?template=bug.yml).
+If something is not working, open a [bug report](https://github.com/agentlehub/codex-session-control/issues/new?template=bug.yml).
 
 ## Security
 

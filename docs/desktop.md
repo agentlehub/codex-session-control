@@ -21,5 +21,3 @@ codex-desktop --cli
 ## Connection behavior
 
 The plugin connects to Desktop's private shared socket and does not start Desktop. If Desktop or its socket restarts, retry the operation. The plugin reconnects on its next operation, so a restart alone does not require a new CLI session or Desktop task.
-
-If the plugin is not visible, Desktop is closed, or a compatibility warning appears, see [Troubleshooting](troubleshooting.md).
