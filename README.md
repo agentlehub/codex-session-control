@@ -26,7 +26,7 @@ Requirements:
 - Linux on x86-64 or AArch64
 - Rust 1.95 or newer with Cargo, plus `jq` and `readelf` from binutils
 - Codex CLI `0.149.1` on `PATH`, used to register the plugin
-- The supported community Desktop build, running with `shared-app-server-socket` enabled and bundled Codex `0.150.0-alpha.12.2`
+- The supported community Desktop build, running with `shared-app-server-socket` enabled and bundled Codex `0.153.1`
 
 Clone this repository and install the local plugin:
 
