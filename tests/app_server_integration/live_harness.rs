@@ -1,32 +1,59 @@
 use std::{
-    collections::BTreeSet,
-    error::Error,
-    fs::{self, File},
+    collections::{BTreeSet, VecDeque},
+    fmt, fs,
+    future::Future,
     io,
-    os::unix::{fs::PermissionsExt, process::CommandExt},
+    os::unix::fs::{FileTypeExt, MetadataExt},
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use assert_cmd::cargo::cargo_bin;
-use futures_util::SinkExt;
+use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use tokio::{
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
-    process::{Child, Command},
+    process::{Child, ChildStdin, ChildStdout, Command},
+    time::Instant,
 };
-use tokio_tungstenite::{client_async, tungstenite::Message};
+use tokio_tungstenite::{WebSocketStream, client_async, tungstenite::Message};
 
-use crate::normal_home_paths::{CONFIG_TEMPLATE, DisposablePaths, atomic_write};
-use crate::protocol_support::{NativeConnection, ResponsesEndpoint};
+use crate::cases::OwnedThreadId;
+use crate::endpoint_policy::{
+    BRIDGE_SOCKET_ENV, EndpointMetadata, EndpointResolutionError, InitializedIdentity,
+    ResolvedEndpoint, endpoint_metadata_is_safe, is_normalized_absolute_path,
+    resolve_endpoint_with,
+};
 
-pub(super) const EXPECTED_CODEX_VERSION: &str = concat!(
-    "codex-cli ",
-    env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION")
-);
-pub(super) const SESSION_CONTROL_TOOLS: [&str; 13] = [
+const EXPECTED_CODEX_VERSION: &str = env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION");
+const ALL_THREAD_SOURCE_KINDS: [&str; 10] = [
+    "cli",
+    "vscode",
+    "exec",
+    "appServer",
+    "subAgent",
+    "subAgentReview",
+    "subAgentCompact",
+    "subAgentThreadSpawn",
+    "subAgentOther",
+    "unknown",
+];
+const THREAD_LIST_PAGE_SIZE: u32 = 100;
+const MAX_WORKSPACE_PAGES: usize = 64;
+const MAX_WORKSPACE_ROWS: usize = 6_400;
+const MAX_MCP_FRAME_BYTES: usize = 64 * 1024;
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const WAIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(125);
+const WAIT_NATIVE_RESERVE: Duration = Duration::from_secs(5);
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(60);
+const REAP_RESERVE: Duration = Duration::from_secs(2);
+pub(super) static PROCESS_INHERITANCE_TEST_LOCK: Mutex<()> = Mutex::new(());
+const TOOLS_CALL_METHOD: &str = "tools/call";
+const SESSION_CONTROL_TOOLS: [&str; 13] = [
     "thread_create",
     "thread_fork",
     "threads_list",
@@ -41,983 +68,1484 @@ pub(super) const SESSION_CONTROL_TOOLS: [&str; 13] = [
     "thread_goal_clear",
     "thread_interrupt",
 ];
-pub(super) const ALL_SOURCE_KINDS: [&str; 10] = [
-    "cli",
-    "vscode",
-    "exec",
-    "appServer",
-    "subAgent",
-    "subAgentReview",
-    "subAgentCompact",
-    "subAgentThreadSpawn",
-    "subAgentOther",
-    "unknown",
-];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct ProcessIdentity {
-    pub(super) pid: u32,
-    pub(super) start_time: u64,
+pub(super) enum LiveCode {
+    HardKillReady,
+    OptInRejected,
+    JournalRejected,
+    EndpointRejected,
+    IdentityUnverified,
+    VersionUnsupported,
+    ChildSpawnFailed,
+    ChildReapFailed,
+    ToolFailed,
+    DeadlineExceeded,
+    ArchiveProofFailed,
+    CleanupFailed,
+}
+
+impl LiveCode {
+    pub(super) const ALL: [Self; 12] = [
+        Self::HardKillReady,
+        Self::OptInRejected,
+        Self::JournalRejected,
+        Self::EndpointRejected,
+        Self::IdentityUnverified,
+        Self::VersionUnsupported,
+        Self::ChildSpawnFailed,
+        Self::ChildReapFailed,
+        Self::ToolFailed,
+        Self::DeadlineExceeded,
+        Self::ArchiveProofFailed,
+        Self::CleanupFailed,
+    ];
+}
+
+impl fmt::Display for LiveCode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::HardKillReady => "hard_kill_ready",
+            Self::OptInRejected => "opt_in_rejected",
+            Self::JournalRejected => "journal_rejected",
+            Self::EndpointRejected => "endpoint_rejected",
+            Self::IdentityUnverified => "identity_unverified",
+            Self::VersionUnsupported => "version_unsupported",
+            Self::ChildSpawnFailed => "child_spawn_failed",
+            Self::ChildReapFailed => "child_reap_failed",
+            Self::ToolFailed => "tool_failed",
+            Self::DeadlineExceeded => "deadline_exceeded",
+            Self::ArchiveProofFailed => "archive_proof_failed",
+            Self::CleanupFailed => "cleanup_failed",
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Deadline {
+    at: Instant,
+}
+
+impl Deadline {
+    fn after(duration: Duration) -> Self {
+        Self {
+            at: Instant::now() + duration,
+        }
+    }
+
+    fn check(self) -> Result<(), LiveCode> {
+        if Instant::now() < self.at {
+            Ok(())
+        } else {
+            Err(LiveCode::DeadlineExceeded)
+        }
+    }
+
+    fn remaining(self) -> Result<Duration, LiveCode> {
+        let remaining = self.at.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            Err(LiveCode::DeadlineExceeded)
+        } else {
+            Ok(remaining)
+        }
+    }
+
+    async fn run<T>(
+        self,
+        future: impl Future<Output = Result<T, LiveCode>>,
+    ) -> Result<T, LiveCode> {
+        self.check()?;
+        tokio::time::timeout_at(self.at, future)
+            .await
+            .map_err(|_| LiveCode::DeadlineExceeded)?
+    }
+
+    async fn run_io<T>(
+        self,
+        future: impl Future<Output = io::Result<T>>,
+        failure: LiveCode,
+    ) -> Result<T, LiveCode> {
+        self.run(async { future.await.map_err(|_| failure) }).await
+    }
+
+    fn native_wait_timeout_ms(self) -> Result<u64, LiveCode> {
+        let remaining = self.remaining()?;
+        let native = remaining
+            .checked_sub(WAIT_NATIVE_RESERVE)
+            .ok_or(LiveCode::DeadlineExceeded)?;
+        u64::try_from(native.as_millis()).map_err(|_| LiveCode::DeadlineExceeded)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct CleanupBudget {
+    deadline: Deadline,
+}
+
+impl CleanupBudget {
+    pub(super) fn new() -> Self {
+        Self {
+            deadline: Deadline::after(CLEANUP_TIMEOUT),
+        }
+    }
+
+    fn with_timeout(timeout: Duration) -> Self {
+        Self {
+            deadline: Deadline::after(timeout),
+        }
+    }
+
+    pub(super) fn check(self) -> Result<(), LiveCode> {
+        self.deadline.check()
+    }
+
+    pub(super) async fn sleep(self, duration: Duration) -> Result<(), LiveCode> {
+        self.deadline
+            .run(async {
+                tokio::time::sleep(duration).await;
+                Ok(())
+            })
+            .await
+    }
+}
+
+pub(super) struct OwnedMcpChild {
+    child: Option<Child>,
+}
+
+impl OwnedMcpChild {
+    fn spawn(command: &mut Command) -> Result<Self, LiveCode> {
+        let _process_inheritance_guard = PROCESS_INHERITANCE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let child = command.spawn().map_err(|_| LiveCode::ChildSpawnFailed)?;
+        Ok(Self { child: Some(child) })
+    }
+
+    fn id(&self) -> u32 {
+        self.child
+            .as_ref()
+            .and_then(Child::id)
+            .expect("owned child is present until confirmed reap")
+    }
+
+    fn take_stdin(&mut self) -> Option<ChildStdin> {
+        self.child.as_mut()?.stdin.take()
+    }
+
+    fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.child.as_mut()?.stdout.take()
+    }
+
+    fn close_owned_stdin(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            child.stdin.take();
+        }
+    }
+
+    async fn wait_for_leader(&mut self) -> io::Result<std::process::ExitStatus> {
+        self.child
+            .as_mut()
+            .expect("leader wait requires retained child authority")
+            .wait()
+            .await
+    }
+
+    async fn shutdown_and_reap(&mut self, budget: CleanupBudget) -> Result<(), LiveCode> {
+        self.close_owned_stdin();
+        if self.child.is_none() {
+            return Ok(());
+        }
+
+        if let Ok(remaining) = budget.deadline.remaining() {
+            let reserve = REAP_RESERVE.min(remaining / 2);
+            let graceful_deadline = budget.deadline.at - reserve;
+            if let Ok(Ok(_)) =
+                tokio::time::timeout_at(graceful_deadline, self.wait_for_leader()).await
+            {
+                self.child.take();
+                return Ok(());
+            }
+        }
+
+        self.child
+            .as_mut()
+            .expect("kill requires retained child authority")
+            .start_kill()
+            .map_err(|_| LiveCode::ChildReapFailed)?;
+        match tokio::time::timeout_at(budget.deadline.at, self.wait_for_leader()).await {
+            Ok(Ok(_)) => {
+                self.child.take();
+                Ok(())
+            }
+            Ok(Err(_)) | Err(_) => Err(LiveCode::ChildReapFailed),
+        }
+    }
+}
+
+impl Drop for OwnedMcpChild {
+    fn drop(&mut self) {
+        self.close_owned_stdin();
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+async fn read_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    deadline: Deadline,
+    limit: usize,
+) -> Result<Vec<u8>, LiveCode> {
+    let mut retained = Vec::with_capacity(limit.min(4096));
+    let mut overflow = false;
+    loop {
+        deadline.check()?;
+        let (consumed, line_ended) = {
+            let available = deadline
+                .run_io(reader.fill_buf(), LiveCode::ToolFailed)
+                .await?;
+            if available.is_empty() {
+                return Err(LiveCode::ToolFailed);
+            }
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let consumed = newline.map_or(available.len(), |index| index + 1);
+            let payload = &available[..newline.unwrap_or(available.len())];
+            if !overflow {
+                let remaining = limit.saturating_sub(retained.len());
+                retained.extend_from_slice(&payload[..payload.len().min(remaining)]);
+                overflow = payload.len() > remaining;
+            }
+            (consumed, newline.is_some())
+        };
+        reader.consume(consumed);
+        if line_ended {
+            if overflow {
+                return Err(LiveCode::ToolFailed);
+            }
+            if retained.last() == Some(&b'\r') {
+                retained.pop();
+            }
+            return Ok(retained);
+        }
+    }
+}
+
+fn assert_process_absent(pid: u32) {
+    assert!(
+        !Path::new(&format!("/proc/{pid}")).exists(),
+        "owned child leader was not reaped"
+    );
+}
+
+fn sleeping_child_command() -> Command {
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg("exec sleep 30")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
+}
+
+async fn explicitly_reap_test_owner(owner: &mut Option<OwnedMcpChild>) {
+    owner
+        .as_mut()
+        .expect("test retains explicit child authority")
+        .shutdown_and_reap(CleanupBudget::with_timeout(Duration::from_secs(5)))
+        .await
+        .expect("test child is reaped within its explicit cleanup budget");
+    owner.take();
+}
+
+async fn assert_startup_failure_retains_explicit_owner_for_test() {
+    let mut command = sleeping_child_command();
+    command.stdout(Stdio::null());
+    let mut owner = None;
+    assert!(matches!(
+        McpClient::start_command(
+            &mut owner,
+            &mut command,
+            Deadline::after(Duration::from_secs(1)),
+            None,
+        )
+        .await,
+        Err(LiveCode::ChildSpawnFailed)
+    ));
+    let pid = owner
+        .as_ref()
+        .expect("startup failure must return with explicit ownership")
+        .id();
+    explicitly_reap_test_owner(&mut owner).await;
+    assert_process_absent(pid);
+}
+
+pub(super) async fn assert_owned_child_exit_paths_for_test() {
+    assert_startup_failure_retains_explicit_owner_for_test().await;
+
+    let mut normal = Command::new("/bin/sh");
+    normal
+        .arg("-c")
+        .arg("exit 0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut owned = OwnedMcpChild::spawn(&mut normal).unwrap();
+    let pid = owned.id();
+    owned
+        .shutdown_and_reap(CleanupBudget::with_timeout(Duration::from_secs(1)))
+        .await
+        .unwrap();
+    assert_process_absent(pid);
+}
+
+pub(super) async fn assert_owned_child_timeout_for_test() {
+    let mut command = sleeping_child_command();
+    let mut owned = OwnedMcpChild::spawn(&mut command).unwrap();
+    let pid = owned.id();
+    owned
+        .shutdown_and_reap(CleanupBudget::with_timeout(Duration::from_millis(400)))
+        .await
+        .unwrap();
+    assert_process_absent(pid);
+
+    let mut expired_command = sleeping_child_command();
+    let mut expired_owner = Some(OwnedMcpChild::spawn(&mut expired_command).unwrap());
+    let expired_pid = expired_owner.as_ref().unwrap().id();
+    let expired_budget = CleanupBudget::with_timeout(Duration::from_millis(1));
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert_eq!(
+        expired_owner
+            .as_mut()
+            .unwrap()
+            .shutdown_and_reap(expired_budget)
+            .await,
+        Err(LiveCode::ChildReapFailed)
+    );
+    assert!(
+        expired_owner.is_some(),
+        "expired cleanup must retain explicit ownership"
+    );
+    explicitly_reap_test_owner(&mut expired_owner).await;
+    assert_process_absent(expired_pid);
+}
+
+pub(super) async fn assert_deadline_and_framing_contract_for_test() {
+    assert_actual_mcp_deadline_paths_for_test().await;
+    tokio::time::pause();
+    let cleanup = CleanupBudget::with_timeout(Duration::from_millis(100));
+    let original_deadline = cleanup.deadline.at;
+    tokio::time::advance(Duration::from_millis(80)).await;
+    assert_eq!(
+        cleanup.sleep(Duration::from_millis(30)).await,
+        Err(LiveCode::DeadlineExceeded)
+    );
+    assert_eq!(cleanup.deadline.at, original_deadline);
+    assert_eq!(cleanup.check(), Err(LiveCode::DeadlineExceeded));
+
+    let wait_request = Deadline::after(WAIT_REQUEST_TIMEOUT);
+    assert_eq!(wait_request.native_wait_timeout_ms().unwrap(), 120_000);
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert_eq!(wait_request.native_wait_timeout_ms().unwrap(), 118_000);
+    assert_eq!(cleanup.deadline.at, original_deadline);
+
+    let (mut writer, reader) = tokio::io::duplex(64);
+    writer.write_all(b"123456789\n{\"id\":1}\n").await.unwrap();
+    drop(writer);
+    let mut reader = BufReader::new(reader);
+    let frame_deadline = Deadline::after(Duration::from_secs(1));
+    assert_eq!(
+        read_bounded_line(&mut reader, frame_deadline, 8).await,
+        Err(LiveCode::ToolFailed)
+    );
+    assert_eq!(
+        read_bounded_line(&mut reader, frame_deadline, 8)
+            .await
+            .unwrap(),
+        b"{\"id\":1}"
+    );
+}
+
+async fn assert_actual_mcp_deadline_paths_for_test() {
+    let startup_probe = McpDeadlineProbe::non_blocking();
+    let startup_deadline = Deadline::after(STARTUP_TIMEOUT);
+    let mut owner = None;
+    let mut client = McpClient::start_with_optional_probe(
+        &mut owner,
+        startup_deadline,
+        Some(startup_probe.clone()),
+    )
+    .await
+    .unwrap();
+    let startup_observed = startup_probe.snapshot();
+    assert_eq!(
+        startup_observed
+            .iter()
+            .map(|(stage, _)| *stage)
+            .collect::<Vec<_>>(),
+        vec![
+            McpDeadlineStage::Serialize,
+            McpDeadlineStage::Write,
+            McpDeadlineStage::Flush,
+            McpDeadlineStage::Read,
+            McpDeadlineStage::Decode,
+            McpDeadlineStage::Serialize,
+            McpDeadlineStage::Write,
+            McpDeadlineStage::Flush,
+        ]
+    );
+    assert!(
+        startup_observed
+            .iter()
+            .all(|(_, deadline)| *deadline == startup_deadline.at),
+        "startup request and notification reset the absolute deadline"
+    );
+
+    tokio::time::pause();
+    let request_probe = McpDeadlineProbe::blocking_at(McpDeadlineStage::Read);
+    client.deadline_probe = Some(request_probe.clone());
+    let request_deadline = Deadline::after(Duration::from_secs(1));
+    assert_eq!(
+        client
+            .request_with_deadline("tools/list", json!({}), request_deadline)
+            .await,
+        Err(LiveCode::DeadlineExceeded)
+    );
+    let request_observed = request_probe.snapshot();
+    assert_eq!(
+        request_observed
+            .iter()
+            .map(|(stage, _)| *stage)
+            .collect::<Vec<_>>(),
+        vec![
+            McpDeadlineStage::Serialize,
+            McpDeadlineStage::Write,
+            McpDeadlineStage::Flush,
+            McpDeadlineStage::Read,
+        ]
+    );
+    assert!(
+        request_observed
+            .iter()
+            .all(|(_, deadline)| *deadline == request_deadline.at),
+        "request stages reset the absolute deadline"
+    );
+
+    let notification_probe = McpDeadlineProbe::blocking_at(McpDeadlineStage::Flush);
+    client.deadline_probe = Some(notification_probe.clone());
+    let notification_deadline = Deadline::after(Duration::from_secs(1));
+    assert_eq!(
+        client
+            .notification_with_deadline("notifications/test", json!({}), notification_deadline)
+            .await,
+        Err(LiveCode::DeadlineExceeded)
+    );
+    let notification_observed = notification_probe.snapshot();
+    assert_eq!(
+        notification_observed
+            .iter()
+            .map(|(stage, _)| *stage)
+            .collect::<Vec<_>>(),
+        vec![
+            McpDeadlineStage::Serialize,
+            McpDeadlineStage::Write,
+            McpDeadlineStage::Flush,
+        ]
+    );
+    assert!(
+        notification_observed
+            .iter()
+            .all(|(_, deadline)| *deadline == notification_deadline.at),
+        "notification stages reset the absolute deadline"
+    );
+    tokio::time::resume();
+    client.close_stdin();
+    explicitly_reap_test_owner(&mut owner).await;
+}
+
+#[derive(Debug)]
+enum EndpointSource {
+    Desktop {
+        deterministic_sockets: Option<Mutex<VecDeque<PathBuf>>>,
+    },
+    Fixed(PathBuf),
+}
+
+impl EndpointSource {
+    fn resolve(&self) -> io::Result<ResolvedEndpoint> {
+        match self {
+            Self::Desktop {
+                deterministic_sockets: Some(sockets),
+            } => {
+                let socket = sockets
+                    .lock()
+                    .map_err(|_| socket_validation_error())?
+                    .pop_front()
+                    .ok_or_else(socket_validation_error)?;
+                self.resolve_with(|name| {
+                    (name == BRIDGE_SOCKET_ENV).then(|| socket.as_os_str().to_owned())
+                })
+            }
+            Self::Desktop {
+                deterministic_sockets: None,
+            } => self.resolve_with(std::env::var_os::<&'static str>),
+            Self::Fixed(socket_path) => Ok(ResolvedEndpoint::explicit(socket_path.clone())),
+        }
+    }
+
+    fn resolve_with(
+        &self,
+        lookup: impl FnMut(&'static str) -> Option<std::ffi::OsString>,
+    ) -> io::Result<ResolvedEndpoint> {
+        match self {
+            Self::Desktop { .. } => resolve_endpoint_with(lookup).map_err(|error| match error {
+                EndpointResolutionError::TargetUnavailable | EndpointResolutionError::Rejected => {
+                    socket_validation_error()
+                }
+            }),
+            Self::Fixed(socket_path) => Ok(ResolvedEndpoint::explicit(socket_path.clone())),
+        }
+    }
+}
+
+pub(super) fn resolve_desktop_endpoint_for_test(
+    lookup: impl FnMut(&'static str) -> Option<std::ffi::OsString>,
+) -> io::Result<ResolvedEndpoint> {
+    EndpointSource::Desktop {
+        deterministic_sockets: None,
+    }
+    .resolve_with(lookup)
+}
+
+fn selected_directory_metadata(path: &Path) -> io::Result<EndpointMetadata> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| socket_validation_error())?;
+    Ok(EndpointMetadata {
+        owner: metadata.uid(),
+        mode: metadata.mode(),
+        expected_type: metadata.file_type().is_dir(),
+    })
+}
+
+fn validate_native_endpoint(endpoint: &ResolvedEndpoint) -> io::Result<()> {
+    if !is_normalized_absolute_path(endpoint.socket_path()) {
+        return Err(socket_validation_error());
+    }
+    let derived = match endpoint.derived_directories() {
+        Some([runtime, app, bridge]) => Some([
+            selected_directory_metadata(runtime)?,
+            selected_directory_metadata(app)?,
+            selected_directory_metadata(bridge)?,
+        ]),
+        None => None,
+    };
+    let parent = endpoint
+        .socket_path()
+        .parent()
+        .ok_or_else(socket_validation_error)?;
+    let parent_metadata = selected_directory_metadata(parent)?;
+    let parent_is_canonical = fs::canonicalize(parent)
+        .map_err(|_| socket_validation_error())?
+        .as_os_str()
+        == parent.as_os_str();
+    let socket =
+        fs::symlink_metadata(endpoint.socket_path()).map_err(|_| socket_validation_error())?;
+    if endpoint_metadata_is_safe(
+        endpoint,
+        rustix::process::geteuid().as_raw(),
+        derived,
+        parent_metadata,
+        parent_is_canonical,
+        EndpointMetadata {
+            owner: socket.uid(),
+            mode: socket.mode(),
+            expected_type: socket.file_type().is_socket(),
+        },
+    ) {
+        Ok(())
+    } else {
+        Err(socket_validation_error())
+    }
+}
+
+fn socket_validation_error() -> io::Error {
+    io::Error::other("socket_validation")
 }
 
 pub(super) struct LiveHarness {
-    pub(super) root: tempfile::TempDir,
-    pub(super) codex: PathBuf,
-    pub(super) codex_version: String,
-    pub(super) codex_home: PathBuf,
-    pub(super) runtime: PathBuf,
-    pub(super) workspace: PathBuf,
-    pub(super) socket: PathBuf,
-    pub(super) stderr_log: PathBuf,
-    pub(super) process_home: PathBuf,
-    pub(super) process_runtime: Option<PathBuf>,
-    pub(super) disposable_paths: Option<DisposablePaths>,
-    pub(super) endpoint: ResponsesEndpoint,
-    pub(super) child: Option<Child>,
+    workspace: PathBuf,
+    endpoint_source: EndpointSource,
+    mcp: Option<McpClient>,
+    mcp_child: Option<OwnedMcpChild>,
 }
+
 impl LiveHarness {
-    pub(super) async fn start() -> Result<Self, Box<dyn Error>> {
-        let codex = configured_codex()?;
-        let root = crate::test_support::private_tempdir();
-        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))?;
-        let codex_home = root.path().join(".codex");
-        let runtime = root.path().join("runtime");
-        let workspace = root.path().join("workspace");
-        for directory in [&codex_home, &runtime, &workspace] {
-            fs::create_dir(directory)?;
-            fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
-        }
-        let endpoint = ResponsesEndpoint::start().await?;
-        let config = CONFIG_TEMPLATE.replace("__PORT__", &endpoint.address.port().to_string());
-        assert_eq!(
-            config,
-            format!(
-                r#"model = "session-control-test"
-model_provider = "session-control-local"
-
-[model_providers.session-control-local]
-name = "Session control local test"
-base_url = "http://127.0.0.1:{}/v1"
-wire_api = "responses"
-requires_openai_auth = false
-request_max_retries = 0
-stream_max_retries = 0
-stream_idle_timeout_ms = 10000
-
-[analytics]
-enabled = false
-"#,
-                endpoint.address.port()
-            )
-        );
-        atomic_write(&codex_home.join("config.toml"), config.as_bytes(), 0o600)?;
-        let socket = runtime.join("app-server.sock");
-        let stderr_log = root.path().join("app-server.stderr");
-        let codex_version = run_codex_in_home(&codex, &codex_home, root.path(), ["--version"])
-            .await?
-            .trim()
-            .to_owned();
-        if codex_version != EXPECTED_CODEX_VERSION {
-            return Err(format!(
-                "live compatibility requires {EXPECTED_CODEX_VERSION}, found {codex_version}"
-            )
-            .into());
-        }
-        let process_home = root.path().to_path_buf();
-        let mut harness = Self {
-            root,
-            codex,
-            codex_version,
-            codex_home,
-            runtime,
-            workspace,
-            socket,
-            stderr_log,
-            process_home,
-            process_runtime: None,
-            disposable_paths: None,
-            endpoint,
-            child: None,
-        };
-        harness.launch().await?;
-        Ok(harness)
-    }
-
-    pub(super) async fn start_disposable_ci() -> Result<Self, Box<dyn Error>> {
-        let mut harness = Self::start().await?;
-        harness.stop().await?;
-        let paths = DisposablePaths::claim(&harness.codex, harness.endpoint.address.port())?;
-        harness.codex_home.clone_from(&paths.codex_home);
-        harness.runtime.clone_from(&paths.runtime_dir);
-        harness.socket.clone_from(&paths.socket);
-        harness.process_home.clone_from(&paths.home);
-        harness.process_runtime = Some(paths.runtime.clone());
-        harness.disposable_paths = Some(paths);
-        harness.launch().await?;
-        Ok(harness)
-    }
-
-    pub(super) async fn prepare_disposable_product_ci() -> Result<Self, Box<dyn Error>> {
-        let mut harness = Self::start().await?;
-        harness.stop().await?;
-        let paths =
-            DisposablePaths::claim_for_product(&harness.codex, harness.endpoint.address.port())?;
-        harness.codex_home.clone_from(&paths.codex_home);
-        harness.runtime.clone_from(&paths.runtime_dir);
-        harness.socket.clone_from(&paths.socket);
-        harness.process_home.clone_from(&paths.home);
-        harness.process_runtime = Some(paths.runtime.clone());
-        harness.disposable_paths = Some(paths);
-
-        let native_bin = harness.root.path().join("native-bin");
-        fs::create_dir(&native_bin)?;
-        fs::set_permissions(&native_bin, fs::Permissions::from_mode(0o700))?;
-        let native_codex = native_bin.join("codex");
-        fs::copy(&harness.codex, &native_codex)?;
-        fs::set_permissions(&native_codex, fs::Permissions::from_mode(0o700))?;
-        Ok(harness)
-    }
-
-    pub(super) async fn launch(&mut self) -> Result<(), Box<dyn Error>> {
-        assert!(self.child.is_none());
-        assert!(self.runtime.is_dir());
-        let stderr = File::create(&self.stderr_log)?;
-        let mut command = Command::new(&self.codex);
-        scrub_command(
-            &mut command,
-            &self.codex_home,
-            &self.process_home,
-            self.process_runtime.as_deref(),
-        );
-        command
-            .args(["app-server", "--listen"])
-            .arg(format!("unix://{}", self.socket.display()))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(stderr))
-            .kill_on_drop(true);
-        command.as_std_mut().process_group(0);
-        // SAFETY: the child-only hook invokes only the async-signal-safe umask syscall.
-        unsafe {
-            command.as_std_mut().pre_exec(|| {
-                rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o077));
-                Ok(())
-            });
-        }
-        self.child = Some(command.spawn()?);
-        tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                if self.socket.exists() {
-                    let mode = fs::symlink_metadata(&self.socket)?.permissions().mode() & 0o777;
-                    if !matches!(mode, 0o600 | 0o700) {
-                        return Err(io::Error::other(format!(
-                            "live socket mode {mode:04o} is not owner-only read/write"
-                        )));
-                    }
-                    return Ok(());
-                }
-                if let Some(status) = self.child.as_mut().unwrap().try_wait()? {
-                    return Err(io::Error::other(format!(
-                        "app-server exited before readiness: {status}: {}",
-                        fs::read_to_string(&self.stderr_log).unwrap_or_default()
-                    )));
-                }
-                tokio::task::yield_now().await;
-            }
+    pub(super) fn from_ledger(workspace: &Path) -> Result<Self, LiveCode> {
+        Ok(Self {
+            workspace: workspace.to_path_buf(),
+            endpoint_source: EndpointSource::Desktop {
+                deterministic_sockets: None,
+            },
+            mcp: None,
+            mcp_child: None,
         })
-        .await
-        .map_err(|_| "app-server socket readiness timed out")??;
+    }
+
+    pub(super) fn for_test_desktop_sockets(
+        workspace: PathBuf,
+        sockets: Vec<PathBuf>,
+    ) -> io::Result<Self> {
+        if sockets.is_empty() {
+            return Err(socket_validation_error());
+        }
+        Ok(Self {
+            workspace,
+            endpoint_source: EndpointSource::Desktop {
+                deterministic_sockets: Some(Mutex::new(sockets.into())),
+            },
+            mcp: None,
+            mcp_child: None,
+        })
+    }
+
+    pub(super) fn for_test_native_socket(workspace: PathBuf, socket: PathBuf) -> io::Result<Self> {
+        Ok(Self {
+            workspace,
+            endpoint_source: EndpointSource::Fixed(socket),
+            mcp: None,
+            mcp_child: None,
+        })
+    }
+
+    pub(super) async fn start_mcp(&mut self) -> Result<(), LiveCode> {
+        let client = McpClient::start(&mut self.mcp_child).await?;
+        self.mcp = Some(client);
         Ok(())
     }
 
-    pub(super) async fn connect(&self) -> Result<NativeConnection, Box<dyn Error>> {
-        self.connect_named(
-            "codex_session_control_live_test",
-            "Codex Session Control Live Test",
-        )
-        .await
+    pub(super) fn mcp_mut(&mut self) -> Result<&mut McpClient, LiveCode> {
+        self.mcp.as_mut().ok_or(LiveCode::ToolFailed)
     }
 
-    pub(super) async fn connect_named(
+    pub(super) async fn assert_exact_catalog(&mut self) -> Result<(), LiveCode> {
+        let listed = self.mcp_mut()?.list_tools().await?;
+        let names = listed
+            .get("tools")
+            .and_then(Value::as_array)
+            .ok_or(LiveCode::ToolFailed)?
+            .iter()
+            .map(|tool| {
+                tool.get("name")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .ok_or(LiveCode::ToolFailed)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if names
+            != SESSION_CONTROL_TOOLS
+                .into_iter()
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        {
+            return Err(LiveCode::ToolFailed);
+        }
+        Ok(())
+    }
+
+    pub(super) async fn assert_empty_workspace_before_mutation(&mut self) -> Result<(), LiveCode> {
+        let workspace = self.workspace.clone();
+        for archived in [false, true] {
+            let listed = self.mcp_mut()?.list_threads(&workspace, archived).await?;
+            let threads = listed
+                .get("threads")
+                .and_then(Value::as_array)
+                .ok_or(LiveCode::ToolFailed)?;
+            if !threads.is_empty() {
+                return Err(LiveCode::ToolFailed);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn assert_supported_native_version(&self) -> Result<(), LiveCode> {
+        let budget = CleanupBudget::with_timeout(STARTUP_TIMEOUT);
+        let mut native = self.connect_native(budget).await?;
+        native.initialize(budget).await?;
+        native.recovery_home()?;
+        native.finish_initialization(budget).await?;
+        native.shutdown(budget).await
+    }
+
+    pub(super) async fn connect_native(
         &self,
-        name: &str,
-        title: &str,
-    ) -> Result<NativeConnection, Box<dyn Error>> {
-        let stream = UnixStream::connect(&self.socket).await?;
-        let (websocket, _) = client_async("ws://localhost/", stream).await?;
-        let mut native = NativeConnection {
+        budget: CleanupBudget,
+    ) -> Result<NativeConnection, LiveCode> {
+        budget.check()?;
+        let endpoint = self
+            .endpoint_source
+            .resolve()
+            .map_err(|_| LiveCode::EndpointRejected)?;
+        NativeConnection::connect(&endpoint, budget).await
+    }
+
+    pub(super) async fn workspace_thread_ids(
+        &self,
+        native: &mut NativeConnection,
+        archived: bool,
+        budget: CleanupBudget,
+    ) -> Result<Vec<String>, LiveCode> {
+        let mut pages =
+            WorkspacePages::new(&self.workspace).map_err(|_| LiveCode::ArchiveProofFailed)?;
+        let mut cursor = None;
+        loop {
+            let page = native
+                .request(
+                    "thread/list",
+                    exact_workspace_list_params(&self.workspace, archived, cursor.as_deref()),
+                    budget,
+                )
+                .await?;
+            let next = pages.add(&page).map_err(|_| LiveCode::ArchiveProofFailed)?;
+            match next {
+                Some(next) if cursor.as_deref() != Some(next.as_str()) => cursor = Some(next),
+                Some(_) => return Err(LiveCode::ArchiveProofFailed),
+                None => return Ok(pages.into_ids()),
+            }
+        }
+    }
+
+    pub(super) async fn stop_and_reap_mcp_child(
+        &mut self,
+        budget: CleanupBudget,
+    ) -> Result<(), LiveCode> {
+        if let Some(mcp) = self.mcp.as_mut() {
+            mcp.close_stdin();
+        }
+        let Some(child) = self.mcp_child.as_mut() else {
+            return Ok(());
+        };
+        child.shutdown_and_reap(budget).await?;
+        self.mcp_child.take();
+        self.mcp.take();
+        Ok(())
+    }
+}
+
+struct WorkspacePages<'a> {
+    workspace: &'a str,
+    ids: BTreeSet<String>,
+    cursors: BTreeSet<String>,
+    pages: usize,
+    rows: usize,
+}
+
+impl<'a> WorkspacePages<'a> {
+    fn new(workspace: &'a Path) -> io::Result<Self> {
+        let workspace = workspace
+            .to_str()
+            .filter(|workspace| Path::new(workspace).is_absolute())
+            .ok_or_else(|| io::Error::other("live workspace is not a UTF-8 absolute path"))?;
+        Ok(Self {
+            workspace,
+            ids: BTreeSet::new(),
+            cursors: BTreeSet::new(),
+            pages: 0,
+            rows: 0,
+        })
+    }
+
+    fn add(&mut self, page: &Value) -> io::Result<Option<String>> {
+        self.pages += 1;
+        if self.pages > MAX_WORKSPACE_PAGES {
+            return Err(io::Error::other(
+                "thread/list exhausted the live page limit",
+            ));
+        }
+        let data = page
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| io::Error::other("thread/list emitted a malformed page"))?;
+        let next = match page.get("nextCursor") {
+            None | Some(Value::Null) => None,
+            Some(cursor) => Some(
+                cursor
+                    .as_str()
+                    .filter(|cursor| !cursor.is_empty() && cursor.len() <= 512)
+                    .filter(|cursor| !cursor.bytes().any(|byte| byte.is_ascii_control()))
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| io::Error::other("thread/list emitted an invalid cursor"))?,
+            ),
+        };
+        if data.is_empty() {
+            if self.pages != 1 || next.is_some() {
+                return Err(io::Error::other(
+                    "thread/list emitted an empty continuation page",
+                ));
+            }
+            return Ok(None);
+        }
+        self.rows += data.len();
+        if self.rows > MAX_WORKSPACE_ROWS {
+            return Err(io::Error::other("thread/list exhausted the live row limit"));
+        }
+        for thread in data {
+            let id = thread
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= 512)
+                .filter(|id| !id.bytes().any(|byte| byte.is_ascii_control()))
+                .ok_or_else(|| io::Error::other("thread/list emitted an invalid ID"))?;
+            if thread.get("cwd").and_then(Value::as_str) != Some(self.workspace) {
+                return Err(io::Error::other("thread/list returned a foreign workspace"));
+            }
+            if !self.ids.insert(id.to_owned()) {
+                return Err(io::Error::other("thread/list returned a duplicate ID"));
+            }
+        }
+        if let Some(cursor) = &next
+            && !self.cursors.insert(cursor.clone())
+        {
+            return Err(io::Error::other("thread/list repeated a cursor"));
+        }
+        Ok(next)
+    }
+
+    fn into_ids(self) -> Vec<String> {
+        self.ids.into_iter().collect()
+    }
+}
+
+pub(super) fn collect_workspace_page_ids(
+    workspace: &Path,
+    pages: &[Value],
+) -> io::Result<Vec<String>> {
+    let mut collected = WorkspacePages::new(workspace)?;
+    for (index, page) in pages.iter().enumerate() {
+        let next = collected.add(page)?;
+        if next.is_none() {
+            if index + 1 != pages.len() {
+                return Err(io::Error::other(
+                    "thread/list returned pages after completion",
+                ));
+            }
+            return Ok(collected.into_ids());
+        }
+    }
+    Err(io::Error::other("thread/list pagination was exhausted"))
+}
+
+pub(super) fn exact_workspace_list_params(
+    workspace: &Path,
+    archived: bool,
+    cursor: Option<&str>,
+) -> Value {
+    let mut params = serde_json::Map::new();
+    params.insert("cwd".to_owned(), json!(workspace));
+    params.insert("archived".to_owned(), json!(archived));
+    params.insert("limit".to_owned(), json!(THREAD_LIST_PAGE_SIZE));
+    params.insert("sourceKinds".to_owned(), json!(ALL_THREAD_SOURCE_KINDS));
+    params.insert("modelProviders".to_owned(), json!([]));
+    if let Some(cursor) = cursor {
+        params.insert("cursor".to_owned(), json!(cursor));
+    }
+    Value::Object(params)
+}
+
+type NativeWebSocket = WebSocketStream<UnixStream>;
+
+pub(super) struct NativeConnection {
+    websocket: NativeWebSocket,
+    next_id: u64,
+    identity: Option<InitializedIdentity>,
+}
+
+impl NativeConnection {
+    async fn connect(endpoint: &ResolvedEndpoint, budget: CleanupBudget) -> Result<Self, LiveCode> {
+        budget.check()?;
+        validate_native_endpoint(endpoint).map_err(|_| LiveCode::EndpointRejected)?;
+        let stream = budget
+            .deadline
+            .run_io(
+                UnixStream::connect(endpoint.socket_path()),
+                LiveCode::EndpointRejected,
+            )
+            .await?;
+        let (websocket, _) = budget
+            .deadline
+            .run(async {
+                client_async("ws://localhost/rpc", stream)
+                    .await
+                    .map_err(|_| LiveCode::EndpointRejected)
+            })
+            .await?;
+        Ok(Self {
             websocket,
             next_id: 1,
-        };
-        let initialized = native
+            identity: None,
+        })
+    }
+
+    pub(super) async fn initialize(&mut self, budget: CleanupBudget) -> Result<(), LiveCode> {
+        let initialized = self
             .request(
                 "initialize",
                 json!({
                     "clientInfo": {
-                        "name": name,
-                        "title": title,
-                        "version": env!("CARGO_PKG_VERSION")
+                        "name": "codex_session_control_live_test",
+                        "title": "Codex Session Control Live Test",
+                        "version": env!("CARGO_PKG_VERSION"),
                     },
                     "capabilities": {
                         "experimentalApi": true,
                         "mcpServerOpenaiFormElicitation": false,
                         "requestAttestation": false,
-                        "optOutNotificationMethods": []
-                    }
+                        "optOutNotificationMethods": [],
+                    },
                 }),
+                budget,
             )
             .await?;
-        assert_eq!(
-            Path::new(initialized["codexHome"].as_str().unwrap()),
-            self.codex_home
+        let identity = InitializedIdentity::from_initialize(
+            initialized.get("codexHome").and_then(Value::as_str),
+            initialized.get("userAgent").and_then(Value::as_str),
         );
-        assert!(
-            initialized["userAgent"]
-                .as_str()
-                .unwrap()
-                .contains(env!("CODEX_SESSION_CONTROL_TESTED_CODEX_VERSION"))
-        );
-        native
-            .websocket
-            .send(Message::text(json!({"method": "initialized"}).to_string()))
-            .await?;
-        Ok(native)
-    }
-
-    pub(super) async fn start_thread(
-        &self,
-        native: &mut NativeConnection,
-    ) -> Result<String, Box<dyn Error>> {
-        let response = native
-            .request(
-                "thread/start",
-                json!({
-                    "model": "session-control-test",
-                    "modelProvider": "session-control-local",
-                    "cwd": self.workspace,
-                    "approvalPolicy": "never",
-                    "sandbox": "read-only"
-                }),
-            )
-            .await?;
-        response["thread"]["id"]
-            .as_str()
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| "thread/start omitted thread id".into())
-    }
-
-    pub(super) async fn wait_for_thread_list(
-        &self,
-        native: &mut NativeConnection,
-        thread_id: &str,
-    ) -> Result<Value, Box<dyn Error>> {
-        tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                let listed = native
-                    .request(
-                        "thread/list",
-                        json!({"limit": 10, "sourceKinds": ALL_SOURCE_KINDS}),
-                    )
-                    .await?;
-                if listed["data"].as_array().is_some_and(|threads| {
-                    threads
-                        .iter()
-                        .any(|thread| thread["id"].as_str() == Some(thread_id))
-                }) {
-                    return Ok::<Value, Box<dyn Error>>(listed);
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .map_err(|_| format!("thread/list did not converge for {thread_id}"))?
-    }
-
-    pub(super) async fn start_turn(
-        &self,
-        native: &mut NativeConnection,
-        thread_id: &str,
-        prompt: &str,
-    ) -> Result<String, Box<dyn Error>> {
-        let response = native
-            .request(
-                "turn/start",
-                json!({
-                    "threadId": thread_id,
-                    "input": [{"type": "text", "text": prompt}]
-                }),
-            )
-            .await?;
-        response["turn"]["id"]
-            .as_str()
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| "turn/start omitted turn id".into())
-    }
-
-    pub(super) async fn wait_for_turn_status(
-        &self,
-        native: &mut NativeConnection,
-        thread_id: &str,
-        turn_id: &str,
-        expected: &str,
-    ) -> Result<(), Box<dyn Error>> {
-        tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                let turns = native
-                    .request(
-                        "thread/turns/list",
-                        json!({
-                            "threadId": thread_id,
-                            "limit": 10,
-                            "itemsView": "notLoaded",
-                            "sortDirection": "desc"
-                        }),
-                    )
-                    .await?;
-                if turns["data"].as_array().is_some_and(|turns| {
-                    turns.iter().any(|turn| {
-                        turn["id"].as_str() == Some(turn_id)
-                            && turn["status"].as_str() == Some(expected)
-                    })
-                }) {
-                    return Ok::<(), Box<dyn Error>>(());
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .map_err(|_| format!("turn {turn_id} did not reach {expected}"))?
-    }
-
-    pub(super) async fn restart(&mut self) -> Result<(), Box<dyn Error>> {
-        self.stop().await?;
-        self.launch().await
-    }
-
-    pub(super) async fn stop(&mut self) -> Result<(), Box<dyn Error>> {
-        if let Some(mut child) = self.child.take() {
-            let pid = child.id().ok_or("app-server pid is unavailable")?;
-            signal_process_group(pid, rustix::process::Signal::TERM)?;
-            match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
-                Ok(wait_result) => {
-                    wait_result?;
-                }
-                Err(_) => {
-                    signal_process_group(pid, rustix::process::Signal::KILL)?;
-                    child.wait().await?;
-                }
-            }
-        }
-        if self.socket.exists() {
-            if UnixStream::connect(&self.socket).await.is_ok() {
-                return Err("app-server socket still accepts connections after exit".into());
-            }
-            fs::remove_file(&self.socket)?;
-        }
+        self.identity = Some(identity);
         Ok(())
     }
 
-    pub(super) async fn stop_and_clean_disposable(&mut self) -> Result<(), Box<dyn Error>> {
-        self.stop().await?;
-        let paths = self
-            .disposable_paths
-            .take()
-            .ok_or("disposable path ownership was unavailable")?;
-        let absent = paths.absent_paths().map(Path::to_path_buf);
-        drop(paths);
-        for path in absent {
-            match fs::symlink_metadata(&path) {
-                Ok(_) => {
-                    return Err(
-                        format!("disposable path survived cleanup: {}", path.display()).into(),
-                    );
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        Ok(())
-    }
-
-    pub(super) fn identity(&self) -> Result<ProcessIdentity, Box<dyn Error>> {
-        let pid = self
-            .child
+    pub(super) fn recovery_home(&self) -> Result<&Path, LiveCode> {
+        self.identity
             .as_ref()
-            .ok_or("app-server is stopped")?
-            .id()
-            .ok_or("app-server pid is unavailable")?;
-        process_identity(pid)
-    }
-
-    pub(super) fn endpoint(&self) -> &ResponsesEndpoint {
-        &self.endpoint
-    }
-
-    pub(super) fn socket_path(&self) -> &Path {
-        &self.socket
-    }
-
-    pub(super) fn codex_version(&self) -> &str {
-        &self.codex_version
-    }
-
-    pub(super) async fn schema_digest(&self) -> Result<String, Box<dyn Error>> {
-        let output = self.root.path().join("schema");
-        fs::create_dir(&output)?;
-        fs::set_permissions(&output, fs::Permissions::from_mode(0o700))?;
-        let result = run_codex_in_home_output(
-            &self.codex,
-            &self.codex_home,
-            self.root.path(),
-            [
-                "app-server",
-                "generate-json-schema",
-                "--experimental",
-                "--out",
-                output.to_str().unwrap(),
-            ],
-        )
-        .await?;
-        if !result.status.success() {
-            return Err(format!(
-                "schema generation failed: {}",
-                String::from_utf8_lossy(&result.stderr)
-            )
-            .into());
-        }
-        aggregate_schema_digest(&output)
-    }
-
-    pub(super) fn codex_home_contains_session(&self) -> Result<bool, Box<dyn Error>> {
-        fn contains_file(path: &Path) -> io::Result<bool> {
-            if !path.exists() {
-                return Ok(false);
-            }
-            for entry in fs::read_dir(path)? {
-                let entry = entry?;
-                if entry.file_type()?.is_file()
-                    || (entry.file_type()?.is_dir() && contains_file(&entry.path())?)
-                {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }
-        contains_file(&self.codex_home.join("sessions")).map_err(Into::into)
-    }
-
-    pub(super) fn disposable_paths(&self) -> Result<&DisposablePaths, Box<dyn Error>> {
-        self.disposable_paths
-            .as_ref()
-            .ok_or_else(|| "disposable path ownership was unavailable".into())
-    }
-}
-
-impl LiveHarness {
-    pub(super) async fn spawn_remote(&self, prompt: &str) -> Result<RemoteClient, Box<dyn Error>> {
-        self.spawn_pty(
-            [
-                shell_quote(&self.codex),
-                "--remote".to_owned(),
-                shell_quote_text(&format!("unix://{}", self.socket.display())),
-                "--no-alt-screen".to_owned(),
-                "-C".to_owned(),
-                shell_quote(&self.workspace),
-                "-a".to_owned(),
-                "never".to_owned(),
-                "-s".to_owned(),
-                "read-only".to_owned(),
-                shell_quote_text(prompt),
-            ]
-            .join(" "),
-        )
-        .await
-    }
-
-    pub(super) async fn spawn_wrapper_resume(
-        &self,
-        controller: &Path,
-        thread: &str,
-        prompt: &str,
-    ) -> Result<RemoteClient, Box<dyn Error>> {
-        self.spawn_pty(
-            [
-                shell_quote(controller),
-                "codex".to_owned(),
-                "resume".to_owned(),
-                "--no-alt-screen".to_owned(),
-                "-C".to_owned(),
-                shell_quote(&self.workspace),
-                "-a".to_owned(),
-                "never".to_owned(),
-                "-s".to_owned(),
-                "read-only".to_owned(),
-                shell_quote_text(thread),
-                shell_quote_text(prompt),
-            ]
-            .join(" "),
-        )
-        .await
-    }
-
-    pub(super) async fn spawn_pty(
-        &self,
-        command_line: String,
-    ) -> Result<RemoteClient, Box<dyn Error>> {
-        let script = ["/usr/bin/script", "/bin/script"]
-            .into_iter()
-            .map(PathBuf::from)
-            .find(|path| path.is_file())
-            .ok_or("script(1) is required for remote CLI PTY coverage")?;
-        let mut command = Command::new(script);
-        scrub_command(
-            &mut command,
-            &self.codex_home,
-            &self.process_home,
-            self.process_runtime.as_deref(),
-        );
-        command
-            .args(["-qefc", &command_line, "/dev/null"])
-            .env("TERM", "xterm-256color")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        command.as_std_mut().process_group(0);
-        let child = command.spawn()?;
-        let pid = child.id().ok_or("remote CLI pid unavailable")?;
-        Ok(RemoteClient {
-            child: Some(child),
-            process_group: pid,
-        })
-    }
-
-    pub(super) async fn install_projection(&self) -> Result<(), Box<dyn Error>> {
-        let marketplace = self.root.path().join("marketplace");
-        let plugin = marketplace.join("plugins/codex-session-control");
-        fs::create_dir_all(marketplace.join(".agents/plugins"))?;
-        fs::create_dir_all(&plugin)?;
-        for directory in [
-            &marketplace,
-            &marketplace.join(".agents"),
-            &marketplace.join(".agents/plugins"),
-            &marketplace.join("plugins"),
-            &plugin,
-        ] {
-            fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
-        }
-        atomic_write(
-            &marketplace.join(".agents/plugins/marketplace.json"),
-            include_bytes!("../../assets/marketplace/.agents/plugins/marketplace.json"),
-            0o644,
-        )?;
-        let plugin_manifest = include_str!(
-            "../../assets/marketplace/plugins/codex-session-control/.codex-plugin/plugin.json"
-        )
-        .replace("__PRODUCT_VERSION__", env!("CARGO_PKG_VERSION"));
-        fs::create_dir_all(plugin.join(".codex-plugin"))?;
-        fs::set_permissions(
-            plugin.join(".codex-plugin"),
-            fs::Permissions::from_mode(0o700),
-        )?;
-        atomic_write(
-            &plugin.join(".codex-plugin/plugin.json"),
-            plugin_manifest.as_bytes(),
-            0o644,
-        )?;
-        let mcp = include_str!("../../assets/marketplace/plugins/codex-session-control/.mcp.json")
-            .replace(
-                "__INSTALLED_EXECUTABLE__",
-                configured_controller()?.to_str().unwrap(),
-            );
-        atomic_write(&plugin.join(".mcp.json"), mcp.as_bytes(), 0o644)?;
-        for args in [
-            vec![
-                "plugin".to_owned(),
-                "marketplace".to_owned(),
-                "add".to_owned(),
-                marketplace.display().to_string(),
-                "--json".to_owned(),
-            ],
-            vec![
-                "plugin".to_owned(),
-                "add".to_owned(),
-                "codex-session-control@codex-session-control-local".to_owned(),
-                "--json".to_owned(),
-            ],
-        ] {
-            let output = self
-                .run_codex_output(args.iter().map(String::as_str))
-                .await?;
-            if !output.status.success() {
-                return Err(format!(
-                    "projection registration failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                )
-                .into());
-            }
-        }
-        let installed = self.run_codex_output(["plugin", "list", "--json"]).await?;
-        if !installed.status.success() {
-            return Err(format!(
-                "projection verification failed: {}",
-                String::from_utf8_lossy(&installed.stderr)
-            )
-            .into());
-        }
-        let installed: Value = serde_json::from_slice(&installed.stdout)?;
-        if !installed["installed"].as_array().is_some_and(|plugins| {
-            plugins.iter().any(|plugin| {
-                plugin["pluginId"].as_str()
-                    == Some("codex-session-control@codex-session-control-local")
-                    && plugin["installed"].as_bool() == Some(true)
-                    && plugin["enabled"].as_bool() == Some(true)
+            .ok_or(LiveCode::IdentityUnverified)?
+            .recovery_home(EXPECTED_CODEX_VERSION)
+            .map_err(|code| match code {
+                "version_unsupported" => LiveCode::VersionUnsupported,
+                _ => LiveCode::IdentityUnverified,
             })
-        }) {
-            return Err(format!("native plugin state did not converge: {installed}").into());
-        }
+    }
+
+    pub(super) async fn finish_initialization(
+        &mut self,
+        budget: CleanupBudget,
+    ) -> Result<(), LiveCode> {
+        budget
+            .deadline
+            .run(async {
+                self.websocket
+                    .send(Message::text(json!({"method": "initialized"}).to_string()))
+                    .await
+                    .map_err(|_| LiveCode::ArchiveProofFailed)
+            })
+            .await?;
         Ok(())
     }
 
-    pub(super) async fn run_codex_output(
-        &self,
-        args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
-    ) -> Result<std::process::Output, Box<dyn Error>> {
-        let mut command = Command::new(&self.codex);
-        scrub_command(
-            &mut command,
-            &self.codex_home,
-            &self.process_home,
-            self.process_runtime.as_deref(),
-        );
-        Ok(command.args(args).output().await?)
+    pub(super) async fn request(
+        &mut self,
+        _method: &str,
+        params: impl serde::Serialize,
+        budget: CleanupBudget,
+    ) -> Result<Value, LiveCode> {
+        budget.check()?;
+        let id = self.next_id;
+        self.next_id += 1;
+        let message = serde_json::to_string(&json!({
+            "id": id,
+            "method": _method,
+            "params": params
+        }))
+        .map_err(|_| LiveCode::ArchiveProofFailed)?;
+        budget.check()?;
+        budget
+            .deadline
+            .run(async {
+                self.websocket
+                    .send(Message::text(message))
+                    .await
+                    .map_err(|_| LiveCode::ArchiveProofFailed)
+            })
+            .await?;
+        budget
+            .deadline
+            .run(async {
+                loop {
+                    let frame = self
+                        .websocket
+                        .next()
+                        .await
+                        .ok_or(LiveCode::ArchiveProofFailed)?
+                        .map_err(|_| LiveCode::ArchiveProofFailed)?;
+                    let Message::Text(text) = frame else {
+                        continue;
+                    };
+                    let value: Value = serde_json::from_str(text.as_str())
+                        .map_err(|_| LiveCode::ArchiveProofFailed)?;
+                    budget.check()?;
+                    if value.get("id").and_then(Value::as_u64) != Some(id) {
+                        continue;
+                    }
+                    if value.get("error").is_some() {
+                        return Err(LiveCode::ArchiveProofFailed);
+                    }
+                    return value
+                        .get("result")
+                        .cloned()
+                        .ok_or(LiveCode::ArchiveProofFailed);
+                }
+            })
+            .await
     }
 
-    pub(super) fn assert_fixture_clean(&self) -> Result<(), Box<dyn Error>> {
-        self.assert_fixture_clean_with_projection(false)
+    pub(super) async fn shutdown(&mut self, budget: CleanupBudget) -> Result<(), LiveCode> {
+        budget
+            .deadline
+            .run(async {
+                self.websocket
+                    .close(None)
+                    .await
+                    .map_err(|_| LiveCode::ArchiveProofFailed)
+            })
+            .await
     }
+}
 
-    pub(super) fn assert_projected_fixture_clean(&self) -> Result<(), Box<dyn Error>> {
-        self.assert_fixture_clean_with_projection(true)
-    }
+pub(super) struct McpClient {
+    stdin: Option<ChildStdin>,
+    stdout: BufReader<ChildStdout>,
+    next_id: u64,
+    deadline_probe: Option<McpDeadlineProbe>,
+}
 
-    pub(super) fn assert_fixture_clean_with_projection(
-        &self,
-        projection_installed: bool,
-    ) -> Result<(), Box<dyn Error>> {
-        self.endpoint.assert_clean()?;
-        let config = fs::read_to_string(self.codex_home.join("config.toml"))?;
-        let expected =
-            CONFIG_TEMPLATE.replace("__PORT__", &self.endpoint.address.port().to_string());
-        if projection_installed {
-            let mut parsed: toml::Value = toml::from_str(&config)?;
-            let root = parsed
-                .as_table_mut()
-                .ok_or("configured Codex configuration is not a table")?;
-            let marketplaces = root
-                .remove("marketplaces")
-                .ok_or("native marketplace state is missing")?;
-            let plugins = root
-                .remove("plugins")
-                .ok_or("native plugin state is missing")?;
-            if parsed != toml::from_str::<toml::Value>(&expected)?
-                || marketplaces["codex-session-control-local"]["source_type"].as_str()
-                    != Some("local")
-                || marketplaces["codex-session-control-local"]["source"].as_str()
-                    != Some(self.root.path().join("marketplace").to_str().unwrap())
-                || marketplaces["codex-session-control-local"]["last_updated"]
-                    .as_str()
-                    .is_none()
-                || plugins["codex-session-control@codex-session-control-local"]["enabled"].as_bool()
-                    != Some(true)
-            {
-                return Err("configured Codex plugin configuration drifted".into());
-            }
-        } else if config != expected {
-            return Err("configured Codex configuration drifted".into());
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum McpDeadlineStage {
+    Serialize,
+    Write,
+    Flush,
+    Read,
+    Decode,
+}
+
+#[derive(Clone)]
+struct McpDeadlineProbe {
+    block_at: Option<McpDeadlineStage>,
+    observed: Arc<Mutex<Vec<(McpDeadlineStage, Instant)>>>,
+}
+
+impl McpDeadlineProbe {
+    fn blocking_at(block_at: McpDeadlineStage) -> Self {
+        Self {
+            block_at: Some(block_at),
+            observed: Arc::new(Mutex::new(Vec::new())),
         }
-        for forbidden in [
-            "OPENAI_API_KEY",
-            "ANTHROPIC_API_KEY",
-            "AWS_SECRET_ACCESS_KEY",
-            "FIXTURE_CREDENTIAL_SENTINEL",
-        ] {
-            if self
-                .endpoint
-                .requests
+    }
+
+    fn non_blocking() -> Self {
+        Self {
+            block_at: None,
+            observed: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    async fn enter(&self, stage: McpDeadlineStage, deadline: Deadline) -> Result<(), LiveCode> {
+        {
+            let mut observed = self
+                .observed
                 .lock()
-                .unwrap()
-                .iter()
-                .any(|request| request.to_string().contains(forbidden))
-            {
-                return Err(format!("loopback request exposed {forbidden}").into());
-            }
+                .expect("deadline probe lock is not poisoned");
+            observed.push((stage, deadline.at));
         }
-        Ok(())
-    }
-}
-impl Drop for LiveHarness {
-    fn drop(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            if let Some(pid) = child.id() {
-                let _ = signal_process_group(pid, rustix::process::Signal::KILL);
-            }
-            let _ = child.start_kill();
-        }
-    }
-}
-
-pub(super) struct RemoteClient {
-    child: Option<Child>,
-    process_group: u32,
-}
-
-impl RemoteClient {
-    pub(super) async fn stop(&mut self) -> Result<(), Box<dyn Error>> {
-        if let Some(mut child) = self.child.take() {
-            signal_process_group(self.process_group, rustix::process::Signal::TERM)?;
-            if tokio::time::timeout(Duration::from_secs(10), child.wait())
+        if self.block_at == Some(stage) {
+            deadline
+                .run(std::future::pending::<Result<(), LiveCode>>())
                 .await
-                .is_err()
-            {
-                signal_process_group(self.process_group, rustix::process::Signal::KILL)?;
-                child.wait().await?;
-                return Err("remote CLI did not exit after SIGTERM".into());
-            }
+        } else {
+            deadline.check()
         }
-        Ok(())
+    }
+
+    fn snapshot(&self) -> Vec<(McpDeadlineStage, Instant)> {
+        self.observed
+            .lock()
+            .expect("deadline probe lock is not poisoned")
+            .clone()
     }
 }
 
-impl Drop for RemoteClient {
-    fn drop(&mut self) {
-        let _ = signal_process_group(self.process_group, rustix::process::Signal::KILL);
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.start_kill();
+fn project_tool_call_result(result: &Value) -> Result<Value, LiveCode> {
+    if result.get("isError") == Some(&Value::Bool(true)) {
+        return Err(LiveCode::ToolFailed);
+    }
+    result
+        .get("structuredContent")
+        .cloned()
+        .ok_or(LiveCode::ToolFailed)
+}
+
+fn tool_call_params(name: &str, arguments: Value, caller: Option<&str>) -> Value {
+    let mut params = json!({"name": name, "arguments": arguments});
+    if let Some(caller) = caller {
+        params
+            .as_object_mut()
+            .expect("tool call parameters are always an object")
+            .insert("_meta".to_owned(), json!({"threadId": caller}));
+    }
+    params
+}
+
+impl McpClient {
+    async fn enter_deadline_stage(
+        &self,
+        stage: McpDeadlineStage,
+        deadline: Deadline,
+    ) -> Result<(), LiveCode> {
+        match &self.deadline_probe {
+            Some(probe) => probe.enter(stage, deadline).await,
+            None => deadline.check(),
         }
     }
-}
 
-fn signal_process_group(process_group: u32, signal: rustix::process::Signal) -> io::Result<()> {
-    let pid = rustix::process::Pid::from_raw(process_group as i32)
-        .ok_or_else(|| io::Error::other("process group id is zero"))?;
-    rustix::process::kill_process_group(pid, signal).map_err(io::Error::from)
-}
+    async fn start(owner: &mut Option<OwnedMcpChild>) -> Result<Self, LiveCode> {
+        Self::start_with_optional_probe(owner, Deadline::after(STARTUP_TIMEOUT), None).await
+    }
 
-pub(super) fn process_identity(pid: u32) -> Result<ProcessIdentity, Box<dyn Error>> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    let fields = stat
-        .split_once(") ")
-        .ok_or("malformed proc stat")?
-        .1
-        .split_whitespace()
-        .collect::<Vec<_>>();
-    Ok(ProcessIdentity {
-        pid,
-        start_time: fields
-            .get(19)
-            .ok_or("proc stat lacks start time")?
-            .parse()?,
-    })
-}
+    async fn start_with_optional_probe(
+        owner: &mut Option<OwnedMcpChild>,
+        startup: Deadline,
+        deadline_probe: Option<McpDeadlineProbe>,
+    ) -> Result<Self, LiveCode> {
+        let binary = cargo_bin("codex-session-control");
+        if !binary.is_file() {
+            return Err(LiveCode::ChildSpawnFailed);
+        }
+        let mut command = Command::new(binary);
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        Self::start_command(owner, &mut command, startup, deadline_probe).await
+    }
 
-pub(super) fn require_command_success(
-    operation: &str,
-    output: &std::process::Output,
-) -> Result<(), Box<dyn Error>> {
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "{operation} failed with {}:\nstdout:\n{}\nstderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+    async fn start_command(
+        owner: &mut Option<OwnedMcpChild>,
+        command: &mut Command,
+        startup: Deadline,
+        deadline_probe: Option<McpDeadlineProbe>,
+    ) -> Result<Self, LiveCode> {
+        if owner.is_some() {
+            return Err(LiveCode::ChildSpawnFailed);
+        }
+        *owner = Some(OwnedMcpChild::spawn(command)?);
+        let child = owner
+            .as_mut()
+            .expect("spawned MCP child authority is installed before fallible setup");
+        let stdin = child.take_stdin().ok_or(LiveCode::ChildSpawnFailed)?;
+        let stdout = child.take_stdout().ok_or(LiveCode::ChildSpawnFailed)?;
+        let mut client = Self {
+            stdin: Some(stdin),
+            stdout: BufReader::new(stdout),
+            next_id: 1,
+            deadline_probe,
+        };
+        client
+            .request_with_deadline(
+                "initialize",
+                json!({
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": {"name": "live-all-tools", "version": "1.0.0"},
+                }),
+                startup,
+            )
+            .await?;
+        client
+            .notification_with_deadline("notifications/initialized", json!({}), startup)
+            .await?;
+        Ok(client)
+    }
+
+    fn close_stdin(&mut self) {
+        self.stdin.take();
+    }
+
+    pub(super) async fn list_tools(&mut self) -> Result<Value, LiveCode> {
+        self.request("tools/list", json!({})).await
+    }
+
+    pub(super) async fn list_threads(
+        &mut self,
+        workspace: &Path,
+        archived: bool,
+    ) -> Result<Value, LiveCode> {
+        self.call_tool(
+            "threads_list",
+            json!({"cwd": workspace, "archived": archived}),
         )
-        .into())
+        .await
     }
-}
 
-pub(super) fn assert_shutdown_precedes_descriptor_removal(
-    operation: &str,
-    output: &std::process::Output,
-) -> Result<(), Box<dyn Error>> {
-    let stages = String::from_utf8_lossy(&output.stderr);
-    let shutdown_stage = match operation {
-        "disable" => "[verbose] disable: completed service-disable\n",
-        "uninstall" => "[verbose] uninstall: completed service-stop\n",
-        _ => return Err(format!("unsupported shutdown operation: {operation}").into()),
-    };
-    let stop = stages
-        .find(shutdown_stage)
-        .ok_or_else(|| format!("{operation} did not complete service shutdown"))?;
-    let descriptor_stage = format!("[verbose] {operation}: completed descriptor-remove\n");
-    let remove = stages
-        .find(&descriptor_stage)
-        .ok_or_else(|| format!("{operation} did not complete descriptor removal"))?;
-    if stop >= remove {
-        return Err(format!("{operation} removed the descriptor before service shutdown").into());
-    }
-    Ok(())
-}
-
-fn configured_codex() -> Result<PathBuf, Box<dyn Error>> {
-    if let Some(configured) = std::env::var_os("CODEX_SESSION_CONTROL_CODEX_BIN") {
-        let configured = PathBuf::from(configured);
-        if configured.is_absolute() && configured.is_file() {
-            return Ok(configured);
-        }
-        return Err("CODEX_SESSION_CONTROL_CODEX_BIN must be an absolute file".into());
-    }
-    for directory in std::env::split_paths(&std::env::var_os("PATH").ok_or("PATH is missing")?) {
-        let candidate = directory.join("codex");
-        if candidate.is_file() {
-            return Ok(candidate.canonicalize()?);
-        }
-    }
-    Err("configured installed Codex CLI was not found".into())
-}
-
-pub(super) fn configured_controller() -> Result<PathBuf, Box<dyn Error>> {
-    if let Some(configured) = std::env::var_os("CODEX_SESSION_CONTROL_CONTROLLER_BIN") {
-        let configured = PathBuf::from(configured);
-        if configured.is_absolute() && configured.is_file() {
-            return Ok(configured);
-        }
-        return Err("CODEX_SESSION_CONTROL_CONTROLLER_BIN must be an absolute file".into());
-    }
-    Ok(cargo_bin("codex-session-control"))
-}
-
-pub(super) fn scrub_command(
-    command: &mut Command,
-    codex_home: &Path,
-    home: &Path,
-    runtime: Option<&Path>,
-) {
-    command
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("HOME", home)
-        .env("CODEX_HOME", codex_home);
-    if let Some(runtime) = runtime {
-        command.env("XDG_RUNTIME_DIR", runtime);
-    }
-}
-
-async fn run_codex_in_home<const N: usize>(
-    codex: &Path,
-    codex_home: &Path,
-    home: &Path,
-    args: [&str; N],
-) -> Result<String, Box<dyn Error>> {
-    let output = run_codex_in_home_output(codex, codex_home, home, args).await?;
-    if !output.status.success() {
-        return Err(format!(
-            "configured Codex command failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+    pub(super) async fn create_thread(&mut self, workspace: &Path) -> Result<Value, LiveCode> {
+        self.call_tool(
+            "thread_create",
+            json!({
+                "cwd": workspace,
+                "prompt": "Remain available for the live session-control validation.",
+            }),
         )
-        .into());
+        .await
     }
-    String::from_utf8(output.stdout).map_err(Into::into)
-}
 
-async fn run_codex_in_home_output(
-    codex: &Path,
-    codex_home: &Path,
-    home: &Path,
-    args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
-) -> Result<std::process::Output, Box<dyn Error>> {
-    let mut command = Command::new(codex);
-    scrub_command(&mut command, codex_home, home, None);
-    Ok(command.args(args).output().await?)
-}
+    pub(super) async fn fork_thread(
+        &mut self,
+        owned_id: &OwnedThreadId,
+    ) -> Result<Value, LiveCode> {
+        self.call_tool(
+            "thread_fork",
+            json!({"threadId": owned_id.as_str(), "deferGoalContinuation": false}),
+        )
+        .await
+    }
 
-fn aggregate_schema_digest(root: &Path) -> Result<String, Box<dyn Error>> {
-    fn ordered(value: Value) -> Value {
-        match value {
-            Value::Object(object) => {
-                let mut entries = object.into_iter().collect::<Vec<_>>();
-                entries.sort_by(|left, right| left.0.cmp(&right.0));
-                Value::Object(
-                    entries
-                        .into_iter()
-                        .map(|(key, value)| (key, ordered(value)))
-                        .collect(),
-                )
+    pub(super) async fn read_thread(
+        &mut self,
+        owned_id: &OwnedThreadId,
+    ) -> Result<Value, LiveCode> {
+        self.call_tool("thread_read", json!({"threadId": owned_id.as_str()}))
+            .await
+    }
+
+    pub(super) async fn wait_threads(
+        &mut self,
+        caller: &OwnedThreadId,
+        owned_id: &OwnedThreadId,
+    ) -> Result<Value, LiveCode> {
+        let deadline = Deadline::after(WAIT_REQUEST_TIMEOUT);
+        let timeout_ms = deadline.native_wait_timeout_ms()?;
+        self.call_tool_request(
+            tool_call_params(
+                "threads_wait",
+                json!({"threadIds": [owned_id.as_str()], "timeoutMs": timeout_ms}),
+                Some(caller.as_str()),
+            ),
+            deadline,
+        )
+        .await
+    }
+
+    pub(super) async fn send_message(
+        &mut self,
+        caller: &OwnedThreadId,
+        owned_id: &OwnedThreadId,
+    ) -> Result<Value, LiveCode> {
+        self.call_tool_as(
+            caller,
+            "thread_message_send",
+            json!({
+                "threadId": owned_id.as_str(),
+                "prompt": "Reply exactly READY and take no other action.",
+            }),
+        )
+        .await
+    }
+
+    pub(super) async fn set_title(&mut self, owned_id: &OwnedThreadId) -> Result<Value, LiveCode> {
+        self.call_tool(
+            "thread_title_set",
+            json!({"threadId": owned_id.as_str(), "title": "Disposable live validation"}),
+        )
+        .await
+    }
+
+    pub(super) async fn get_goal(
+        &mut self,
+        caller: &OwnedThreadId,
+        owned_id: &OwnedThreadId,
+    ) -> Result<Value, LiveCode> {
+        self.call_tool_as(
+            caller,
+            "thread_goal_get",
+            json!({"threadId": owned_id.as_str()}),
+        )
+        .await
+    }
+
+    pub(super) async fn set_goal(
+        &mut self,
+        caller: &OwnedThreadId,
+        owned_id: &OwnedThreadId,
+    ) -> Result<Value, LiveCode> {
+        self.call_tool_as(
+            caller,
+            "thread_goal_set",
+            json!({"threadId": owned_id.as_str(), "objective": "Complete live validation."}),
+        )
+        .await
+    }
+
+    pub(super) async fn pause_goal(
+        &mut self,
+        caller: &OwnedThreadId,
+        owned_id: &OwnedThreadId,
+    ) -> Result<Value, LiveCode> {
+        self.call_tool_as(
+            caller,
+            "thread_goal_pause",
+            json!({"threadId": owned_id.as_str()}),
+        )
+        .await
+    }
+
+    pub(super) async fn resume_goal(
+        &mut self,
+        caller: &OwnedThreadId,
+        owned_id: &OwnedThreadId,
+    ) -> Result<Value, LiveCode> {
+        self.call_tool_as(
+            caller,
+            "thread_goal_resume",
+            json!({"threadId": owned_id.as_str()}),
+        )
+        .await
+    }
+
+    pub(super) async fn clear_goal(
+        &mut self,
+        caller: &OwnedThreadId,
+        owned_id: &OwnedThreadId,
+    ) -> Result<Value, LiveCode> {
+        self.call_tool_as(
+            caller,
+            "thread_goal_clear",
+            json!({"threadId": owned_id.as_str()}),
+        )
+        .await
+    }
+
+    pub(super) async fn interrupt(
+        &mut self,
+        caller: &OwnedThreadId,
+        owned_id: &OwnedThreadId,
+    ) -> Result<Value, LiveCode> {
+        self.call_tool_as(
+            caller,
+            "thread_interrupt",
+            json!({"threadId": owned_id.as_str(), "includeDescendants": false}),
+        )
+        .await
+    }
+
+    async fn call_tool(&mut self, name: &str, arguments: Value) -> Result<Value, LiveCode> {
+        let deadline = Deadline::after(REQUEST_TIMEOUT);
+        self.call_tool_request(tool_call_params(name, arguments, None), deadline)
+            .await
+    }
+
+    async fn call_tool_as(
+        &mut self,
+        caller: &OwnedThreadId,
+        name: &str,
+        arguments: Value,
+    ) -> Result<Value, LiveCode> {
+        let deadline = Deadline::after(REQUEST_TIMEOUT);
+        self.call_tool_request(
+            tool_call_params(name, arguments, Some(caller.as_str())),
+            deadline,
+        )
+        .await
+    }
+
+    async fn call_tool_request(
+        &mut self,
+        params: Value,
+        deadline: Deadline,
+    ) -> Result<Value, LiveCode> {
+        let response = self
+            .request_with_deadline(TOOLS_CALL_METHOD, params, deadline)
+            .await?;
+        project_tool_call_result(&response)
+    }
+
+    async fn request(&mut self, method: &str, params: Value) -> Result<Value, LiveCode> {
+        self.request_with_deadline(method, params, Deadline::after(REQUEST_TIMEOUT))
+            .await
+    }
+
+    async fn request_with_deadline(
+        &mut self,
+        method: &str,
+        params: Value,
+        deadline: Deadline,
+    ) -> Result<Value, LiveCode> {
+        deadline.check()?;
+        let id = self.next_id;
+        self.next_id += 1;
+        let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        self.enter_deadline_stage(McpDeadlineStage::Serialize, deadline)
+            .await?;
+        let mut encoded = serde_json::to_vec(&message).map_err(|_| LiveCode::ToolFailed)?;
+        deadline.check()?;
+        if encoded.len() >= MAX_MCP_FRAME_BYTES {
+            return Err(LiveCode::ToolFailed);
+        }
+        encoded.push(b'\n');
+        self.enter_deadline_stage(McpDeadlineStage::Write, deadline)
+            .await?;
+        {
+            let stdin = self.stdin.as_mut().ok_or(LiveCode::ToolFailed)?;
+            deadline
+                .run_io(stdin.write_all(&encoded), LiveCode::ToolFailed)
+                .await?;
+        }
+        self.enter_deadline_stage(McpDeadlineStage::Flush, deadline)
+            .await?;
+        let stdin = self.stdin.as_mut().ok_or(LiveCode::ToolFailed)?;
+        deadline.run_io(stdin.flush(), LiveCode::ToolFailed).await?;
+        loop {
+            self.enter_deadline_stage(McpDeadlineStage::Read, deadline)
+                .await?;
+            let line = read_bounded_line(&mut self.stdout, deadline, MAX_MCP_FRAME_BYTES).await?;
+            deadline.check()?;
+            self.enter_deadline_stage(McpDeadlineStage::Decode, deadline)
+                .await?;
+            let value: Value = serde_json::from_slice(&line).map_err(|_| LiveCode::ToolFailed)?;
+            deadline.check()?;
+            if value.get("id").and_then(Value::as_u64) != Some(id) {
+                continue;
             }
-            Value::Array(values) => Value::Array(values.into_iter().map(ordered).collect()),
-            scalar => scalar,
+            if value.get("error").is_some() {
+                return Err(LiveCode::ToolFailed);
+            }
+            return value.get("result").cloned().ok_or(LiveCode::ToolFailed);
         }
     }
-    fn collect(
-        root: &Path,
-        directory: &Path,
-        files: &mut Vec<(String, PathBuf)>,
-    ) -> Result<(), Box<dyn Error>> {
-        for entry in fs::read_dir(directory)? {
-            let entry = entry?;
-            let path = entry.path();
-            if entry.file_type()?.is_dir() {
-                collect(root, &path, files)?;
-            } else if entry.file_type()?.is_file() {
-                files.push((
-                    path.strip_prefix(root)?
-                        .to_string_lossy()
-                        .replace('\\', "/"),
-                    path,
-                ));
-            } else {
-                return Err("schema bundle contains a non-file entry".into());
-            }
+
+    async fn notification_with_deadline(
+        &mut self,
+        method: &str,
+        params: Value,
+        deadline: Deadline,
+    ) -> Result<(), LiveCode> {
+        deadline.check()?;
+        let message = json!({"jsonrpc": "2.0", "method": method, "params": params});
+        self.enter_deadline_stage(McpDeadlineStage::Serialize, deadline)
+            .await?;
+        let mut encoded = serde_json::to_vec(&message).map_err(|_| LiveCode::ToolFailed)?;
+        deadline.check()?;
+        if encoded.len() >= MAX_MCP_FRAME_BYTES {
+            return Err(LiveCode::ToolFailed);
         }
+        encoded.push(b'\n');
+        self.enter_deadline_stage(McpDeadlineStage::Write, deadline)
+            .await?;
+        {
+            let stdin = self.stdin.as_mut().ok_or(LiveCode::ToolFailed)?;
+            deadline
+                .run_io(stdin.write_all(&encoded), LiveCode::ToolFailed)
+                .await?;
+        }
+        self.enter_deadline_stage(McpDeadlineStage::Flush, deadline)
+            .await?;
+        let stdin = self.stdin.as_mut().ok_or(LiveCode::ToolFailed)?;
+        deadline.run_io(stdin.flush(), LiveCode::ToolFailed).await?;
         Ok(())
     }
-
-    let mut files = Vec::new();
-    collect(root, root, &mut files)?;
-    files.sort_by(|left, right| left.0.cmp(&right.0));
-    let mut digest = Sha256::new();
-    for (relative, path) in files {
-        digest.update(relative.as_bytes());
-        digest.update([0]);
-        digest.update(serde_json::to_vec(&ordered(serde_json::from_slice(
-            &fs::read(path)?,
-        )?))?);
-        digest.update([0]);
-    }
-    Ok(hex::encode(digest.finalize()))
-}
-
-pub(super) fn shell_quote(path: &Path) -> String {
-    shell_quote_text(&path.to_string_lossy())
-}
-
-pub(super) fn shell_quote_text(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-pub(super) fn request_session_control_tool_names(request: &Value) -> BTreeSet<String> {
-    request["tools"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|tool| {
-            tool["type"].as_str() == Some("namespace")
-                && tool["name"].as_str() == Some("mcp__codex_session_control")
-        })
-        .and_then(|namespace| namespace["tools"].as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|tool| tool["name"].as_str().map(ToOwned::to_owned))
-        .collect()
-}
-
-pub(super) fn request_has_session_control_tools(request: &Value) -> bool {
-    !request_session_control_tool_names(request).is_empty()
-}
-
-pub(super) fn request_has_exact_session_control_tools(request: &Value) -> bool {
-    request_session_control_tool_names(request)
-        == BTreeSet::from(SESSION_CONTROL_TOOLS.map(str::to_owned))
 }

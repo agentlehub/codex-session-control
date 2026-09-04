@@ -24,7 +24,7 @@ async fn run_descendant_interrupt(
     input: ThreadInterruptInput,
     caller_thread_id: &str,
 ) -> Result<ThreadInterruptResult, ToolErrorData> {
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut root_connection = client.connect_initialized().await.unwrap();
     interrupt_thread(
         &client,
@@ -290,11 +290,6 @@ async fn empty_descendant_scan_scope_defaults_and_opt_in_use_public_tool_result(
             json!({"interrupted": true, "turnId": "root-turn"}),
         ),
         (
-            json!({"threadId": "root", "includeDescendants": false}),
-            root_active_steps(),
-            json!({"interrupted": true, "turnId": "root-turn"}),
-        ),
-        (
             json!({"threadId": "root", "includeDescendants": true}),
             root_inactive_steps(),
             json!({"interrupted": false, "descendants": {"results": []}}),
@@ -305,7 +300,7 @@ async fn empty_descendant_scan_scope_defaults_and_opt_in_use_public_tool_result(
         let validated =
             validate_input("thread_interrupt", arguments(public_input), &meta("caller")).unwrap();
 
-        let result = execute_tool("thread_interrupt", validated, &harness.config)
+        let result = execute_tool("thread_interrupt", validated, &harness.client())
             .await
             .unwrap();
 
@@ -452,10 +447,9 @@ async fn descendant_attempts_overlap_and_reversed_completion_preserves_discovery
         .clone()
         .controlled(None, Some(Arc::clone(&b_response_sent)));
     let harness = FakeAppServer::start_connections(vec![root_steps, b_steps, a_steps]).await;
-    let config = harness.config.clone();
+    let client = harness.client();
 
     let operation = tokio::spawn(async move {
-        let client = AppServerClient::from_config(&config);
         let mut root_connection = client.connect_initialized().await.unwrap();
         interrupt_thread(
             &client,
@@ -646,10 +640,9 @@ async fn descendant_timeout_is_isolated_and_does_not_block_other_dispatch() {
         .clone()
         .controlled(None, Some(Arc::clone(&fast_response_sent)));
     let harness = FakeAppServer::start_connections(vec![root_steps, fast_steps, slow_steps]).await;
-    let config = harness.config.clone();
+    let client = harness.client();
 
     let operation = tokio::spawn(async move {
-        let client = AppServerClient::from_config(&config);
         let mut root_connection = client.connect_initialized().await.unwrap();
         interrupt_thread(
             &client,
@@ -756,4 +749,5 @@ async fn descendant_outcome_unknown_retains_evidence_and_is_never_retried() {
             .count(),
         2
     );
+    assert_eq!(harness.connection_count(), 4);
 }

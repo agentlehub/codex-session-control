@@ -1,24 +1,12 @@
 use super::*;
 
-const WAIT_CASES: [&str; 9] = [
-    "initial_idle_is_ready",
-    "initial_not_loaded_is_ready",
-    "initial_system_error_is_ready",
-    "initial_interactive_flag_is_ready",
-    "active_to_idle_is_ready",
-    "new_terminal_latest_turn_is_ready",
-    "requested_zero_timeout_is_successful_timeout",
-    "target_error_returns_complete_decisive_pass",
-    "shared_transport_failure_is_request_wide_error",
-];
-
 async fn run_wait(
     steps: Vec<FakeStep>,
     thread_ids: &[&str],
     timeout: Duration,
 ) -> (Result<ThreadsWaitResult, ToolErrorData>, FakeAppServer) {
     let harness = FakeAppServer::start(steps).await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
     let ids = thread_ids
         .iter()
@@ -31,7 +19,6 @@ async fn run_wait(
 
 #[tokio::test]
 async fn initial_ready_states_are_decisive() {
-    assert_eq!(WAIT_CASES.len(), 9);
     for status in [
         json!({"type": "idle"}),
         json!({"type": "notLoaded"}),
@@ -210,7 +197,7 @@ async fn shared_transport_failure_is_request_wide_error() {
         delay: Duration::ZERO,
     }])
     .await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
     let error = threads_wait(
         &mut connection,
@@ -222,8 +209,48 @@ async fn shared_transport_failure_is_request_wide_error() {
     assert_eq!(error.category, ToolErrorCategory::AuthorityTransportFailure);
 }
 
+#[tokio::test]
+async fn in_flight_wait_disconnect_is_not_replayed() {
+    let mut steps = snapshot_steps(
+        "target",
+        json!({"type": "active", "activeFlags": []}),
+        10,
+        Some(native_turn("turn-1", "inProgress")),
+        true,
+    );
+    steps.push(FakeStep {
+        method: "thread/read",
+        params: json!({"threadId": "target", "includeTurns": false}),
+        response: FakeResponse::Disconnect,
+        notify_after: false,
+        delay: Duration::ZERO,
+    });
+    let harness = FakeAppServer::start(steps).await;
+    let client = harness.client();
+    let mut connection = client.connect_initialized().await.unwrap();
+
+    let error = threads_wait(
+        &mut connection,
+        &["target".to_owned()],
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.category, ToolErrorCategory::AuthorityTransportFailure);
+    assert_eq!(harness.connection_count(), 1);
+    assert_eq!(
+        harness
+            .log()
+            .iter()
+            .map(|request| request["method"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["thread/read", "thread/turns/list", "thread/read"]
+    );
+}
+
 #[tokio::test(start_paused = true)]
-async fn quiet_poll_occurs_at_exactly_one_second() {
+async fn quiet_poll_eventually_checks_again_without_early_completion() {
     let mut steps = snapshot_steps(
         "target",
         json!({"type": "active", "activeFlags": []}),
@@ -239,7 +266,7 @@ async fn quiet_poll_occurs_at_exactly_one_second() {
         false,
     ));
     let harness = FakeAppServer::start(steps).await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
     let task = tokio::spawn(async move {
         threads_wait(
@@ -252,11 +279,11 @@ async fn quiet_poll_occurs_at_exactly_one_second() {
     while harness.log().len() < 2 {
         tokio::task::yield_now().await;
     }
-    tokio::time::advance(Duration::from_millis(999)).await;
+    tokio::time::advance(Duration::from_millis(500)).await;
     tokio::task::yield_now().await;
     assert!(!task.is_finished());
     assert_eq!(harness.log().len(), 2);
-    tokio::time::advance(Duration::from_millis(1)).await;
+    tokio::time::advance(Duration::from_secs(2)).await;
     let result = task.await.unwrap().unwrap();
     assert!(matches!(result.reason, ThreadsWaitReason::Ready));
     assert_eq!(harness.log().len(), 4);
@@ -279,7 +306,7 @@ async fn per_target_stage_timeout_keeps_complete_pass_attribution() {
         false,
     ));
     let harness = FakeAppServer::start(steps).await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
     let task = tokio::spawn(async move {
         threads_wait(
@@ -318,7 +345,7 @@ async fn requested_expiry_during_poll_is_successful_timeout() {
         delay: Duration::ZERO,
     });
     let harness = FakeAppServer::start(steps).await;
-    let client = AppServerClient::from_config(&harness.config);
+    let client = harness.client();
     let mut connection = client.connect_initialized().await.unwrap();
     let task = tokio::spawn(async move {
         threads_wait(

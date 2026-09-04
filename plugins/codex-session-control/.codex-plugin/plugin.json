@@ -1,0 +1,16 @@
+{
+  "name": "codex-session-control",
+  "version": "0.3.2",
+  "description": "Control Codex sessions via MCP",
+  "author": {
+    "name": "Agentlehub"
+  },
+  "license": "MIT",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Codex session control",
+    "shortDescription": "Control Codex sessions via MCP",
+    "category": "Coding",
+    "capabilities": ["Read", "Write"]
+  }
+}

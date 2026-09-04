@@ -17,7 +17,7 @@ async fn list_forwards_omissions_and_explicit_values_without_filtering() {
             archived: None,
             cwd: None,
         }),
-        &omitted.config,
+        &omitted.client(),
     )
     .await
     .unwrap();
@@ -53,7 +53,7 @@ async fn list_forwards_omissions_and_explicit_values_without_filtering() {
             archived: Some(true),
             cwd: Some("relative-native-cwd".to_owned()),
         }),
-        &explicit.config,
+        &explicit.client(),
     )
     .await
     .unwrap();
@@ -98,7 +98,7 @@ async fn thread_read_uses_one_connection_and_normalizes_optional_nulls() {
             limit: Some(4),
             items_view: Some(TurnItemsView::Full),
         }),
-        &harness.config,
+        &harness.client(),
     )
     .await
     .unwrap();
@@ -149,7 +149,7 @@ async fn explicit_goal_target_never_loads_cross_authority_caller() {
         json!({"goal": goal.clone()}),
     )])
     .await;
-    let result = execute_tool("thread_goal_get", validated, &harness.config)
+    let result = execute_tool("thread_goal_get", validated, &harness.client())
         .await
         .unwrap();
     assert_eq!(result.structured_content, Some(json!({"goal": goal})));
@@ -181,7 +181,7 @@ async fn goal_get_rejects_response_for_a_different_thread() {
         ValidatedInput::ThreadGoalGet(ThreadGoalGetInput {
             thread_id: "target".to_owned(),
         }),
-        &harness.config,
+        &harness.client(),
     )
     .await
     .unwrap_err();

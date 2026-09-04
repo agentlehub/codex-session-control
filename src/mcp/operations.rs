@@ -256,7 +256,7 @@ pub(super) async fn send_message(
                 &context,
             )
             .await?;
-            Ok(ThreadMessageSendResult {
+            return Ok(ThreadMessageSendResult {
                 action: ThreadMessageAction::Steered,
                 thread_id: context.into_thread_id(),
                 turn_id: native_required_string(
@@ -265,45 +265,87 @@ pub(super) async fn send_message(
                     "thread_message_send",
                     "turn/steer",
                 )?,
-            })
+            });
         }
-        ThreadStatus::NotLoaded | ThreadStatus::Idle | ThreadStatus::SystemError => {
-            let context = MutationContext::for_thread(
-                input.thread_id,
-                ReconciliationPolicy::CompactThreadRead,
-            );
-            let mut params = Map::new();
-            params.insert(
-                "threadId".to_owned(),
-                Value::String(context.thread_id().to_owned()),
-            );
-            params.insert("input".to_owned(), text_input);
-            if let Some(model) = input.model {
-                params.insert("model".to_owned(), Value::String(model));
-            }
-            if let Some(effort) = input.reasoning_effort {
-                params.insert("effort".to_owned(), Value::String(effort));
-            }
-            let response = mutation_request(
-                client,
-                connection,
-                "thread_message_send",
-                "turn/start",
-                params,
-                &context,
-            )
-            .await?;
-            let turn = response
-                .get("turn")
-                .ok_or_else(|| malformed_result("thread_message_send", "turn/start"))
-                .and_then(|turn| turn_from_native(turn, "turn/start"))?;
-            Ok(ThreadMessageSendResult {
-                action: ThreadMessageAction::Started,
-                thread_id: context.into_thread_id(),
-                turn_id: turn.id,
-            })
-        }
+        ThreadStatus::NotLoaded => resume_not_loaded_thread(connection, &input.thread_id).await?,
+        ThreadStatus::Idle | ThreadStatus::SystemError => {}
     }
+
+    let context =
+        MutationContext::for_thread(input.thread_id, ReconciliationPolicy::CompactThreadRead);
+    let mut params = Map::new();
+    params.insert(
+        "threadId".to_owned(),
+        Value::String(context.thread_id().to_owned()),
+    );
+    params.insert("input".to_owned(), text_input);
+    if let Some(model) = input.model {
+        params.insert("model".to_owned(), Value::String(model));
+    }
+    if let Some(effort) = input.reasoning_effort {
+        params.insert("effort".to_owned(), Value::String(effort));
+    }
+    let response = mutation_request(
+        client,
+        connection,
+        "thread_message_send",
+        "turn/start",
+        params,
+        &context,
+    )
+    .await?;
+    let turn = response
+        .get("turn")
+        .ok_or_else(|| malformed_result("thread_message_send", "turn/start"))
+        .and_then(|turn| turn_from_native(turn, "turn/start"))?;
+    Ok(ThreadMessageSendResult {
+        action: ThreadMessageAction::Started,
+        thread_id: context.into_thread_id(),
+        turn_id: turn.id,
+    })
+}
+
+async fn resume_not_loaded_thread(
+    connection: &mut AppServerConnection,
+    requested_id: &str,
+) -> Result<(), ToolErrorData> {
+    let response: Value = connection
+        .request(
+            "thread/resume",
+            json!({"threadId": requested_id, "excludeTurns": true}),
+        )
+        .await
+        .map_err(|mut error| {
+            error.tool = "thread_message_send".to_owned();
+            error.stage = "thread/resume".to_owned();
+            error.thread_id = Some(requested_id.to_owned());
+            error
+        })?;
+    let thread = response
+        .get("thread")
+        .ok_or_else(|| malformed_result("thread_message_send", "thread/resume"))
+        .and_then(|thread| thread_from_native(thread, "thread/resume"))
+        .map_err(|mut error| {
+            error.tool = "thread_message_send".to_owned();
+            error.stage = "thread/resume".to_owned();
+            error.thread_id = Some(requested_id.to_owned());
+            error
+        })?;
+    if thread.id != requested_id || matches!(&thread.status, ThreadStatus::NotLoaded) {
+        let mut error = malformed_result("thread_message_send", "thread/resume");
+        error.thread_id = Some(requested_id.to_owned());
+        return Err(error);
+    }
+    if matches!(&thread.status, ThreadStatus::Active { .. }) {
+        let mut error = ToolErrorData::fixed(
+            ToolErrorCategory::NativeConflict,
+            "thread_message_send",
+            "thread/resume",
+        );
+        error.thread_id = Some(requested_id.to_owned());
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn message_snapshot_error(mut error: ToolErrorData, thread_id: &str) -> ToolErrorData {

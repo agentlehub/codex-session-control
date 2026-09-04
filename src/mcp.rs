@@ -16,8 +16,6 @@ use serde_json::Value;
 use crate::{
     app_server::AppServerClient,
     error::{ToolErrorCategory, ToolErrorData},
-    install::load_installed_config,
-    model::ProductConfig,
 };
 
 mod contract;
@@ -70,21 +68,15 @@ async fn execute_validated(
     tool: &str,
     validated: ValidatedInput,
 ) -> Result<CallToolResult, McpError> {
-    let config = load_installed_config().map_err(|_| {
-        error_response(
-            ToolErrorData::fixed(ToolErrorCategory::TargetUnavailable, tool, "configuration"),
-            None,
-        )
-    })?;
-    execute_tool(tool, validated, &config).await
+    let client = AppServerClient::desktop();
+    execute_tool(tool, validated, &client).await
 }
 
 async fn execute_tool(
     tool: &str,
     validated: ValidatedInput,
-    config: &ProductConfig,
+    client: &AppServerClient,
 ) -> Result<CallToolResult, McpError> {
-    let client = AppServerClient::from_config(config);
     let mut connection = client
         .connect_initialized()
         .await
@@ -136,45 +128,45 @@ async fn execute_tool(
             serde_json::to_value(result)
         }
         ValidatedInput::ThreadCreate(input) => serde_json::to_value(
-            create_thread(&client, &mut connection, input)
+            create_thread(client, &mut connection, input)
                 .await
                 .map_err(|error| response_error(tool, error, warning.as_deref()))?,
         ),
         ValidatedInput::ThreadFork(input) => serde_json::to_value(
-            fork_thread(&client, &mut connection, input)
+            fork_thread(client, &mut connection, input)
                 .await
                 .map_err(|error| response_error(tool, error, warning.as_deref()))?,
         ),
         ValidatedInput::ThreadMessageSend(input) => serde_json::to_value(
-            send_message(&client, &mut connection, input)
+            send_message(client, &mut connection, input)
                 .await
                 .map_err(|error| response_error(tool, error, warning.as_deref()))?,
         ),
         ValidatedInput::ThreadTitleSet(input) => serde_json::to_value(
-            set_title(&client, &mut connection, input)
+            set_title(client, &mut connection, input)
                 .await
                 .map_err(|error| response_error(tool, error, warning.as_deref()))?,
         ),
         ValidatedInput::ThreadGoalSet(input) => {
-            let goal = set_goal(&client, &mut connection, input)
+            let goal = set_goal(client, &mut connection, input)
                 .await
                 .map_err(|error| response_error(tool, error, warning.as_deref()))?;
             serde_json::to_value(ThreadGoalSetResult { goal })
         }
         ValidatedInput::ThreadGoalPause(input) => {
-            let goal = pause_goal(&client, &mut connection, input)
+            let goal = pause_goal(client, &mut connection, input)
                 .await
                 .map_err(|error| response_error(tool, error, warning.as_deref()))?;
             serde_json::to_value(ThreadGoalPauseResult { goal })
         }
         ValidatedInput::ThreadGoalResume(input) => {
-            let goal = resume_goal(&client, &mut connection, input)
+            let goal = resume_goal(client, &mut connection, input)
                 .await
                 .map_err(|error| response_error(tool, error, warning.as_deref()))?;
             serde_json::to_value(ThreadGoalResumeResult { goal })
         }
         ValidatedInput::ThreadGoalClear(input) => serde_json::to_value(
-            clear_goal(&client, &mut connection, input)
+            clear_goal(client, &mut connection, input)
                 .await
                 .map_err(|error| response_error(tool, error, warning.as_deref()))?,
         ),
@@ -182,7 +174,7 @@ async fn execute_tool(
             input,
             caller_thread_id,
         } => serde_json::to_value(
-            interrupt_thread(&client, &mut connection, input, caller_thread_id)
+            interrupt_thread(client, &mut connection, input, caller_thread_id)
                 .await
                 .map_err(|error| response_error(tool, error, warning.as_deref()))?,
         ),
