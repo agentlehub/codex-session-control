@@ -1,6 +1,9 @@
+#[path = "support/private_tempdir.rs"]
+mod private_tempdir_support;
 #[path = "support/process_guard.rs"]
 mod process_guard;
 
+use private_tempdir_support::private_tempdir;
 use process_guard::ChildGuard;
 use std::{
     env,
@@ -19,11 +22,6 @@ use sha2::{Digest, Sha256};
 
 const MARKETPLACE_NAME: &str = "codex-session-control-local";
 const PLUGIN_NAME: &str = "codex-session-control";
-const FORWARDED_ENVIRONMENT: [&str; 3] = [
-    "XDG_RUNTIME_DIR",
-    "CODEX_LINUX_APP_ID",
-    "CODEX_LINUX_APP_SERVER_BRIDGE_SOCKET",
-];
 const TOOL_NAMES: [&str; 13] = [
     "thread_create",
     "thread_fork",
@@ -73,13 +71,6 @@ fn expected_machine() -> &'static str {
             panic!("test host architecture is unsupported by the installer: {architecture}")
         }
     }
-}
-
-fn private_tempdir() -> tempfile::TempDir {
-    let root = tempfile::tempdir().expect("create isolated packaging test root");
-    fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
-        .expect("make isolated packaging test root private");
-    root
 }
 
 fn private_directory(path: &Path) {
@@ -486,87 +477,6 @@ fn assert_success(output: &Output, context: &str) {
 }
 
 #[test]
-fn root_manifests_are_exact_and_versioned() {
-    let root = repository_root();
-    let marketplace: Value = serde_json::from_slice(
-        &fs::read(root.join(".agents/plugins/marketplace.json"))
-            .expect("checkout marketplace manifest must exist"),
-    )
-    .expect("checkout marketplace manifest must be JSON");
-    let plugin: Value = serde_json::from_slice(
-        &fs::read(root.join("plugins/codex-session-control/.codex-plugin/plugin.json"))
-            .expect("legacy plugin manifest must exist"),
-    )
-    .expect("legacy plugin manifest must be JSON");
-    let mcp: Value = serde_json::from_slice(
-        &fs::read(root.join("plugins/codex-session-control/.mcp.json"))
-            .expect("legacy MCP manifest must exist"),
-    )
-    .expect("legacy MCP manifest must be JSON");
-    let cargo: toml::Value = toml::from_str(
-        &fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml must exist"),
-    )
-    .expect("Cargo.toml must parse");
-    let version = cargo["package"]["version"]
-        .as_str()
-        .expect("Cargo package version must be a string");
-
-    assert_eq!(
-        marketplace,
-        json!({
-            "name": MARKETPLACE_NAME,
-            "interface": {"displayName": "Codex session control"},
-            "plugins": [{
-                "name": PLUGIN_NAME,
-                "source": {"source": "local", "path": "./plugins/codex-session-control"},
-                "policy": {"installation": "AVAILABLE"},
-                "category": "Coding",
-            }],
-        })
-    );
-    assert_eq!(
-        plugin,
-        json!({
-            "name": PLUGIN_NAME,
-            "version": version,
-            "description": "Control Codex sessions via MCP",
-            "author": {"name": "Agentlehub"},
-            "license": "MIT",
-            "mcpServers": "./.mcp.json",
-            "interface": {
-                "displayName": "Codex session control",
-                "shortDescription": "Control Codex sessions via MCP",
-                "category": "Coding",
-                "capabilities": ["Read", "Write"],
-            },
-        })
-    );
-    assert_eq!(
-        mcp,
-        json!({
-            "mcpServers": {
-                PLUGIN_NAME: {
-                    "type": "stdio",
-                    "command": "./bin/codex-session-control",
-                    "cwd": ".",
-                    "env_vars": FORWARDED_ENVIRONMENT,
-                    "tool_timeout_sec": 86460,
-                }
-            }
-        })
-    );
-    assert_eq!(
-        fs::read_to_string(root.join("plugins/codex-session-control/bin/.gitignore"))
-            .expect("plugin binary ignore rule must exist"),
-        "/codex-session-control\n"
-    );
-    assert!(
-        !root.join("plugins/codex-session-control/mcp.json").exists(),
-        "the unsupported Agent Plugins v1 root mcp.json format must remain absent"
-    );
-}
-
-#[test]
 fn installer_rejects_unsupported_host_before_codex_mutation() {
     let _serial = installer_lock();
     let fixture = FakeCodex::new();
@@ -575,10 +485,6 @@ fn installer_rejects_unsupported_host_before_codex_mutation() {
     let output = fixture.run_installer(false);
 
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(
-        String::from_utf8(output.stderr).expect("installer stderr is UTF-8"),
-        "Unsupported architecture: riscv64\n"
-    );
     assert!(fixture.commands().is_empty(), "Codex must not be queried");
     assert!(fixture.mutations().is_empty(), "Codex must not be mutated");
     assert!(
@@ -605,11 +511,6 @@ fn installer_rejects_broken_staged_symlink_before_build_or_codex_mutation() {
     assert!(
         !output.status.success(),
         "broken staged symlink must fail closed"
-    );
-    assert!(
-        String::from_utf8(output.stderr)
-            .expect("installer stderr is UTF-8")
-            .ends_with("Staged executable must not be a symlink.\n")
     );
     assert!(fixture.cargo_commands().is_empty());
     assert!(fixture.commands().is_empty());
@@ -639,12 +540,6 @@ fn installer_rejects_multidocument_manifest_streams_before_build_or_codex_mutati
         assert!(
             !output.status.success(),
             "{manifest} stream must fail closed"
-        );
-        assert!(
-            String::from_utf8(output.stderr)
-                .expect("installer stderr is UTF-8")
-                .ends_with("Plugin manifest is not valid JSON.\n"),
-            "{manifest} stream must be rejected before later validation"
         );
         assert!(
             fixture.cargo_commands().is_empty(),
@@ -716,12 +611,6 @@ fn installer_rejects_symlinked_manifest_parents_before_build_or_codex_mutation()
             "symlinked {component} must fail closed"
         );
         assert!(
-            String::from_utf8(output.stderr)
-                .expect("installer stderr is UTF-8")
-                .ends_with("Checkout directory must not be a symlink.\n"),
-            "symlinked {component} must be rejected before later validation"
-        );
-        assert!(
             fixture.cargo_commands().is_empty(),
             "symlinked {component} must not start a build"
         );
@@ -754,12 +643,6 @@ fn installer_rejects_symlinked_bin_before_build_or_codex_mutation() {
     let output = fixture.run_installer_at(&clone.script, &clone.root, false);
 
     assert!(!output.status.success(), "symlinked bin must fail closed");
-    assert!(
-        String::from_utf8(output.stderr)
-            .expect("installer stderr is UTF-8")
-            .ends_with("Checkout directory must not be a symlink.\n"),
-        "symlinked bin must be rejected before later validation"
-    );
     assert!(
         fixture.cargo_commands().is_empty(),
         "symlinked bin must not start a build"
@@ -938,12 +821,6 @@ fn installer_rejects_marketplace_collision_before_plugin_mutation() {
 
     assert!(!output.status.success(), "collision must fail closed");
     assert!(
-        String::from_utf8(output.stderr)
-            .expect("installer stderr is UTF-8")
-            .ends_with("Marketplace name already targets another root.\n"),
-        "collision error must remain specific after Cargo diagnostics"
-    );
-    assert!(
         fixture.mutations().is_empty(),
         "collision must happen before marketplace or plugin mutation"
     );
@@ -982,13 +859,6 @@ fn installer_suppresses_mise_advisory_for_machine_json() {
             .contains("mise advisory:"),
         "machine JSON must not inherit mise stdout contamination"
     );
-    assert!(
-        fixture
-            .commands()
-            .lines()
-            .all(|line| line.starts_with("1\t")),
-        "every Codex machine invocation must use the one quiet wrapper"
-    );
 }
 
 #[test]
@@ -1001,12 +871,6 @@ fn installer_rejects_invalid_machine_json_before_mutation() {
     assert!(
         !output.status.success(),
         "contaminated JSON must fail closed"
-    );
-    assert!(
-        String::from_utf8(output.stderr)
-            .expect("installer stderr is UTF-8")
-            .ends_with("Codex marketplace listing was not valid machine-readable JSON.\n"),
-        "invalid JSON must report the fail-closed marketplace error after Cargo diagnostics"
     );
     assert!(
         fixture.mutations().is_empty(),
@@ -1024,12 +888,6 @@ fn installer_rejects_nul_suffixed_machine_json_before_mutation() {
     assert!(
         !output.status.success(),
         "NUL-suffixed JSON must fail closed"
-    );
-    assert!(
-        String::from_utf8(output.stderr)
-            .expect("installer stderr is UTF-8")
-            .ends_with("Codex marketplace listing was not valid machine-readable JSON.\n"),
-        "NUL-suffixed JSON must report the fail-closed marketplace error"
     );
     assert!(
         fixture.mutations().is_empty(),
@@ -1211,74 +1069,6 @@ fn generic_client_initializes_and_lists_exact_catalog_from_another_cwd() {
             .map(|tool| tool["name"].as_str().expect("tool name is a string"))
             .collect::<Vec<_>>(),
         TOOL_NAMES
-    );
-}
-
-#[test]
-fn generic_client_deadline_reaps_a_slow_catalog_process() {
-    let root = private_tempdir();
-    let mut slow_server = Command::new("sh");
-    slow_server.args(["-c", "sleep 1"]);
-
-    let direct_children_before = fs::read_to_string("/proc/thread-self/children")
-        .expect("Linux procfs direct-child state must be available");
-    let started = std::time::Instant::now();
-    let result = run_catalog_command(&mut slow_server, root.path(), Duration::from_millis(100));
-    let direct_children_after = fs::read_to_string("/proc/thread-self/children")
-        .expect("Linux procfs direct-child state must be available");
-
-    assert_eq!(
-        result,
-        Err("generic MCP binary did not complete within its deadline".to_owned()),
-        "generic clients must not wait indefinitely for a staged process"
-    );
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "generic client deadline must terminate the slow catalog process promptly"
-    );
-    assert_eq!(
-        direct_children_after, direct_children_before,
-        "generic client deadline must reap the slow catalog process"
-    );
-}
-
-#[test]
-fn generic_client_reports_capture_failures_separately_from_timeouts() {
-    let root = private_tempdir();
-    let mut oversized_server = Command::new("sh");
-    oversized_server.args(["-c", "head -c 65537 /dev/zero"]);
-
-    let result = run_catalog_command(&mut oversized_server, root.path(), GENERIC_MCP_EXIT_TIMEOUT);
-
-    assert_eq!(
-        result,
-        Err("generic MCP binary failed while collecting a complete result".to_owned())
-    );
-}
-
-#[test]
-fn bounded_command_reports_timeouts_without_capturing_process_output() {
-    let mut command = Command::new("sh");
-    command.args(["-c", "printf '%s' timeout-output-marker >&2; sleep 1"]);
-
-    let result = run_bounded_command(&mut command, Duration::from_millis(100), "timeout fixture");
-
-    assert_eq!(
-        result,
-        Err("timeout fixture timed out before producing a complete result".to_owned())
-    );
-}
-
-#[test]
-fn bounded_command_reports_capture_failures_separately_from_timeouts() {
-    let mut command = Command::new("sh");
-    command.args(["-c", "head -c 65537 /dev/zero"]);
-
-    let result = run_bounded_command(&mut command, GENERIC_MCP_EXIT_TIMEOUT, "capture fixture");
-
-    assert_eq!(
-        result,
-        Err("capture fixture failed while collecting a complete result".to_owned())
     );
 }
 

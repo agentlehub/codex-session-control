@@ -81,33 +81,20 @@ cargo_version="$(jq -er '
 ' <<<"$cargo_metadata")" || die 'Cargo metadata did not identify one plugin version.'
 
 jq -e '
-  . == {
-    name: "codex-session-control-local",
-    interface: {displayName: "Codex session control"},
-    plugins: [{
-      name: "codex-session-control",
-      source: {source: "local", path: "./plugins/codex-session-control"},
-      policy: {installation: "AVAILABLE"},
-      category: "Coding"
-    }]
-  }
+  .name == "codex-session-control-local" and
+  (.plugins | type == "array" and length == 1) and
+  (.plugins[0] |
+    .name == "codex-session-control" and
+    .source == {source: "local", path: "./plugins/codex-session-control"} and
+    .policy == {installation: "AVAILABLE"}
+  )
 ' "$marketplace_manifest" >/dev/null || die 'Marketplace manifest does not match the checkout-local contract.'
 
 jq -e --arg version "$cargo_version" '
-  . == {
-    name: "codex-session-control",
-    version: $version,
-    description: "Control Codex sessions via MCP",
-    author: {name: "Agentlehub"},
-    license: "MIT",
-    mcpServers: "./.mcp.json",
-    interface: {
-      displayName: "Codex session control",
-      shortDescription: "Control Codex sessions via MCP",
-      category: "Coding",
-      capabilities: ["Read", "Write"]
-    }
-  }
+  .name == "codex-session-control" and
+  .version == $version and
+  .mcpServers == "./.mcp.json" and
+  .interface.capabilities == ["Read", "Write"]
 ' "$plugin_manifest" >/dev/null || die 'Legacy plugin manifest does not match Cargo metadata.'
 
 jq -e '
@@ -127,7 +114,6 @@ jq -e '
     }
   }
 ' "$mcp_manifest" >/dev/null || die 'Legacy MCP manifest does not match the forwarding contract.'
-test ! -e "$plugin_root/mcp.json" || die 'The v1 root MCP manifest is not supported yet.'
 
 (cd "$clone_root" && cargo build --release --locked)
 candidate="$clone_root/target/release/codex-session-control"

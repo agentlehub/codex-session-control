@@ -21,72 +21,21 @@ fi
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repository_root="$(cd -- "$script_dir/.." && pwd)"
 version_file="$repository_root/supported-codex-version.txt"
-readme="$repository_root/README.md"
-marker='<!-- generated: supported-codex-version -->'
-replacement="- The supported community Desktop build, running with \`shared-app-server-socket\` enabled and bundled Codex \`$version\` $marker"
-
-marker_count="$(awk -v marker="$marker" '
-  {
-    line = $0
-    while ((position = index(line, marker)) != 0) {
-      count++
-      line = substr(line, position + length(marker))
-    }
-  }
-  END { print count + 0 }
-' "$readme")"
-if [ "$marker_count" -ne 1 ]; then
-  printf 'README.md must contain exactly one %s marker\n' "$marker" >&2
-  exit 1
-fi
-
-transaction_dir=
-version_stage=
-readme_stage=
-version_backup=
-readme_backup=
-version_replaced=false
-readme_replaced=false
-committed=false
+stage=
 cleanup() {
   status=$?
   trap - EXIT HUP INT TERM
-  if [ "$committed" = false ]; then
-    if [ "$version_replaced" = true ]; then
-      mv -- "$version_backup" "$version_file" || status=$?
-    fi
-    if [ "$readme_replaced" = true ]; then
-      mv -- "$readme_backup" "$readme" || status=$?
-    fi
-  fi
-  if [ -n "$transaction_dir" ]; then
-    rm -f -- "$version_stage" "$readme_stage" "$version_backup" "$readme_backup" || status=$?
-    rmdir -- "$transaction_dir" || status=$?
+  if [ -n "$stage" ]; then
+    rm -f -- "$stage" || status=$?
   fi
   exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 128' HUP INT TERM
 
-transaction_dir="$(mktemp -d "$repository_root/.set-supported-version.XXXXXX")"
-version_stage="$transaction_dir/version"
-readme_stage="$transaction_dir/README.md"
-version_backup="$transaction_dir/version.backup"
-readme_backup="$transaction_dir/README.md.backup"
-
-cp --preserve=mode -- "$version_file" "$version_backup"
-cp --preserve=mode -- "$readme" "$readme_backup"
-printf '%s\n' "$version" >"$version_stage"
-awk -v marker="$marker" -v replacement="$replacement" '
-  index($0, marker) { print replacement; next }
-  { print }
-' "$readme" >"$readme_stage"
-chmod --reference="$version_file" "$version_stage"
-chmod --reference="$readme" "$readme_stage"
-
-version_replaced=true
-mv -- "$version_stage" "$version_file"
-readme_replaced=true
-mv -- "$readme_stage" "$readme"
-committed=true
+stage="$(mktemp "$repository_root/.set-supported-version.XXXXXX")"
+printf '%s\n' "$version" >"$stage"
+chmod --reference="$version_file" "$stage"
+mv -- "$stage" "$version_file"
+stage=
 printf 'Supported Codex version is now %s.\n' "$version"
