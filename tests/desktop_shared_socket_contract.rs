@@ -222,13 +222,14 @@ fn run_threads_list(environment: &[(&str, &Path)]) -> ToolRun {
     ToolRun { response, stderr }
 }
 
-fn assert_successful_threads_list(run: &ToolRun) {
-    assert_eq!(run.response["id"], json!(2));
-    assert_ne!(
-        run.response["result"]["isError"],
-        json!(true),
-        "{:#}",
-        run.response
+fn assert_successful_threads_list(response: &Value, expected_id: u64) {
+    assert_eq!(response["id"], json!(expected_id));
+    assert!(response.get("error").is_none(), "{response:#}");
+    assert_ne!(response["result"]["isError"], json!(true), "{response:#}");
+    assert_eq!(
+        response["result"]["structuredContent"],
+        json!({"threads": [], "nextCursor": null}),
+        "{response:#}"
     );
 }
 
@@ -246,7 +247,7 @@ fn explicit_socket_precedes_the_derived_desktop_socket() {
         (RUNTIME_DIR, unused_runtime.as_path()),
     ]);
 
-    assert_successful_threads_list(&run);
+    assert_successful_threads_list(&run.response, 2);
     assert_eq!(
         server
             .upgrade_target
@@ -275,7 +276,7 @@ fn derived_desktop_socket_is_used_without_an_explicit_override() {
 
     let run = run_threads_list(&[(RUNTIME_DIR, runtime.as_path())]);
 
-    assert_successful_threads_list(&run);
+    assert_successful_threads_list(&run.response, 2);
     assert_eq!(
         server
             .upgrade_target
@@ -341,7 +342,7 @@ fn stdio_host_recovers_on_next_call_after_socket_replacement() {
         }),
     );
     let first_response = read_response_for_id(&mut reader, 2);
-    assert_ne!(first_response["result"]["isError"], json!(true));
+    assert_successful_threads_list(&first_response, 2);
     assert_eq!(
         server
             .upgrade_target
@@ -367,7 +368,7 @@ fn stdio_host_recovers_on_next_call_after_socket_replacement() {
         }),
     );
     let second_response = read_response_for_id(&mut reader, 3);
-    assert_ne!(second_response["result"]["isError"], json!(true));
+    assert_successful_threads_list(&second_response, 3);
     assert_eq!(child.id(), pid);
     assert_eq!(
         server
