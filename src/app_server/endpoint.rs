@@ -149,6 +149,7 @@ mod tests {
         cell::Cell,
         ffi::OsString,
         fs,
+        io::Write,
         os::unix::{
             ffi::OsStringExt,
             fs::{PermissionsExt, symlink},
@@ -165,7 +166,8 @@ mod tests {
     const DEFAULT_APP_ID: &str = "codex-desktop";
 
     struct PrivateEndpointFixture {
-        _root: tempfile::TempDir,
+        root: Option<tempfile::TempDir>,
+        directory_modes: Vec<(fs::File, fs::Permissions)>,
         runtime_dir: PathBuf,
         app_dir: PathBuf,
         bridge_dir: PathBuf,
@@ -195,7 +197,8 @@ mod tests {
             set_mode(&socket_path, 0o600);
 
             Self {
-                _root: root,
+                root: Some(root),
+                directory_modes: Vec::new(),
                 runtime_dir,
                 app_dir,
                 bridge_dir,
@@ -221,8 +224,46 @@ mod tests {
             }
         }
 
+        fn set_directory_mode(&mut self, selected: SelectedEntry, mode: u32) {
+            let directory = fs::File::open(self.selected_path(selected)).unwrap();
+            let original_permissions = directory.metadata().unwrap().permissions();
+            // Retain the inode before changing permissions so teardown neither
+            // follows replacement symlinks nor depends on ancestor traversal.
+            self.directory_modes.push((directory, original_permissions));
+            set_mode(self.selected_path(selected), mode);
+        }
+
         fn close_listener(&mut self) {
             drop(self.listener.take());
+        }
+    }
+
+    impl Drop for PrivateEndpointFixture {
+        fn drop(&mut self) {
+            let mut cleanup_result = Ok(());
+            for (directory, permissions) in self.directory_modes.drain(..).rev() {
+                let restored = directory.set_permissions(permissions);
+                if cleanup_result.is_ok() {
+                    cleanup_result = restored;
+                }
+            }
+            self.close_listener();
+            if let Some(root) = self.root.take() {
+                let removed = root.close();
+                if cleanup_result.is_ok() {
+                    cleanup_result = removed;
+                }
+            }
+            if let Err(error) = cleanup_result {
+                if std::thread::panicking() {
+                    let _ = writeln!(
+                        std::io::stderr().lock(),
+                        "endpoint fixture cleanup failed during unwind: {error}"
+                    );
+                } else {
+                    panic!("endpoint fixture cleanup failed: {error}");
+                }
+            }
         }
     }
 
@@ -581,13 +622,102 @@ mod tests {
             SelectedEntry::AppDirectory,
             SelectedEntry::BridgeDirectory,
         ] {
-            let fixture = PrivateEndpointFixture::new();
+            let mut fixture = PrivateEndpointFixture::new();
             let endpoint = fixture.derived_endpoint();
-            set_mode(fixture.selected_path(selected), 0o750);
+            fixture.set_directory_mode(selected, 0o750);
 
             let error = endpoint.validate().unwrap_err();
             assert_validation_failure(&error);
         }
+    }
+
+    fn assert_fixture_removed(root: &Path) {
+        let removed = !root.exists();
+        if !removed {
+            // Keep a failing regression from adding a new leaked fixture.
+            set_mode(&root.join("runtime/codex-desktop/app-server-bridge"), 0o700);
+            fs::remove_dir_all(root).unwrap();
+        }
+        assert!(removed, "endpoint fixture survived teardown: {root:?}");
+    }
+
+    #[test]
+    fn fixture_removes_non_traversable_directory_during_unwind() {
+        let mut fixture = PrivateEndpointFixture::new();
+        let root = fixture.root.as_ref().unwrap().path().to_owned();
+        let result = std::panic::catch_unwind(move || {
+            fixture.set_directory_mode(SelectedEntry::BridgeDirectory, 0o600);
+            panic!("fixture unwind probe");
+        });
+        assert_eq!(
+            result.unwrap_err().downcast_ref::<&str>(),
+            Some(&"fixture unwind probe")
+        );
+        assert_fixture_removed(&root);
+    }
+
+    #[test]
+    fn fixture_cleanup_failure_reports_or_preserves_existing_panic() {
+        for unwind in [false, true] {
+            let fixture = PrivateEndpointFixture::new();
+            let root = fixture.root.as_ref().unwrap().path().to_owned();
+            let blocker = root.join("cleanup-error-probe");
+            create_private_directory(&blocker);
+            fs::write(blocker.join("file"), b"probe").unwrap();
+            // Intentionally bypass the tracked mode setter to force close() to fail.
+            set_mode(&blocker, 0o600);
+
+            let result = std::panic::catch_unwind(move || {
+                let _fixture = fixture;
+                if unwind {
+                    panic!("fixture unwind probe");
+                }
+            });
+            // This probe owns the exact new fixture; repair it before assertions.
+            set_mode(&blocker, 0o700);
+            fs::remove_dir_all(&root).unwrap();
+
+            let panic = result.expect_err("fixture cleanup failure must be visible");
+            if unwind {
+                assert_eq!(panic.downcast_ref::<&str>(), Some(&"fixture unwind probe"));
+            } else {
+                assert!(
+                    panic
+                        .downcast_ref::<String>()
+                        .unwrap()
+                        .starts_with("endpoint fixture cleanup failed: ")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fixture_restores_relocated_directory_without_changing_symlink_target() {
+        let external_root = crate::test_support::private_tempdir();
+        let external_directory = external_root.path().join("external");
+        create_private_directory(&external_directory);
+        set_mode(&external_directory, 0o750);
+
+        let mut fixture = PrivateEndpointFixture::new();
+        let root = fixture.root.as_ref().unwrap().path().to_owned();
+        fixture.set_directory_mode(SelectedEntry::BridgeDirectory, 0o600);
+        let relocated = fixture.bridge_dir.with_file_name("relocated-bridge");
+        fs::rename(&fixture.bridge_dir, &relocated).unwrap();
+        symlink(&external_directory, &fixture.bridge_dir).unwrap();
+
+        drop(fixture);
+        assert!(
+            !root.exists(),
+            "endpoint fixture survived teardown: {root:?}"
+        );
+        assert_eq!(
+            fs::metadata(&external_directory)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o750
+        );
     }
 
     #[test]
@@ -598,13 +728,16 @@ mod tests {
             ("other permissions", 0o701),
             ("special bits", 0o4700),
         ] {
-            let fixture = PrivateEndpointFixture::new();
+            let mut fixture = PrivateEndpointFixture::new();
             let endpoint = fixture.derived_endpoint();
-            set_mode(&fixture.bridge_dir, mode);
+            fixture.set_directory_mode(SelectedEntry::BridgeDirectory, mode);
+            let root = fixture.root.as_ref().unwrap().path().to_owned();
 
             let error = endpoint.validate().unwrap_err();
             assert_validation_failure(&error);
             assert_eq!(error.stage, "socket_validation", "{label}");
+            drop(fixture);
+            assert_fixture_removed(&root);
         }
     }
 
