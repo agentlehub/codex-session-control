@@ -1,106 +1,74 @@
-use std::error::Error;
+use std::process::ExitCode;
 
 #[path = "app_server_integration/cases.rs"]
 mod cases;
+#[path = "../src/app_server/endpoint_policy.rs"]
+mod endpoint_policy;
 #[path = "app_server_integration/live_harness.rs"]
 mod live_harness;
-#[path = "app_server_integration/normal_home.rs"]
-mod normal_home;
-#[path = "app_server_integration/normal_home_paths.rs"]
-mod normal_home_paths;
-#[path = "app_server_integration/protocol_support.rs"]
-mod protocol_support;
-#[path = "support/private_tempdir.rs"]
-mod test_support;
 
-#[tokio::test]
-#[ignore = "requires the configured supported Codex CLI version"]
-async fn live_schema_digest_matches_committed_fixture() -> Result<(), Box<dyn Error>> {
-    cases::live_schema_digest_matches_committed_fixture().await
-}
-
-#[tokio::test]
-#[ignore = "requires the configured supported Codex CLI version"]
-async fn live_read_list_fork_title_goal_interrupt_mappings() -> Result<(), Box<dyn Error>> {
-    cases::live_read_list_fork_title_goal_interrupt_mappings().await
-}
-
-#[tokio::test]
-#[ignore = "requires the configured supported Codex CLI version"]
-async fn live_remote_cli_attaches_and_reconnects() -> Result<(), Box<dyn Error>> {
-    cases::live_remote_cli_attaches_and_reconnects().await
-}
-
-#[tokio::test]
-#[ignore = "requires the configured supported Codex CLI version"]
-async fn live_restart_preserves_shared_home_sessions() -> Result<(), Box<dyn Error>> {
-    cases::live_restart_preserves_shared_home_sessions().await
-}
-
-#[tokio::test]
-#[ignore = "requires the configured supported Codex CLI version"]
-async fn live_socket_removed_when_app_server_exits() -> Result<(), Box<dyn Error>> {
-    cases::live_socket_removed_when_app_server_exits().await
-}
-
-#[tokio::test]
-#[ignore = "requires the configured supported Codex CLI version"]
-async fn live_projection_converges_on_new_task_without_restart() -> Result<(), Box<dyn Error>> {
-    cases::live_projection_converges_on_new_task_without_restart().await
-}
-
-#[tokio::test]
-#[ignore = "CI-owned: requires the explicitly opted-in disposable passwd user"]
-async fn live_remote_cli_executes_projected_goal_tool_round_trip() -> Result<(), Box<dyn Error>> {
-    cases::live_remote_cli_executes_projected_goal_tool_round_trip().await
+#[test]
+fn journal_grants_authority_only_after_durable_replace() {
+    cases::journal_grants_authority_only_after_durable_replace();
 }
 
 #[test]
-fn disposable_normal_home_contract() {
-    cases::disposable_normal_home_contract();
-}
-
-#[tokio::test]
-async fn goal_output_barrier_ignores_interleaved_responses_requests() -> Result<(), Box<dyn Error>>
-{
-    cases::goal_output_barrier_ignores_interleaved_responses_requests().await
+fn journal_rejects_unsafe_or_mismatched_authority() {
+    cases::journal_rejects_unsafe_or_mismatched_authority();
 }
 
 #[test]
-fn shutdown_receipts_require_the_operation_specific_stage() {
-    cases::shutdown_receipts_require_the_operation_specific_stage();
+fn live_mode_matrix_is_total_and_recovery_is_fixed_authority() {
+    cases::live_mode_matrix_is_total_and_recovery_is_fixed_authority();
 }
 
 #[test]
-fn normal_home_ci_requires_each_exact_opt_in_before_mutation() {
-    cases::normal_home_ci_requires_each_exact_opt_in_before_mutation();
+fn workspace_recovery_validates_all_pages_before_one_journal_write() {
+    cases::workspace_recovery_validates_all_pages_before_one_journal_write();
 }
 
 #[test]
-fn cleanup_combination_keeps_absence_verification_authoritative() {
-    cases::cleanup_combination_keeps_absence_verification_authoritative();
+fn workspace_pagination_rejects_cycles_and_exhaustion() {
+    cases::workspace_pagination_rejects_cycles_and_exhaustion();
+}
+
+#[test]
+fn archive_classifier_accepts_only_exact_identity_and_storage() {
+    cases::archive_classifier_accepts_only_exact_identity_and_storage();
 }
 
 #[tokio::test]
-#[ignore = "CI-owned: requires the explicitly opted-in disposable passwd user"]
-async fn live_normal_home_shared_authority() -> Result<(), Box<dyn Error>> {
-    cases::live_normal_home_shared_authority().await
+async fn archive_reconciliation_dispatches_at_most_once_after_exact_active_read() {
+    cases::archive_reconciliation_dispatches_at_most_once_after_exact_active_read().await;
 }
 
 #[tokio::test]
-#[ignore = "CI-owned: requires the explicitly opted-in disposable passwd user"]
-async fn live_normal_home_restart_boundaries() -> Result<(), Box<dyn Error>> {
-    cases::live_normal_home_restart_boundaries().await
+async fn direct_cleanup_requires_safe_endpoint_and_exact_initialized_identity() {
+    cases::direct_cleanup_requires_safe_endpoint_and_exact_initialized_identity().await;
 }
 
 #[tokio::test]
-#[ignore = "CI-owned: requires the explicitly opted-in disposable passwd user"]
-async fn live_normal_home_projection_preservation() -> Result<(), Box<dyn Error>> {
-    cases::live_normal_home_projection_preservation().await
+async fn child_is_owned_immediately_and_every_exit_path_reaps() {
+    cases::child_is_owned_immediately_and_every_exit_path_reaps().await;
 }
 
 #[tokio::test]
-#[ignore = "CI-owned: requires the explicitly opted-in disposable passwd user"]
-async fn live_normal_home_uninstall_preservation() -> Result<(), Box<dyn Error>> {
-    cases::live_normal_home_uninstall_preservation().await
+async fn child_timeout_kills_and_confirms_reap() {
+    cases::child_timeout_kills_and_confirms_reap().await;
+}
+
+#[tokio::test]
+async fn deadline_scopes_are_bounded_and_do_not_extend_each_other() {
+    cases::deadline_scopes_are_bounded_and_do_not_extend_each_other().await;
+}
+
+#[tokio::test]
+async fn live_codes_are_the_only_output_and_cleanup_has_precedence() {
+    cases::live_codes_are_the_only_output_and_cleanup_has_precedence().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicit disposable-task opt-in and a live Desktop authority"]
+async fn live_desktop_authority_all_thirteen_tools_are_disposable() -> ExitCode {
+    cases::live_desktop_authority_all_thirteen_tools_are_disposable().await
 }

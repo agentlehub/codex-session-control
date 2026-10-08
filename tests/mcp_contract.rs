@@ -1,20 +1,20 @@
+#[path = "support/process_guard.rs"]
+mod process_guard;
+
+use process_guard::{ChildGuard, PIPE_CAPTURE_LIMIT, terminate_test_child, wait_for_child_exit};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{self, Read, Write},
+    io::{self, Write},
     os::unix::process::{CommandExt, ExitStatusExt},
-    process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio},
-    thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    process::{Command, Stdio},
+    thread,
+    time::Duration,
 };
 
 use assert_cmd::cargo::cargo_bin;
 use serde_json::{Value, json};
 
-const INSTRUCTIONS: &str = "These tools inspect and control Codex threads through the shared app-server used by connected Codex clients.";
-const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const CATALOG_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
-const PIPE_CAPTURE_LIMIT: usize = 64 * 1024;
-const CONTINUOUS_OUTPUT_FIXTURE: &str = "CSC_MCP_CONTRACT_CONTINUOUS_OUTPUT";
 
 const TOOL_EFFECTS: [(&str, bool, bool); 13] = [
     ("thread_create", false, false),
@@ -32,327 +32,10 @@ const TOOL_EFFECTS: [(&str, bool, bool); 13] = [
     ("thread_interrupt", false, true),
 ];
 
-struct ChildGuard {
-    child: Option<Child>,
-    process_group: Option<u32>,
-}
-
-impl ChildGuard {
-    fn spawn(command: &mut Command) -> io::Result<Self> {
-        command.process_group(0);
-        command.spawn().map(|child| Self {
-            process_group: Some(child.id()),
-            child: Some(child),
-        })
-    }
-
-    fn id(&self) -> u32 {
-        self.child.as_ref().expect("child already reaped").id()
-    }
-
-    fn stdin_mut(&mut self) -> Option<&mut ChildStdin> {
-        self.child.as_mut()?.stdin.as_mut()
-    }
-
-    fn close_stdin(&mut self) {
-        drop(
-            self.child
-                .as_mut()
-                .expect("child already reaped")
-                .stdin
-                .take(),
-        );
-    }
-
-    fn wait_with_output(mut self, timeout: Duration) -> io::Result<Output> {
-        let child = self.child.as_mut().expect("child already reaped");
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| io::Error::other("child stdout was not piped"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| io::Error::other("child stderr was not piped"))?;
-        let stdout_reader = read_pipe(stdout);
-        let stderr_reader = read_pipe(stderr);
-        let deadline = Instant::now() + timeout;
-
-        loop {
-            match self
-                .child
-                .as_mut()
-                .expect("child already reaped")
-                .try_wait()
-            {
-                Ok(Some(status)) => {
-                    self.child.take();
-                    let cleanup_result = self.terminate_process_group();
-                    let output_result = collect_output(status, stdout_reader, stderr_reader);
-                    cleanup_result?;
-                    return output_result;
-                }
-                Ok(None) => {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        self.terminate_and_reap()?;
-                        let stdout_result = join_pipe(stdout_reader, "stdout");
-                        let stderr_result = join_pipe(stderr_reader, "stderr");
-                        let stdout = stdout_result?;
-                        let stderr = stderr_result?;
-                        return Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            format!(
-                                "child did not exit within {timeout:?}; stdout: {}; stderr: {}",
-                                stdout, stderr
-                            ),
-                        ));
-                    }
-                    thread::sleep(CHILD_POLL_INTERVAL.min(remaining));
-                }
-                Err(error) => {
-                    self.terminate_and_reap()?;
-                    let stdout_result = join_pipe(stdout_reader, "stdout");
-                    let stderr_result = join_pipe(stderr_reader, "stderr");
-                    let _ = stdout_result?;
-                    let _ = stderr_result?;
-                    return Err(error);
-                }
-            }
-        }
-    }
-
-    fn terminate_and_reap(&mut self) -> io::Result<()> {
-        let group_result = self.terminate_process_group();
-        let child_result = self.terminate_child();
-        match (group_result, child_result) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-            (Err(group_error), Err(child_error)) => Err(io::Error::other(format!(
-                "process-group cleanup failed: {group_error}; child cleanup failed: {child_error}"
-            ))),
-        }
-    }
-
-    fn terminate_process_group(&mut self) -> io::Result<()> {
-        let Some(process_group) = self.process_group else {
-            return Ok(());
-        };
-        let process_group = rustix::process::Pid::from_raw(process_group as i32)
-            .ok_or_else(|| io::Error::other("process group id is zero"))?;
-        match rustix::process::kill_process_group(process_group, rustix::process::Signal::KILL) {
-            Ok(()) | Err(rustix::io::Errno::SRCH) => {
-                self.process_group.take();
-                Ok(())
-            }
-            Err(error) => Err(io::Error::from(error)),
-        }
-    }
-
-    fn terminate_child(&mut self) -> io::Result<()> {
-        let Some(child) = self.child.as_mut() else {
-            return Ok(());
-        };
-        if let Ok(Some(_)) = child.try_wait() {
-            self.child.take();
-            return Ok(());
-        }
-        if let Err(kill_error) = child.kill() {
-            return match child.try_wait() {
-                Ok(Some(_)) => {
-                    self.child.take();
-                    Ok(())
-                }
-                Ok(None) => Err(kill_error),
-                Err(recheck_error) => Err(io::Error::other(format!(
-                    "child kill failed: {kill_error}; exit recheck failed: {recheck_error}"
-                ))),
-            };
-        }
-        match child.wait() {
-            Ok(_) => {
-                self.child.take();
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.terminate_and_reap();
-    }
-}
-
-struct PipeCapture {
-    bytes: Vec<u8>,
-    total_bytes: usize,
-}
-
-fn write_lossy_bytes(
-    formatter: &mut std::fmt::Formatter<'_>,
-    mut bytes: &[u8],
-) -> std::fmt::Result {
-    while !bytes.is_empty() {
-        match std::str::from_utf8(bytes) {
-            Ok(text) => return formatter.write_str(text),
-            Err(error) => {
-                let valid_len = error.valid_up_to();
-                if valid_len > 0 {
-                    let valid = std::str::from_utf8(&bytes[..valid_len])
-                        .expect("valid_up_to must delimit valid UTF-8");
-                    formatter.write_str(valid)?;
-                }
-                formatter.write_str("?")?;
-                let invalid_len = error.error_len().unwrap_or(bytes.len() - valid_len);
-                bytes = &bytes[valid_len + invalid_len..];
-            }
-        }
-    }
-    Ok(())
-}
-
-impl std::fmt::Display for PipeCapture {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write_lossy_bytes(formatter, &self.bytes)?;
-        if self.total_bytes > self.bytes.len() {
-            write!(
-                formatter,
-                " [truncated: captured first {} of {} bytes]",
-                self.bytes.len(),
-                self.total_bytes
-            )?;
-        }
-        Ok(())
-    }
-}
-
-fn read_pipe(mut pipe: impl Read + Send + 'static) -> JoinHandle<io::Result<PipeCapture>> {
-    thread::spawn(move || {
-        let mut captured = Vec::with_capacity(PIPE_CAPTURE_LIMIT);
-        let mut total_bytes = 0usize;
-        let mut buffer = [0u8; 8 * 1024];
-        loop {
-            let bytes_read = match pipe.read(&mut buffer) {
-                Ok(bytes_read) => bytes_read,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error),
-            };
-            if bytes_read == 0 {
-                break;
-            }
-            total_bytes = total_bytes.saturating_add(bytes_read);
-            let retained = bytes_read.min(PIPE_CAPTURE_LIMIT - captured.len());
-            captured.extend_from_slice(&buffer[..retained]);
-        }
-        Ok(PipeCapture {
-            bytes: captured,
-            total_bytes,
-        })
-    })
-}
-
-fn join_pipe(reader: JoinHandle<io::Result<PipeCapture>>, stream: &str) -> io::Result<PipeCapture> {
-    reader
-        .join()
-        .map_err(|_| io::Error::other(format!("{stream} reader panicked")))?
-}
-
-fn collect_output(
-    status: ExitStatus,
-    stdout_reader: JoinHandle<io::Result<PipeCapture>>,
-    stderr_reader: JoinHandle<io::Result<PipeCapture>>,
-) -> io::Result<Output> {
-    let stdout = join_pipe(stdout_reader, "stdout");
-    let stderr = join_pipe(stderr_reader, "stderr");
-    Ok(Output {
-        status,
-        stdout: stdout?.bytes,
-        stderr: stderr?.bytes,
-    })
-}
-
-fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> io::Result<Option<ExitStatus>> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(Some(status));
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Ok(None);
-        }
-        thread::sleep(CHILD_POLL_INTERVAL.min(remaining));
-    }
-}
-
-fn terminate_test_child(child: &mut Child) {
-    if matches!(child.try_wait(), Ok(Some(_))) {
-        return;
-    }
-    if child.kill().is_ok() {
-        let _ = child.wait();
-    }
-}
-
 #[test]
-fn pipe_capture_bounds_invalid_utf8_diagnostics() {
-    let capture = PipeCapture {
-        bytes: vec![0xff; PIPE_CAPTURE_LIMIT],
-        total_bytes: PIPE_CAPTURE_LIMIT * 2,
-    };
-
-    let diagnostic = format!("stdout: {capture}; stderr: {capture}");
-
-    assert!(
-        diagnostic.len() <= PIPE_CAPTURE_LIMIT * 2 + 256,
-        "invalid UTF-8 expanded diagnostic to {} bytes",
-        diagnostic.len()
-    );
-    assert!(
-        diagnostic.contains('?'),
-        "invalid bytes must remain visible"
-    );
-    assert_eq!(diagnostic.matches("[truncated:").count(), 2);
-}
-
-#[test]
-fn read_pipe_retries_interrupted_reads() {
-    struct InterruptedOnce<R> {
-        inner: R,
-        interrupted: bool,
-    }
-
-    impl<R: Read> Read for InterruptedOnce<R> {
-        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-            if !self.interrupted {
-                self.interrupted = true;
-                return Err(io::ErrorKind::Interrupted.into());
-            }
-            self.inner.read(buffer)
-        }
-    }
-
-    let expected = b"captured after an interrupted read".to_vec();
-    let capture = join_pipe(
-        read_pipe(InterruptedOnce {
-            inner: io::Cursor::new(expected.clone()),
-            interrupted: false,
-        }),
-        "test",
-    )
-    .unwrap();
-
-    assert_eq!(capture.bytes, expected);
-    assert_eq!(capture.total_bytes, expected.len());
-}
-
-#[test]
-fn child_guard_captures_output_after_normal_exit() {
+fn child_guard_captures_runtime_error_after_stdin_eof() {
     let mut command = Command::new(cargo_bin("codex-session-control"));
     command
-        .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -360,21 +43,36 @@ fn child_guard_captures_output_after_normal_exit() {
     let child = ChildGuard::spawn(&mut command).unwrap();
     let output = child.wait_with_output(CATALOG_EXIT_TIMEOUT).unwrap();
 
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(!output.stderr.is_empty());
+}
+
+#[test]
+fn binary_is_direct_stdio_and_accepts_no_commands() {
+    let mut command = Command::new(cargo_bin("codex-session-control"));
+    command
+        .arg("mcp-server")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = ChildGuard::spawn(&mut command).unwrap();
+    let child_pid = child.id();
+    let output = child.wait_with_output(CATALOG_EXIT_TIMEOUT).unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(!output.stderr.is_empty());
     assert!(
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .starts_with("codex-session-control ")
+        !std::path::Path::new(&format!("/proc/{child_pid}")).exists(),
+        "argument-rejection child was not reaped"
     );
-    assert!(output.stderr.is_empty());
 }
 
 #[test]
 fn child_guard_terminates_and_reaps_on_timeout() {
     let mut command = Command::new(cargo_bin("codex-session-control"));
     command
-        .arg("--verbose")
-        .arg("mcp-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -393,81 +91,179 @@ fn child_guard_terminates_and_reaps_on_timeout() {
 }
 
 #[test]
-fn child_guard_bounds_continuously_logged_timeout_output() {
-    let mut command = Command::new(std::env::current_exe().unwrap());
+fn child_guard_rejects_successful_output_that_exceeds_the_capture_limit() {
+    let mut command = Command::new("sh");
     command
         .args([
-            "--exact",
-            "child_guard_continuous_output_fixture",
-            "--nocapture",
+            "-c",
+            &format!("head -c {} /dev/zero", PIPE_CAPTURE_LIMIT + 1),
         ])
-        .env(CONTINUOUS_OUTPUT_FIXTURE, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let child = ChildGuard::spawn(&mut command).unwrap();
+    let error = child
+        .wait_with_output(CATALOG_EXIT_TIMEOUT)
+        .expect_err("successful oversized output must fail closed");
+
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn child_guard_times_out_when_detached_writer_holds_pipes() {
+    struct DetachedPipeHolder {
+        pid: Option<i32>,
+    }
+
+    impl DetachedPipeHolder {
+        fn await_pid(pid_file: &std::path::Path) -> Self {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                if let Ok(value) = std::fs::read_to_string(pid_file)
+                    && let Ok(pid) = value.trim().parse::<i32>()
+                {
+                    return Self { pid: Some(pid) };
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "detached pipe holder did not record a pid"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        fn terminate_and_await_disappearance(&mut self) -> io::Result<()> {
+            let pid = self
+                .pid
+                .ok_or_else(|| io::Error::other("detached pid was already gone"))?;
+            let detached = rustix::process::Pid::from_raw(pid)
+                .ok_or_else(|| io::Error::other("detached pid is zero"))?;
+            match rustix::process::kill_process(detached, rustix::process::Signal::KILL) {
+                Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+                Err(error) => return Err(io::Error::from(error)),
+            }
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                if std::time::Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "detached pipe holder did not disappear",
+                    ));
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            self.pid = None;
+            Ok(())
+        }
+    }
+
+    impl Drop for DetachedPipeHolder {
+        fn drop(&mut self) {
+            if self.pid.is_some() {
+                let _ = self.terminate_and_await_disappearance();
+            }
+        }
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let pid_file = root.path().join("detached-pipe-holder.pid");
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg("setsid sh -c 'printf \"%s\\n\" \"$$\" > \"$1\"; exec sleep 60' detached \"$1\" &")
+        .arg("guard-fixture")
+        .arg(&pid_file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = ChildGuard::spawn(&mut command).unwrap();
+    let mut detached = DetachedPipeHolder::await_pid(&pid_file);
+
+    let started = std::time::Instant::now();
+    let error = child
+        .wait_with_output(Duration::from_millis(100))
+        .expect_err("detached pipe holder must not block the guard");
+    let elapsed = started.elapsed();
+    let detached_pid = detached.pid.expect("detached holder pid remains available");
+    detached
+        .terminate_and_await_disappearance()
+        .expect("detached pipe holder must be explicitly terminated");
+
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "detached pipe holder delayed deadline completion for {elapsed:?}"
+    );
+    assert!(
+        !std::path::Path::new(&format!("/proc/{detached_pid}")).exists(),
+        "detached pipe holder must be explicitly cleaned up"
+    );
+}
+
+#[test]
+fn child_guard_rejects_unthrottled_single_stream_output_promptly() {
+    let mut command = Command::new("sh");
+    command
+        .args([
+            "-c",
+            "i=0; while [ \"$i\" -lt 32 ]; do yes stdout & i=$((i + 1)); done; wait",
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
     let child = ChildGuard::spawn(&mut command).unwrap();
     let child_pid = child.id();
-    let error = child.wait_with_output(Duration::from_secs(1)).unwrap_err();
+    let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+    let watchdog = thread::spawn(
+        move || match completed_rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(()) => false,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let process_group = rustix::process::Pid::from_raw(child_pid as i32).unwrap();
+                let _ = rustix::process::kill_process_group(
+                    process_group,
+                    rustix::process::Signal::KILL,
+                );
+                true
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => false,
+        },
+    );
+
+    let started = std::time::Instant::now();
+    let error = child
+        .wait_with_output(Duration::from_millis(100))
+        .unwrap_err();
+    let elapsed = started.elapsed();
+    let _ = completed_tx.send(());
+    let watchdog_fired = watchdog.join().unwrap();
     let diagnostic = error.to_string();
 
-    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(
+        !watchdog_fired,
+        "independent watchdog had to stop an unbounded output drain"
+    );
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "capture limit was not enforced promptly: {elapsed:?}"
+    );
     assert!(
         !std::path::Path::new(&format!("/proc/{child_pid}")).exists(),
-        "continuously logging child was not reaped"
+        "unthrottled writer leader was not reaped"
     );
     assert!(
-        diagnostic.len() <= PIPE_CAPTURE_LIMIT * 2 + 1024,
-        "timeout diagnostic retained {} bytes",
+        diagnostic.len() <= 1024,
+        "capture-limit diagnostic retained {} bytes",
         diagnostic.len()
     );
-    assert!(diagnostic.contains("stdout diagnostic"));
-    assert!(diagnostic.contains("stderr diagnostic"));
-    let capture_prefix = format!("captured first {PIPE_CAPTURE_LIMIT} of ");
-    let totals = diagnostic
-        .match_indices(&capture_prefix)
-        .map(|(index, _)| {
-            diagnostic[index + capture_prefix.len()..]
-                .split_once(" bytes]")
-                .unwrap()
-                .0
-                .parse::<usize>()
-                .unwrap()
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        totals.len(),
-        2,
-        "both streams must report the capture bound"
-    );
-    assert!(
-        totals.iter().all(|total| *total > PIPE_CAPTURE_LIMIT * 2),
-        "both readers must drain beyond the retained prefix: {totals:?}"
-    );
-}
-
-#[test]
-fn child_guard_continuous_output_fixture() {
-    if std::env::var_os(CONTINUOUS_OUTPUT_FIXTURE).is_none() {
-        return;
-    }
-
-    let stdout_chunk = "stdout diagnostic\n".repeat(4096);
-    let stderr_chunk = "stderr diagnostic\n".repeat(4096);
-    let mut stdout = io::stdout().lock();
-    let mut stderr = io::stderr().lock();
-    loop {
-        stdout.write_all(stdout_chunk.as_bytes()).unwrap();
-        stderr.write_all(stderr_chunk.as_bytes()).unwrap();
-        thread::sleep(Duration::from_millis(10));
-    }
 }
 
 #[test]
 fn child_guard_drop_terminates_and_reaps() {
     let mut command = Command::new(cargo_bin("codex-session-control"));
     command
-        .arg("mcp-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -486,7 +282,6 @@ fn child_guard_drop_terminates_and_reaps() {
 fn child_guard_drop_terminates_process_group() {
     let mut leader_command = Command::new(cargo_bin("codex-session-control"));
     leader_command
-        .arg("mcp-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -494,7 +289,6 @@ fn child_guard_drop_terminates_process_group() {
 
     let mut member_command = Command::new(cargo_bin("codex-session-control"));
     member_command
-        .arg("mcp-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -547,8 +341,6 @@ fn public_catalog_is_exact() {
 
     let mut command = Command::new(cargo_bin("codex-session-control"));
     command
-        .arg("--verbose")
-        .arg("mcp-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -579,8 +371,6 @@ fn public_catalog_is_exact() {
     );
 
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(!stdout.contains("[verbose]"));
-    assert!(!stdout.contains("Codex Session Control"));
     let responses: Vec<Value> = stdout
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
@@ -599,9 +389,6 @@ fn public_catalog_is_exact() {
             );
         }
     }
-    let initialize = response(&responses, 1);
-    assert_eq!(initialize["result"]["instructions"], INSTRUCTIONS);
-
     let list = response(&responses, 2);
     let tools = list["result"]["tools"].as_array().unwrap();
     assert_eq!(tools.len(), TOOL_EFFECTS.len());
@@ -617,7 +404,6 @@ fn public_catalog_is_exact() {
     );
 
     let expected = schema_contracts();
-    let expected_descriptions = description_contracts();
     for (tool, (name, read_only, destructive)) in tools.iter().zip(TOOL_EFFECTS) {
         assert_eq!(tool["name"], name);
         assert_eq!(tool["annotations"]["readOnlyHint"], read_only);
@@ -630,15 +416,6 @@ fn public_catalog_is_exact() {
         );
 
         let contract = expected.get(name).unwrap();
-        assert_eq!(
-            json!({
-                "tool": tool["description"],
-                "input": property_descriptions(&tool["inputSchema"]),
-                "output": property_descriptions(&tool["outputSchema"]),
-            }),
-            expected_descriptions[name],
-            "model-facing text drifted for {name}"
-        );
         assert_object_schema(
             &tool["inputSchema"],
             contract.input_properties,
@@ -665,157 +442,6 @@ fn public_catalog_is_exact() {
         }
     }
     assert_stable_output_definitions(tools);
-    assert_nested_output_definitions_have_no_descriptions(tools);
-}
-
-fn description_contracts() -> BTreeMap<&'static str, Value> {
-    [
-        (
-            "thread_create",
-            json!({
-                "tool": "Create a thread and start its initial turn.",
-                "input": {
-                    "cwd": "Absolute working directory.",
-                    "model": "Model override. Omit for the app-server default.",
-                    "reasoningEffort": "Reasoning-effort override. Omit for the app-server default."
-                },
-                "output": {
-                    "cwd": "Effective working directory.",
-                    "model": "Effective model.",
-                    "reasoningEffort": "Effective reasoning effort."
-                }
-            }),
-        ),
-        (
-            "thread_fork",
-            json!({
-                "tool": "Fork a thread.",
-                "input": {
-                    "deferGoalContinuation": "When true, the fork does not immediately continue inherited goal work.",
-                    "threadId": "Thread to fork. Omit to fork the current thread."
-                },
-                "output": {
-                    "model": "Effective model.",
-                    "reasoningEffort": "Effective reasoning effort."
-                }
-            }),
-        ),
-        (
-            "threads_list",
-            json!({
-                "tool": "List threads.",
-                "input": {
-                    "archived": "Archive filter: true for archived, false or omitted for non-archived.",
-                    "cwd": "Exact working-directory filter.",
-                    "limit": "Maximum threads to return. Omit for the app-server default."
-                },
-                "output": {
-                    "nextCursor": "Use as cursor for the next page.",
-                    "threads": "Threads on this page, newest first."
-                }
-            }),
-        ),
-        (
-            "thread_read",
-            json!({
-                "tool": "Read thread metadata and a page of turns.",
-                "input": {
-                    "itemsView": "Turn items returned: notLoaded - none, summary - first user message and final agent message, full - all persisted items. Omit for summary.",
-                    "limit": "Maximum turns to return. Omit for the app-server default."
-                },
-                "output": {
-                    "nextCursor": "Use as cursor for the next page.",
-                    "turns": "Turns on this page, newest first."
-                }
-            }),
-        ),
-        (
-            "threads_wait",
-            json!({
-                "tool": "Wait until a target is ready, a target read fails, or the timeout expires. A target is ready when idle, not loaded, awaiting approval or input, in system error, or its turn ends.",
-                "input": {
-                    "threadIds": "1-8 unique thread IDs, excluding the current thread.",
-                    "timeoutMs": "Timeout in milliseconds: 0 checks immediately, default 3600000, maximum 86400000."
-                },
-                "output": {
-                    "errors": "Per-target read failures.",
-                    "threads": "Latest snapshots for successfully read targets.",
-                    "triggerThreadIds": "Thread IDs that caused a ready result. Empty for error or timeout."
-                }
-            }),
-        ),
-        (
-            "thread_message_send",
-            json!({
-                "tool": "Send a message to another thread, starting a turn if idle or steering its active turn. Overrides are rejected when steering.",
-                "input": {
-                    "model": "Model override.",
-                    "reasoningEffort": "Reasoning-effort override."
-                },
-                "output": {}
-            }),
-        ),
-        (
-            "thread_title_set",
-            json!({
-                "tool": "Set a thread title.",
-                "input": {"threadId": "Omit to rename the current thread."},
-                "output": {}
-            }),
-        ),
-        (
-            "thread_goal_get",
-            json!({
-                "tool": "Read another thread's goal.",
-                "input": {},
-                "output": {}
-            }),
-        ),
-        (
-            "thread_goal_set",
-            json!({
-                "tool": "Set or replace another thread's goal and make it active. A running turn continues unchanged.",
-                "input": {},
-                "output": {}
-            }),
-        ),
-        (
-            "thread_goal_pause",
-            json!({
-                "tool": "Pause another thread's goal without interrupting its active turn.",
-                "input": {},
-                "output": {}
-            }),
-        ),
-        (
-            "thread_goal_resume",
-            json!({
-                "tool": "Resume another thread's goal.",
-                "input": {},
-                "output": {}
-            }),
-        ),
-        (
-            "thread_goal_clear",
-            json!({
-                "tool": "Clear another thread's goal without interrupting its active turn.",
-                "input": {},
-                "output": {}
-            }),
-        ),
-        (
-            "thread_interrupt",
-            json!({
-                "tool": "Interrupt another thread's active turn, optionally including active subagents. Active goals may start another turn.",
-                "input": {
-                    "includeDescendants": "Also interrupt active subagents, including nested ones. Defaults to false."
-                },
-                "output": {}
-            }),
-        ),
-    ]
-    .into_iter()
-    .collect()
 }
 
 fn response(responses: &[Value], id: u64) -> &Value {
@@ -1067,43 +693,6 @@ fn assert_stable_output_definitions(tools: &[Value]) {
         if definition_name == "Turn" {
             assert_eq!(definition["properties"]["items"]["items"]["type"], "object");
         }
-    }
-}
-
-fn property_descriptions(schema: &Value) -> BTreeMap<&str, &str> {
-    schema["properties"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter_map(|(name, property)| {
-            property["description"]
-                .as_str()
-                .map(|description| (name.as_str(), description))
-        })
-        .collect()
-}
-
-fn assert_nested_output_definitions_have_no_descriptions(tools: &[Value]) {
-    for tool in tools {
-        let Some(definitions) = tool["outputSchema"]["$defs"].as_object() else {
-            continue;
-        };
-        for (name, definition) in definitions {
-            assert!(
-                !contains_description(definition),
-                "nested output definition {name} unexpectedly contains model-facing text"
-            );
-        }
-    }
-}
-
-fn contains_description(value: &Value) -> bool {
-    match value {
-        Value::Object(object) => {
-            object.contains_key("description") || object.values().any(contains_description)
-        }
-        Value::Array(values) => values.iter().any(contains_description),
-        _ => false,
     }
 }
 

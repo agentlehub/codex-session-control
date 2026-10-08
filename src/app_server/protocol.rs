@@ -237,27 +237,7 @@ fn malformed_native(stage: &'static str) -> ToolErrorData {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct ProtocolFixture {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "embedded contract field is read by tests")
-    )]
-    pub(super) codex_version: String,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "embedded contract field is read by tests")
-    )]
-    pub(super) schema_sha256: String,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "embedded contract field is read by tests")
-    )]
-    pub(super) successful_exemplars: BTreeMap<String, Value>,
     pub(super) error_exemplars: BTreeMap<String, Value>,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "embedded contract field is read by tests")
-    )]
-    pub(super) turns_newest_first: bool,
 }
 
 pub(super) fn protocol_fixture() -> &'static ProtocolFixture {

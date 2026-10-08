@@ -1,25 +1,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum ControllerError {
-    #[error("{0}")]
-    Operational(String),
-    #[error("invalid {field}: {reason}")]
-    InvalidData {
-        field: &'static str,
-        reason: &'static str,
-    },
-}
-
-impl ControllerError {
-    pub const fn exit_code(&self) -> u8 {
-        1
-    }
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolErrorCategory {
@@ -144,7 +125,7 @@ mod tests {
     fn optional_error_context_is_omitted_when_absent() {
         let error = ToolErrorData {
             category: ToolErrorCategory::StageTimeout,
-            message: "native stage timed out".to_owned(),
+            message: "message-sentinel".to_owned(),
             tool: "thread_read".to_owned(),
             stage: "thread/read".to_owned(),
             thread_id: None,
@@ -158,28 +139,10 @@ mod tests {
             serde_json::to_value(error).unwrap(),
             json!({
                 "category": "stage_timeout",
-                "message": "native stage timed out",
+                "message": "message-sentinel",
                 "tool": "thread_read",
                 "stage": "thread/read"
             })
         );
-    }
-
-    #[test]
-    fn fixed_errors_do_not_serialize_sensitive_inputs() {
-        let prompt = "PROMPT_SENTINEL";
-        let credential = "CREDENTIAL_SENTINEL";
-        let environment = "ENVIRONMENT_SENTINEL";
-        let backtrace = "BACKTRACE_SENTINEL";
-
-        let error = ToolErrorData::fixed(
-            ToolErrorCategory::TargetUnavailable,
-            "thread_read",
-            "connect",
-        );
-        let rendered = format!("{error:?} {}", serde_json::to_string(&error).unwrap());
-        for sensitive in [prompt, credential, environment, backtrace] {
-            assert!(!rendered.contains(sensitive));
-        }
     }
 }

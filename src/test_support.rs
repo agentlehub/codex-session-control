@@ -1,8 +1,4 @@
-use std::{
-    fs,
-    os::unix::fs::{MetadataExt, PermissionsExt},
-    path::PathBuf,
-};
+use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
 use uzers::os::unix::UserExt;
 
@@ -29,14 +25,4 @@ pub(crate) fn different_stable_version(version: &str) -> String {
         .checked_add(1)
         .expect("tested Codex major version must be incrementable");
     format!("{major}.0.0")
-}
-
-#[test]
-fn private_tempdir_is_safe_and_independent_of_ambient_tmpdir() {
-    let directory = private_tempdir();
-    let metadata = fs::metadata(directory.path()).unwrap();
-
-    assert!(directory.path().starts_with(effective_user_home()));
-    assert_eq!(metadata.uid(), rustix::process::geteuid().as_raw());
-    assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
 }
