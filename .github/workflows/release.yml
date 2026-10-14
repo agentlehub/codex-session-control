@@ -86,7 +86,7 @@ jobs:
             artifact/codex-session-control-x86_64-unknown-linux-gnu
 
       - name: Upload the immutable x86-64 binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: binary-x86-${{ github.sha }}
           path: artifact/codex-session-control-x86_64-unknown-linux-gnu
@@ -126,7 +126,7 @@ jobs:
             artifact/codex-session-control-aarch64-unknown-linux-gnu
 
       - name: Upload the immutable ARM64 binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: binary-arm64-${{ github.sha }}
           path: artifact/codex-session-control-aarch64-unknown-linux-gnu
@@ -191,7 +191,7 @@ jobs:
           grep -q 'validated release bundle:' "$RUNNER_TEMP/release-assets.log"
 
       - name: Upload the immutable release bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-bundle-${{ github.sha }}
           path: release
